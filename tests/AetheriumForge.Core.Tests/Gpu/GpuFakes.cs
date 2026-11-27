@@ -91,6 +91,18 @@ internal sealed class SimulatedGpu : IGpuAdapterProvider
     /// </summary>
     public Func<int, ulong> TransientBytes { get; set; } = _ => 0;
 
+    /// <summary>
+    /// Gets or sets a value indicating whether a runner keeps the buffers of every input size it has run (DirectML's allocator), so
+    /// its usage is the sum of <see cref="MemoryCurve"/> over those sizes. When <see langword="false"/> it keeps only the largest.
+    /// </summary>
+    public bool RetainsEveryInputSize { get; set; }
+
+    /// <summary>
+    /// Gets or sets the duration multiplier of a runner's first run at a new input size, by the bytes the runner already holds for other
+    /// sizes (shader compilation and allocating next to retained buffers). Later runs at that size are steady.
+    /// </summary>
+    public Func<ulong, double> FirstRunAtNewSizeScale { get; set; } = _ => 1;
+
     public ulong CurrentUsage
     {
         get
@@ -199,6 +211,7 @@ internal sealed class SimulatedGpu : IGpuAdapterProvider
 /// </summary>
 internal sealed class SimulatedRunner(SimulatedGpu gpu, string precision, int index) : IModelRunner
 {
+    private readonly HashSet<int> _sizes = [];
     private ulong _allocated;
 
     public int Scale => 4;
@@ -222,8 +235,19 @@ internal sealed class SimulatedRunner(SimulatedGpu gpu, string precision, int in
                 throw SimulatedGpu.OutOfMemoryError();
             }
 
+            var scale = 1.0;
             var needed = gpu.MemoryCurve(tile.Width);
-            if (needed > _allocated)
+            if (_sizes.Add(tile.Width))
+            {
+                scale = gpu.FirstRunAtNewSizeScale(_allocated);
+                if (gpu.RetainsEveryInputSize)
+                {
+                    gpu.Allocate(needed);
+                    _allocated += needed;
+                }
+            }
+
+            if (!gpu.RetainsEveryInputSize && needed > _allocated)
             {
                 gpu.Allocate(needed - _allocated);
                 _allocated = needed;
@@ -237,7 +261,7 @@ internal sealed class SimulatedRunner(SimulatedGpu gpu, string precision, int in
                 gpu.Free(transient);
             }
 
-            gpu.Time.Advance(gpu.Duration(precision, tile.Width) * gpu.DurationScale(index));
+            gpu.Time.Advance(gpu.Duration(precision, tile.Width) * gpu.DurationScale(index) * scale);
             return new PlanarImage(tile.Channels, 1, 1);
         }
         finally

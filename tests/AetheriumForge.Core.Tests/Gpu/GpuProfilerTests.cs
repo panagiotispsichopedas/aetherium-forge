@@ -568,6 +568,54 @@ public sealed class GpuProfilerTests
     }
 
     [Fact]
+    public async Task CalibrateAsync_RunnerRetainsBuffersOfEverySize_ProbesEachTileOnFreshRunner()
+    {
+        // Arrange: the GTX 1080 / realesrgan-x4plus curve measured through DXGI. DirectML keeps the buffers of every input size a session
+        // has run (MiB per size: 240 at 112, 1474 up to 304, 3010 up to 496, 6147 at 560), and a first run at a new size is slower the more
+        // the session already holds. Reusing the 256 probe's runner for 384 made that run 2.1x slower than the reference, so 384 was
+        // rejected and calibration settled on 320 (or 256); on a fresh runner every size up to 448 fits the 80 % allowance.
+        const ulong MiB = 1UL << 20;
+        var gpu = new SimulatedGpu
+        {
+            Budget = 7291 * MiB,
+            BaseUsage = 0,
+            WeightBytes = 79 * MiB,
+            RetainsEveryInputSize = true,
+            MemoryCurve = side => side switch
+            {
+                <= 112 => 240 * MiB,
+                <= 304 => 1474 * MiB,
+                <= 496 => 3010 * MiB,
+                _ => 6147 * MiB,
+            },
+            Duration = (_, side) => TimeSpan.FromTicks(54L * side * side),
+            FirstRunAtNewSizeScale = held => 1.3 + ((double)held / GiB / 2),
+        };
+        var profiler = gpu.CreateProfiler();
+
+        // Act
+        var profile = await profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32], Options(), null, Ct);
+
+        // Assert
+        Assert.Equal(448, profile.TileSize);
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_SlowFirstRunAtNewSize_ConfirmsWithWarmRun()
+    {
+        // Arrange: every first run at a new size is 3 times slower (shader compilation), later runs are steady.
+        var gpu = new SimulatedGpu { FirstRunAtNewSizeScale = _ => 3 };
+        var expected = ExpectedMemoryTile(gpu);
+        var profiler = gpu.CreateProfiler();
+
+        // Act
+        var profile = await profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32], Options(), null, Ct);
+
+        // Assert
+        Assert.Equal(expected, profile.TileSize);
+    }
+
+    [Fact]
     public async Task CalibrateAsync_SmallMemoryCurve_ClampsToMaxTile()
     {
         // Arrange
