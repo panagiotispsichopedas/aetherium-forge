@@ -390,7 +390,12 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private async Task ResetToDefaultsAsync()
     {
-        if (await _services.ConfirmAsync("Reset rules", "Replace the groups, exclusions and minimum size with the defaults? Nothing is saved until you apply.").ConfigureAwait(true))
+        var rows = _rows;
+        int changed = await Task.Run(() => RulesApplier.CountGroupChanges(rows, ForgeRules.Default)).ConfigureAwait(true);
+        string impact = rows.Count == 0
+            ? string.Empty
+            : $" {changed.ToString("N0", CultureInfo.CurrentCulture)} of {rows.Count.ToString("N0", CultureInfo.CurrentCulture)} textures would change group.";
+        if (await _services.ConfirmAsync("Reset rules", $"Replace the groups, exclusions and minimum size with the defaults?{impact} Nothing is saved until you apply.").ConfigureAwait(true))
         {
             Populate(ForgeRules.Default);
             StatusMessage = "Defaults loaded; apply to save them.";

@@ -689,4 +689,20 @@ public sealed class RulesViewModelTests : IAsyncLifetime
         // Assert
         Assert.Equal(2 * 0.262144 * 10.0, _vm.Preview!.EstimatedSeconds!.Value, 6);
     }
+
+    [Fact]
+    public async Task ResetToDefaults_RowsWouldChangeGroup_ConfirmationShowsCount()
+    {
+        // Arrange: rename the catch-all, so its row would change group back to "Large".
+        var rules = ForgeRules.Default with { Groups = [ForgeRules.Default.Groups[0], ForgeRules.Default.Groups[1] with { Name = "Everything" }] };
+        var rock = await JobAsync(RockPath);
+        await _store.ApplyRuleChangesAsync([new JobRuleChange(rock.Id, rock.Path, JobState.Queued, JobState.Queued, "Everything", 2048, "realesrgan-x4plus", null)], Ct);
+        await CreateViewModelAsync(rules);
+
+        // Act
+        await _vm.ResetToDefaultsCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal(["Replace the groups, exclusions and minimum size with the defaults? 1 of 2 textures would change group. Nothing is saved until you apply."], _services.Questions);
+    }
 }

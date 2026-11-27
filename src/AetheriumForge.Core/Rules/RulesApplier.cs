@@ -122,6 +122,40 @@ public static class RulesApplier
     }
 
     /// <summary>
+    /// Counts the rows whose group would change under <paramref name="rules"/> (for example before adopting the default groups). Rows skipped
+    /// for a reason the rules do not decide are not counted.
+    /// </summary>
+    /// <param name="jobs">The project's job rows.</param>
+    /// <param name="rules">The candidate rules.</param>
+    /// <param name="ct">Cancels the evaluation.</param>
+    /// <returns>The number of rows whose group name (compared case-insensitively) would differ.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="jobs"/> or <paramref name="rules"/> is <see langword="null"/>.</exception>
+    public static int CountGroupChanges(IEnumerable<JobRecord> jobs, ForgeRules rules, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(jobs);
+        ArgumentNullException.ThrowIfNull(rules);
+
+        var evaluator = new RuleEvaluator(rules);
+        int changed = 0;
+        foreach (JobRecord job in jobs)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (job.State == JobState.Skipped && !IsRuleSkip(job.Error))
+            {
+                continue;
+            }
+
+            var header = new DdsHeader(job.SourceWidth, job.SourceHeight, 1, string.Empty, null, IsCubemap: false);
+            if (!string.Equals(evaluator.Evaluate(job.Path, header).Group, job.Group, StringComparison.OrdinalIgnoreCase))
+            {
+                changed++;
+            }
+        }
+
+        return changed;
+    }
+
+    /// <summary>
     /// Returns a <see cref="RulesPreviewOptions.DoneLookDiffers"/> comparison against the rules the finished rows were made with:
     /// a finished row's look differs when the new group's normal strength or look differs from its previous group's (matched by name,
     /// case-insensitively). A row whose previous group is unknown counts as different.

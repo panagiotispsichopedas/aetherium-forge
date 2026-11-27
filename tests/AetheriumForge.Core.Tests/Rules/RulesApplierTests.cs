@@ -362,4 +362,22 @@ public sealed class RulesApplierTests
         // Assert
         Assert.Equal("Group names must be unique: 'Clutter' is used more than once.", error);
     }
+
+    [Fact]
+    public void CountGroupChanges_MixedRows_CountsRowsWithANewGroup()
+    {
+        // Arrange: under _rules, a.dds stays Clutter, b.dds moves from "Old" to Large, and a non-rule skip is ignored.
+        JobRecord[] jobs =
+        [
+            Job(1, @"textures\clutter\a.dds", group: "clutter"),
+            Job(2, @"textures\x\b.dds", group: "Old"),
+            Job(3, @"textures\x\c.dds", state: JobState.Skipped, group: "Old", error: JobStore.ProvidedByModError),
+        ];
+
+        // Act
+        var changed = RulesApplier.CountGroupChanges(jobs, _rules, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal(1, changed);
+    }
 }
