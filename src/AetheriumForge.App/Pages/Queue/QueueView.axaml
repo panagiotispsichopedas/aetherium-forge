@@ -78,16 +78,16 @@
                 GridLinesVisibility="Horizontal"
                 RowHeight="26">
         <DataGrid.Columns>
-          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Path" Binding="{Binding Path}" SortMemberPath="Path" Width="3*" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Path" Binding="{Binding Path}" SortMemberPath="Path" Width="440" />
           <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Kind" Binding="{Binding Kind}" SortMemberPath="Kind" Width="90" />
           <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Group" Binding="{Binding Group}" SortMemberPath="Group" Width="110" />
-          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Source" Binding="{Binding Source}" SortMemberPath="Source" Width="100" />
-          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Target" Binding="{Binding Target}" SortMemberPath="Target" Width="80" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Source" Binding="{Binding Source}" SortMemberPath="Source" Width="120" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Target" Binding="{Binding Target}" SortMemberPath="Target" Width="90" />
           <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Model" Binding="{Binding Model}" SortMemberPath="Model" Width="150" />
-          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="State" Binding="{Binding State}" SortMemberPath="State" Width="85" />
-          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Attempts" Binding="{Binding Attempts}" SortMemberPath="Attempts" Width="85" />
-          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Time (s)" Binding="{Binding Time}" SortMemberPath="Seconds" Width="80" />
-          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Error" Binding="{Binding Error}" SortMemberPath="Error" Width="2*" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="State" Binding="{Binding State}" SortMemberPath="State" Width="95" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Attempts" Binding="{Binding Attempts}" SortMemberPath="Attempts" Width="105" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Time (s)" Binding="{Binding Time}" SortMemberPath="Seconds" Width="100" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Error" Binding="{Binding Error}" SortMemberPath="Error" Width="320" />
         </DataGrid.Columns>
       </DataGrid>
 
