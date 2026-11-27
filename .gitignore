@@ -1,0 +1,89 @@
+# ---------------------------------------------------------------
+# Aetherium Forge
+# ---------------------------------------------------------------
+
+# Third-party binaries fetched by script (see IMPLEMENTATION_GUIDE.md §3)
+/tools/*
+!/tools/*.ps1
+!/tools/*.py
+!/tools/README.md
+
+# ONNX models and sidecars (large, separately licensed)
+/models/
+*.onnx
+*.pth
+
+# Game assets and generated output — never commit Bethesda or mod content
+*.dds
+*.bsa
+*.ba2
+*.esp
+*.esm
+*.esl
+/work/
+/output/
+/projects/
+*.forge.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+*.log
+
+# Local secrets / machine-specific settings
+.env
+.env.*
+appsettings.*.local.json
+*.user
+.claude/settings.local.json
+
+# ---------------------------------------------------------------
+# .NET / Visual Studio / Rider
+# ---------------------------------------------------------------
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa]rtifacts/
+[Pp]ublish/
+*.nupkg
+*.snupkg
+.vs/
+.idea/
+*.suo
+*.userosscache
+*.sln.docstates
+*.rsuser
+_ReSharper*/
+*.DotSettings.user
+TestResults/
+[Tt]est[Rr]esult*/
+coverage*.json
+coverage*.xml
+*.coverage
+*.coveragexml
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Python helper scripts (tools/convert_model.py)
+__pycache__/
+*.pyc
+.venv/
+venv/
