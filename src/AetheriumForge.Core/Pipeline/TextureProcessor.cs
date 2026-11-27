@@ -23,6 +23,8 @@ namespace AetheriumForge.Core.Pipeline;
 /// </remarks>
 public sealed partial class TextureProcessor
 {
+    private static readonly char[] PathSeparators = ['\\', '/'];
+
     private readonly ITextureSource _source;
     private readonly ITextureCodec _codec;
     private readonly Func<string, IUpscaler> _upscalers;
@@ -59,12 +61,34 @@ public sealed partial class TextureProcessor
     /// Gets the output path for a canonical resource path.
     /// </summary>
     /// <param name="canonicalPath">For example <c>textures\clutter\bucket01.dds</c>.</param>
-    /// <returns>The full output file path.</returns>
+    /// <returns>The full output file path, always inside the output folder.</returns>
+    /// <exception cref="ArgumentException"><paramref name="canonicalPath"/> is rooted, has a <c>..</c> segment, or does not resolve to a file inside the output folder.</exception>
     public string GetOutputPath(string canonicalPath)
     {
         ArgumentNullException.ThrowIfNull(canonicalPath);
 
-        return Path.Combine(_outputRoot, canonicalPath);
+        if (Path.IsPathRooted(canonicalPath))
+        {
+            throw new ArgumentException($"Texture path '{canonicalPath}' must be relative to the output folder.", nameof(canonicalPath));
+        }
+
+        foreach (var segment in canonicalPath.Split(PathSeparators))
+        {
+            if (segment == "..")
+            {
+                throw new ArgumentException($"Texture path '{canonicalPath}' must not contain '..' segments.", nameof(canonicalPath));
+            }
+        }
+
+        var root = Path.GetFullPath(_outputRoot);
+        var rootWithSeparator = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
+        var fullPath = Path.GetFullPath(Path.Combine(root, canonicalPath));
+        if (!fullPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase) || fullPath.Length == rootWithSeparator.Length)
+        {
+            throw new ArgumentException($"Texture path '{canonicalPath}' does not resolve to a file inside the output folder.", nameof(canonicalPath));
+        }
+
+        return fullPath;
     }
 
     /// <summary>
@@ -80,6 +104,9 @@ public sealed partial class TextureProcessor
         ArgumentNullException.ThrowIfNull(job);
         ArgumentOutOfRangeException.ThrowIfLessThan(job.TargetWidth, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(job.TargetHeight, 1);
+
+        // Validate the destination before reading anything: job.Path must stay inside the output folder.
+        var outputPath = GetOutputPath(job.Path);
 
         var work = Path.Combine(_workRoot, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
@@ -119,7 +146,6 @@ public sealed partial class TextureProcessor
 
             // 8–9. Encode and commit (the codec moves the finished file into place)
             await pause.WaitWhilePausedAsync(cancellationToken).ConfigureAwait(false);
-            var outputPath = GetOutputPath(job.Path);
             await _codec.EncodeBc7Async(output, outputPath, work, Texconv.IsSrgbFormat(job.SourceDxgiFormat), cancellationToken).ConfigureAwait(false);
             var encode = Lap(clock);
 

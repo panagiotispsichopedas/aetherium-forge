@@ -20,7 +20,8 @@ public sealed partial class TiledUpscaler : IUpscaler
     private readonly ILogger _logger;
     private readonly SemaphoreSlim _runnerGate = new(1, 1);
     private int _tileSize;
-    private bool _disposed;
+    private int _disposeState;
+    private volatile bool _disposed;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TiledUpscaler"/> class.
@@ -97,16 +98,30 @@ public sealed partial class TiledUpscaler : IUpscaler
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Waits for a model call in progress to finish before disposing the runner, so the runner is never disposed under a
+    /// running tile. Calls waiting for the gate then fail with <see cref="ObjectDisposedException"/>.
+    /// </remarks>
     public void Dispose()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposeState, 1) != 0)
         {
             return;
         }
 
         _disposed = true;
-        _runner.Dispose();
-        _runnerGate.Dispose();
+        _runnerGate.Wait();
+        try
+        {
+            _runner.Dispose();
+        }
+        finally
+        {
+            // Released, not disposed: queued WaitAsync callers must still wake up, see _disposed and throw. Disposing a
+            // SemaphoreSlim under pending waiters would leave them waiting forever, and it owns no unmanaged resource unless
+            // AvailableWaitHandle is read, which this class never does.
+            _runnerGate.Release();
+        }
     }
 
     private async Task<PlanarImage> UpscaleWithTileSizeAsync(PlanarImage rgb, int tileSize, IProgress<TileProgress>? progress, PauseToken pause, CancellationToken cancellationToken)
@@ -156,10 +171,15 @@ public sealed partial class TiledUpscaler : IUpscaler
 
     private async Task<PlanarImage> RunTileAsync(PlanarImage input, CancellationToken cancellationToken)
     {
+        // Cancellation is honoured before a tile starts, never during one: ONNX Run cannot be interrupted, so the gate is
+        // held until the model call returns. Otherwise a cancelled await would release the gate while Run is still on the
+        // device and let a second tile (or Dispose) run concurrently. Cancel latency is at most one tile.
         await _runnerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await Task.Run(() => _runner.Run(input), cancellationToken).ConfigureAwait(false);
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            cancellationToken.ThrowIfCancellationRequested();
+            return await Task.Run(() => _runner.Run(input), CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {

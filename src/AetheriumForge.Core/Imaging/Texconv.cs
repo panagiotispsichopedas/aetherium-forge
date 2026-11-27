@@ -265,11 +265,26 @@ public sealed partial class Texconv : ITextureCodec
     /// </summary>
     /// <param name="output">The process output.</param>
     /// <remarks>
-    /// texconv prints <c>FAILED</c> for every file it could not read or write. <c>ERROR:</c> lines alone (for example an invalid
+    /// texconv reports a failed file on its status line as <c>reading|writing &lt;path&gt; FAILED (80004005: message )</c>, or with a
+    /// stage tag such as <c>FAILED [resize] (...)</c>. Only that status token counts: texconv echoes paths, so a folder named
+    /// <c>FAILED</c> (echoed as <c>\FAILED\</c>) must not fail the run. <c>ERROR:</c> lines alone (for example an invalid
     /// <c>-gpu</c> index, after which texconv falls back to the CPU codec) are not failures.
     /// </remarks>
-    /// <returns><see langword="true"/> when the output contains <c>FAILED</c>.</returns>
-    internal static bool ReportsFailure(string output) => output.Contains("FAILED", StringComparison.Ordinal);
+    /// <returns><see langword="true"/> when a line carries the <c>FAILED (hresult</c> status token.</returns>
+    internal static bool ReportsFailure(string output)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+
+        foreach (var line in output.AsSpan().EnumerateLines())
+        {
+            if (FailureStatusPattern().IsMatch(line))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private async Task<string> EncodeOnceAsync(string input, string outputFolder, string encoded, bool srgb, bool useGpu, CancellationToken ct)
     {
@@ -304,6 +319,10 @@ public sealed partial class Texconv : ITextureCodec
 
     [GeneratedRegex(@"[Vv]ersion\s+(\d+(?:\.\d+)+)", RegexOptions.CultureInvariant)]
     private static partial Regex VersionPattern();
+
+    // A whitespace-delimited FAILED, an optional [stage] tag, then "(" and the eight-digit hexadecimal HRESULT.
+    [GeneratedRegex(@"(?:^|\s)FAILED(?:\s+\[[^\]]*\])?\s+\([0-9A-Fa-f]{8}[:)]", RegexOptions.CultureInvariant)]
+    private static partial Regex FailureStatusPattern();
 
     private void DeleteTempFolder(string folder)
     {
