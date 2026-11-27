@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
@@ -38,7 +39,7 @@ public interface IAppSettingsStore
 /// Loads and saves <see cref="AppSettings"/> as JSON. Saves are atomic (a temporary file replaced in one move); a missing, unreadable or corrupt file
 /// loads as the defaults and is logged, so a bad file never stops the app.
 /// </summary>
-public sealed partial class AppSettingsStore : IAppSettingsStore, IDisposable
+public sealed partial class AppSettingsStore : IAppSettingsStore
 {
     /// <summary>The settings file name.</summary>
     public const string FileName = "app-settings.json";
@@ -49,8 +50,11 @@ public sealed partial class AppSettingsStore : IAppSettingsStore, IDisposable
     /// <summary>How many times the final move is tried.</summary>
     private const int MoveAttempts = 8;
 
+    /// <summary>One lock per settings file for the whole process, so every store instance on the same file takes turns.</summary>
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Locks = new(StringComparer.OrdinalIgnoreCase);
+
     private readonly ILogger<AppSettingsStore> _logger;
-    private readonly SemaphoreSlim _lock = new(1, 1);
+    private readonly SemaphoreSlim _lock;
 
     /// <summary>Initializes a new instance of the <see cref="AppSettingsStore"/> class.</summary>
     /// <param name="filePath">The settings file.</param>
@@ -61,6 +65,7 @@ public sealed partial class AppSettingsStore : IAppSettingsStore, IDisposable
 
         FilePath = Path.GetFullPath(filePath);
         _logger = logger ?? NullLogger<AppSettingsStore>.Instance;
+        _lock = LockFor(FilePath);
     }
 
     /// <inheritdoc />
@@ -96,8 +101,10 @@ public sealed partial class AppSettingsStore : IAppSettingsStore, IDisposable
         }
     }
 
-    /// <inheritdoc />
-    public void Dispose() => _lock.Dispose();
+    /// <summary>Gets the process-wide lock of a settings file (tests).</summary>
+    /// <param name="fullPath">The full path of the file.</param>
+    /// <returns>The lock shared by every store on that file.</returns>
+    internal static SemaphoreSlim LockFor(string fullPath) => Locks.GetOrAdd(fullPath, _ => new SemaphoreSlim(1, 1));
 
     /// <summary>Tells whether a stored recent entry is a usable, fully qualified folder path.</summary>
     /// <param name="folder">The entry.</param>
@@ -187,8 +194,9 @@ public sealed partial class AppSettingsStore : IAppSettingsStore, IDisposable
     }
 
     /// <summary>
-    /// Replaces the settings file with <paramref name="temporary"/>. Another app instance replacing the same file at the same moment makes
-    /// Windows deny the move briefly, so it is retried a few times before the error is reported.
+    /// Replaces the settings file with <paramref name="temporary"/>. Store instances in this process take turns through the per-file lock;
+    /// another app instance (or a reader such as an antivirus scanner) holding the file at that moment makes Windows deny the move briefly,
+    /// so it is retried a bounded number of times before the error is reported.
     /// </summary>
     private async Task ReplaceWithRetryAsync(string temporary, CancellationToken cancellationToken)
     {

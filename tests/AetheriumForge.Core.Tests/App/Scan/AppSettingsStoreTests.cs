@@ -105,24 +105,89 @@ public sealed class AppSettingsStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task SaveAsync_ManyConcurrentSaves_LeaveOneValidFile()
+    public void Constructor_TwoStoresSameFileDifferentCase_ShareOneProcessWideLock()
     {
-        using var store = new AppSettingsStore(FilePath);
+        var first = new AppSettingsStore(FilePath);
+        var second = new AppSettingsStore(FilePath.ToUpperInvariant());
 
-        await Task.WhenAll(Enumerable.Range(0, 20).Select(i => store.SaveAsync(new AppSettings { RecentProjects = [$@"D:\P{i}"] }, Ct)));
-
-        Assert.Equal((1, 1), (Directory.GetFiles(_folder).Length, (await store.LoadAsync(Ct)).RecentProjects.Count));
+        Assert.Same(AppSettingsStore.LockFor(first.FilePath), AppSettingsStore.LockFor(second.FilePath));
     }
 
     [Fact]
-    public async Task SaveAsync_TwoStoresSameFile_BothSucceed()
+    public async Task SaveAsync_AnotherStoreHoldsTheFileLock_WaitsForIt()
     {
-        using var first = new AppSettingsStore(FilePath);
-        using var second = new AppSettingsStore(FilePath);
+        var store = new AppSettingsStore(FilePath);
+        var fileLock = AppSettingsStore.LockFor(new AppSettingsStore(FilePath).FilePath);
+        await fileLock.WaitAsync(Ct);
 
-        var error = await Record.ExceptionAsync(() => Task.WhenAll(
-            Enumerable.Range(0, 10).Select(i => (i % 2 == 0 ? first : second).SaveAsync(new AppSettings { RecentProjects = [$@"D:\P{i}"] }, Ct))));
+        var save = store.SaveAsync(new AppSettings { RecentProjects = [@"D:\P1"] }, Ct);
+        var completedWhileHeld = save.IsCompleted;
+        fileLock.Release();
+        await save;
 
-        Assert.Null(error);
+        Assert.False(completedWhileHeld);
+    }
+
+    [Fact]
+    public async Task SaveAsync_TargetHeldOpenUntilFirstRetry_RetriesAndSucceeds()
+    {
+        await File.WriteAllTextAsync(FilePath, "{}", Ct);
+        var logger = new RetryLogger();
+        var store = new AppSettingsStore(FilePath, logger);
+        Task save;
+        using (new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            save = store.SaveAsync(new AppSettings { RecentProjects = [@"D:\P1"] }, Ct);
+            await logger.FirstRetry.WaitAsync(Ct);
+        }
+
+        await save;
+
+        Assert.Equal([@"D:\P1"], (await store.LoadAsync(Ct)).RecentProjects);
+    }
+
+    [Fact]
+    public async Task SaveAsync_TargetHeldOpenThroughout_FailsAfterBoundedRetries()
+    {
+        await File.WriteAllTextAsync(FilePath, "{}", Ct);
+        var logger = new RetryLogger();
+        var store = new AppSettingsStore(FilePath, logger);
+        Exception? error;
+        using (new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            error = await Record.ExceptionAsync(() => store.SaveAsync(new AppSettings { RecentProjects = [@"D:\P1"] }, Ct));
+        }
+
+        Assert.Equal((true, 7), (error is IOException or UnauthorizedAccessException, logger.Retries));
+    }
+
+    /// <summary>Counts the store's move retries (event 3) and signals the first one.</summary>
+    private sealed class RetryLogger : Microsoft.Extensions.Logging.ILogger<AppSettingsStore>
+    {
+        private readonly TaskCompletionSource _firstRetry = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _retries;
+
+        public Task FirstRetry => _firstRetry.Task;
+
+        public int Retries => Volatile.Read(ref _retries);
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel,
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (eventId.Id == 3)
+            {
+                Interlocked.Increment(ref _retries);
+                _firstRetry.TrySetResult();
+            }
+        }
     }
 }
