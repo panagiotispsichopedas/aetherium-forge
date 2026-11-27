@@ -12,6 +12,8 @@
     <PackageVersion Include="Microsoft.Extensions.Options" Version="10.0.15" />
     <!-- DirectML builds of ONNX Runtime are in sustained engineering and lag the CPU package (1.24.x vs 1.32.x). -->
     <PackageVersion Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+    <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.15" />
+    <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="10.11.1" />
   </ItemGroup>
   <ItemGroup Label="Tests">
     <PackageVersion Include="xunit.v3" Version="4.0.3" />
