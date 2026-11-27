@@ -61,9 +61,10 @@ public sealed partial class CompareView : UserControl
 
     private void OnSliderDoubleTapped(object? sender, TappedEventArgs e)
     {
-        if (sender is Slider { Tag: string name } && Enum.TryParse<LookControl>(name, out var control) && ViewModel is { } viewModel)
+        // Double-clicking a slider is a shortcut for its reset button.
+        if (sender is Slider { DataContext: LookControlViewModel row } && row.ResetCommand.CanExecute(null))
         {
-            viewModel.Look.ResetControl(control);
+            row.ResetCommand.Execute(null);
             e.Handled = true;
         }
     }

@@ -3,8 +3,31 @@
              xmlns:compare="using:AetheriumForge.App.Pages.Compare"
              x:Class="AetheriumForge.App.Pages.Compare.CompareView"
              x:DataType="compare:CompareViewModel">
+  <UserControl.KeyBindings>
+    <KeyBinding Gesture="Ctrl+R" Command="{Binding RenderCommand}" />
+    <KeyBinding Gesture="Ctrl+Z" Command="{Binding UndoCommand}" />
+  </UserControl.KeyBindings>
   <UserControl.Resources>
     <compare:RgbaImageBitmapConverter x:Key="Bitmap" />
+    <!-- One Look panel slider row: label, inheritance, value, slider with a faint marker at the inherited value, and a reset button. -->
+    <DataTemplate x:Key="LookRow" x:DataType="compare:LookControlViewModel">
+      <Grid ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto,Auto" Margin="0,0,0,2"
+            ToolTip.Tip="{Binding Tooltip}" ToolTip.ShowOnDisabled="True">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Classes="label" Text="{Binding Label}" />
+          <TextBlock Text="{Binding InheritedFrom}" IsVisible="{Binding IsInherited}" FontSize="11" FontStyle="Italic" Opacity="0.5" VerticalAlignment="Center" />
+        </StackPanel>
+        <TextBlock Grid.Column="1" Classes="value" Text="{Binding ValueText}" />
+        <Panel Grid.Row="1" Grid.ColumnSpan="2">
+          <Slider Minimum="{Binding Minimum}" Maximum="{Binding Maximum}" Value="{Binding InheritedValue, Mode=OneWay}" IsVisible="{Binding IsSetHere}"
+                  IsHitTestVisible="False" Focusable="False" Opacity="0.3" ToolTip.Tip="{Binding InheritedText}" />
+          <Slider Minimum="{Binding Minimum}" Maximum="{Binding Maximum}" SmallChange="{Binding Step}" Value="{Binding Value}"
+                  IsEnabled="{Binding IsApplicable}" AutomationProperties.Name="{Binding Label}" DoubleTapped="OnSliderDoubleTapped" />
+        </Panel>
+        <Button Grid.Row="1" Grid.Column="2" Content="↺" Command="{Binding ResetCommand}" AutomationProperties.Name="{Binding ResetName}"
+                ToolTip.Tip="{Binding ResetName}" Padding="6,2" Margin="4,0,0,0" VerticalAlignment="Center" />
+      </Grid>
+    </DataTemplate>
   </UserControl.Resources>
   <UserControl.Styles>
     <Style Selector="TextBlock.section">
@@ -90,7 +113,15 @@
         <TextBlock Grid.Column="4" Text="{Binding ZoomText}" VerticalAlignment="Center" Margin="8,0" MinWidth="72" Opacity="0.7" />
         <Slider Grid.Column="5" Minimum="0" Maximum="1" Value="{Binding Split}" Margin="8,0" VerticalAlignment="Center"
                 ToolTip.Tip="Split between before (left) and after (right); you can also drag the line" />
-        <TextBlock Grid.Column="6" Text="draft" IsVisible="{Binding IsDraft}" VerticalAlignment="Center" Opacity="0.6" FontStyle="Italic" />
+        <StackPanel Grid.Column="6" Orientation="Horizontal" Spacing="4">
+          <Border IsVisible="{Binding IsRenderPending}" Background="#33F5A524" CornerRadius="3" Padding="6,2" VerticalAlignment="Center">
+            <TextBlock Text="Preview out of date" FontSize="12" />
+          </Border>
+          <Button Content="Render" Command="{Binding RenderCommand}" IsVisible="{Binding IsRenderPending}" Classes="accent"
+                  AutomationProperties.Name="Render" ToolTip.Tip="Apply the slider values to the preview (Ctrl+R)" />
+          <Button Content="Undo" Command="{Binding UndoCommand}" AutomationProperties.Name="Undo"
+                  ToolTip.Tip="Back to the slider values and render before the last Render (Ctrl+Z)" />
+        </StackPanel>
       </Grid>
       <ProgressBar DockPanel.Dock="Bottom" Minimum="0" Maximum="1" Value="{Binding LoadProgress}" IsVisible="{Binding IsLoading}" Height="4" Margin="0,4,0,0" />
 
@@ -141,12 +172,21 @@
 
     <!-- Right: Look panel -->
     <DockPanel Grid.Row="1" Grid.RowSpan="2" Grid.Column="2" Margin="12,0,0,0">
-      <Button DockPanel.Dock="Bottom" Content="Apply look to group" Command="{Binding ApplyToGroupCommand}" HorizontalAlignment="Stretch"
-              Classes="accent" Margin="0,8,0,0" ToolTip.Tip="Writes the look into the group's rules. You are asked before finished textures are re-queued." />
+      <!-- Action bar: unsaved indicator, Revert, Apply (primary, bottom-right). -->
+      <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto,Auto" Margin="0,8,0,0">
+        <TextBlock Text="Unsaved changes" IsVisible="{Binding Look.IsScopeDirty}" VerticalAlignment="Center" FontSize="12" Opacity="0.75" />
+        <Button Grid.Column="1" Content="Revert" Command="{Binding RevertCommand}" Margin="0,0,6,0" AutomationProperties.Name="Revert"
+                ToolTip.Tip="Discard the unsaved changes of this scope" />
+        <Button Grid.Column="2" Content="Apply" Command="{Binding ApplyCommand}" Classes="accent" AutomationProperties.Name="Apply"
+                ToolTip.Tip="Save this scope's look. You are asked before finished textures are re-queued." />
+      </Grid>
       <ScrollViewer>
         <StackPanel Spacing="2" DataContext="{Binding Look}" x:DataType="compare:LookPanelViewModel">
-          <TextBlock Classes="section" Text="Presets" Margin="0,0,0,4" />
-          <TextBlock Text="Double-click a slider to reset it." FontSize="11" Opacity="0.6" Margin="0,0,0,4" />
+          <TextBlock Classes="section" Text="Scope" Margin="0,0,0,4" />
+          <ComboBox ItemsSource="{Binding Scopes}" SelectedItem="{Binding Scope}" HorizontalAlignment="Stretch" AutomationProperties.Name="Scope"
+                    ToolTip.Tip="All: every group. Group: this group. Texture: only the selected texture. Each level stores only the controls it sets." />
+
+          <TextBlock Classes="section" Text="Presets" />
           <ItemsControl ItemsSource="{Binding $parent[UserControl].((compare:CompareViewModel)DataContext).Presets}">
             <ItemsControl.ItemsPanel>
               <ItemsPanelTemplate>
@@ -160,18 +200,10 @@
               </DataTemplate>
             </ItemsControl.ItemTemplate>
           </ItemsControl>
+          <TextBlock Text="Moving a slider does not render: press Render (Ctrl+R). ↺ resets a control to its inherited value." FontSize="11" Opacity="0.6" TextWrapping="Wrap" />
 
           <TextBlock Classes="section" Text="Detail" />
-          <StackPanel ToolTip.Tip="{Binding AiStrengthTooltip}" ToolTip.ShowOnDisabled="True">
-            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="AI strength" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding AiStrength, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0" Maximum="1" SmallChange="0.05" Value="{Binding AiStrength}" Tag="AiStrength" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="AI strength" IsEnabled="{Binding IsAiStrengthEnabled}" />
-          </StackPanel>
-          <StackPanel ToolTip.Tip="{Binding SharpenTooltip}" ToolTip.ShowOnDisabled="True">
-            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Sharpen" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding SharpenAmount, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0" Maximum="2" SmallChange="0.05" Value="{Binding SharpenAmount}" Tag="SharpenAmount" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Sharpen" IsEnabled="{Binding IsSharpenEnabled}" />
-            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Sharpen radius" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding SharpenRadius, StringFormat='{}{0:F1} px'}" /></Grid>
-            <Slider Minimum="0.3" Maximum="3" SmallChange="0.1" Value="{Binding SharpenRadius}" Tag="SharpenRadius" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Sharpen radius" IsEnabled="{Binding IsSharpenEnabled}" />
-          </StackPanel>
+          <ItemsControl ItemsSource="{Binding DetailControls}" ItemTemplate="{StaticResource LookRow}" />
           <!-- Denoise stays hidden until a denoise model exists: it has no look value to bind yet. -->
           <StackPanel IsVisible="{Binding IsDenoiseEnabled}" ToolTip.Tip="{Binding DenoiseTooltip}">
             <TextBlock Classes="label" Text="Denoise" />
@@ -179,28 +211,10 @@
           </StackPanel>
 
           <TextBlock Classes="section" Text="Colour" />
-          <StackPanel ToolTip.Tip="{Binding ColourTooltip}" ToolTip.ShowOnDisabled="True">
-            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Brightness" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Brightness, StringFormat='{}{0:+0.00;-0.00;0.00}'}" /></Grid>
-            <Slider Minimum="-1" Maximum="1" SmallChange="0.01" Value="{Binding Brightness}" Tag="Brightness" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Brightness" IsEnabled="{Binding IsColourEnabled}" />
-            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Contrast" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Contrast, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0.5" Maximum="2" SmallChange="0.01" Value="{Binding Contrast}" Tag="Contrast" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Contrast" IsEnabled="{Binding IsColourEnabled}" />
-            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Gamma" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Gamma, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0.5" Maximum="2" SmallChange="0.01" Value="{Binding Gamma}" Tag="Gamma" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Gamma" IsEnabled="{Binding IsColourEnabled}" />
-            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Saturation" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Saturation, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0" Maximum="2" SmallChange="0.01" Value="{Binding Saturation}" Tag="Saturation" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Saturation" IsEnabled="{Binding IsColourEnabled}" />
-            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Temperature" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Temperature, StringFormat='{}{0:+0.00;-0.00;0.00}'}" /></Grid>
-            <Slider Minimum="-1" Maximum="1" SmallChange="0.01" Value="{Binding Temperature}" Tag="Temperature" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Temperature" IsEnabled="{Binding IsColourEnabled}" />
-          </StackPanel>
+          <ItemsControl ItemsSource="{Binding ColourControls}" ItemTemplate="{StaticResource LookRow}" />
 
           <TextBlock Classes="section" Text="Surface" />
-          <StackPanel ToolTip.Tip="{Binding NormalStrengthTooltip}" ToolTip.ShowOnDisabled="True">
-            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Relief (how 3D)" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding NormalStrength, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0" Maximum="3" SmallChange="0.05" Value="{Binding NormalStrength}" Tag="NormalStrength" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Relief" IsEnabled="{Binding IsNormalStrengthEnabled}" />
-          </StackPanel>
-          <StackPanel ToolTip.Tip="{Binding SpecularTooltip}" ToolTip.ShowOnDisabled="True">
-            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Shininess (specular)" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding SpecularScale, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0" Maximum="2" SmallChange="0.05" Value="{Binding SpecularScale}" Tag="SpecularScale" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Shininess" IsEnabled="{Binding IsSpecularEnabled}" />
-          </StackPanel>
+          <ItemsControl ItemsSource="{Binding SurfaceControls}" ItemTemplate="{StaticResource LookRow}" />
         </StackPanel>
       </ScrollViewer>
     </DockPanel>

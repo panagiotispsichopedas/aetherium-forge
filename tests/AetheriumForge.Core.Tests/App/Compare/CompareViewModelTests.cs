@@ -52,7 +52,7 @@ public sealed class CompareViewModelTests : IDisposable
         look.LookChanged += (_, _) => raised++;
 
         // Act
-        look.Load(LookPresets.DeepRelief.Look, notify: true);
+        look.ApplyPreset(LookPresets.DeepRelief.Look);
 
         // Assert
         Assert.Equal(1, raised);
@@ -73,7 +73,7 @@ public sealed class CompareViewModelTests : IDisposable
         look.Kind = kind;
 
         // Assert
-        Assert.Equal((colour, sharpen, normal, specular), (look.IsColourEnabled, look.IsSharpenEnabled, look.IsNormalStrengthEnabled, look.IsSpecularEnabled));
+        Assert.Equal((colour, sharpen, normal, specular), (look[LookControl.Brightness].IsApplicable, look[LookControl.SharpenAmount].IsApplicable, look[LookControl.NormalStrength].IsApplicable, look[LookControl.SpecularScale].IsApplicable));
     }
 
     [Fact]
@@ -86,7 +86,7 @@ public sealed class CompareViewModelTests : IDisposable
         look.Kind = TextureKind.Parallax;
 
         // Assert
-        Assert.False(look.IsAiStrengthEnabled);
+        Assert.False(look[LookControl.AiStrength].IsApplicable);
     }
 
     [Fact]
@@ -103,22 +103,22 @@ public sealed class CompareViewModelTests : IDisposable
     }
 
     [Fact]
-    public void LookPanel_KindChanged_RaisesApplicabilityChange()
+    public void LookPanel_KindChanged_RaisesRowApplicabilityChange()
     {
         // Arrange
         var look = new LookPanelViewModel();
         var changed = new List<string?>();
-        look.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+        look[LookControl.NormalStrength].PropertyChanged += (_, e) => changed.Add(e.PropertyName);
 
         // Act
         look.Kind = TextureKind.Normal;
 
         // Assert
-        Assert.Contains(nameof(LookPanelViewModel.IsNormalStrengthEnabled), changed);
+        Assert.Contains(nameof(LookControlViewModel.IsApplicable), changed);
     }
 
     [Fact]
-    public async Task ApplyToGroupAsync_UserDeclines_SavesLookWithoutRequeue()
+    public async Task ApplyAsync_UserDeclines_SavesLookWithoutRequeue()
     {
         // Arrange
         _data.Jobs.Add(CompareFakeData.Job(1, "Clutter"));
@@ -128,14 +128,14 @@ public sealed class CompareViewModelTests : IDisposable
         viewModel.ApplyPreset(LookPresets.Crisp);
 
         // Act
-        await viewModel.ApplyToGroupAsync();
+        await viewModel.ApplyAsync();
 
         // Assert
         Assert.Equal((LookPresets.Crisp.Look, 1, 0), (_data.Rules.Groups[0].Look, _dialogs.Questions.Count, _data.Requeued.Count));
     }
 
     [Fact]
-    public async Task ApplyToGroupAsync_UserConfirms_RequeuesTheGroupsDoneJobs()
+    public async Task ApplyAsync_UserConfirms_RequeuesTheGroupsDoneJobs()
     {
         // Arrange
         _data.Jobs.Add(CompareFakeData.Job(1, "Clutter"));
@@ -147,14 +147,14 @@ public sealed class CompareViewModelTests : IDisposable
         viewModel.ApplyPreset(LookPresets.Soft);
 
         // Act
-        await viewModel.ApplyToGroupAsync();
+        await viewModel.ApplyAsync();
 
         // Assert
         Assert.Equal([1L], _data.Requeued);
     }
 
     [Fact]
-    public async Task ApplyToGroupAsync_Confirmation_AsksTheApplyToFinishedQuestion()
+    public async Task ApplyAsync_Confirmation_AsksTheApplyToFinishedQuestion()
     {
         // Arrange
         _data.Jobs.Add(CompareFakeData.Job(1, "Clutter"));
@@ -162,14 +162,14 @@ public sealed class CompareViewModelTests : IDisposable
         await viewModel.RefreshAsync();
 
         // Act
-        await viewModel.ApplyToGroupAsync();
+        await viewModel.ApplyAsync();
 
         // Assert
         Assert.StartsWith(CompareViewModel.ApplyToFinishedQuestion, _dialogs.Questions.Single(), StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task ApplyToGroupAsync_NoFinishedJobs_DoesNotAsk()
+    public async Task ApplyAsync_NoFinishedJobs_DoesNotAsk()
     {
         // Arrange
         _data.Jobs.Add(CompareFakeData.Job(1, "Clutter", JobState.Queued));
@@ -177,22 +177,22 @@ public sealed class CompareViewModelTests : IDisposable
         await viewModel.RefreshAsync();
 
         // Act
-        await viewModel.ApplyToGroupAsync();
+        await viewModel.ApplyAsync();
 
         // Assert
         Assert.Equal((1, 0), (_data.Saves, _dialogs.Questions.Count));
     }
 
     [Fact]
-    public async Task ApplyToGroupAsync_NormalStrength_AlsoWritesGroupAlias()
+    public async Task ApplyAsync_NormalStrength_AlsoWritesGroupAlias()
     {
         // Arrange
         var viewModel = ViewModel();
         await viewModel.RefreshAsync();
-        viewModel.Look.NormalStrength = 2.0;
+        viewModel.Look.SetValue(LookControl.NormalStrength, 2.0);
 
         // Act
-        await viewModel.ApplyToGroupAsync();
+        await viewModel.ApplyAsync();
 
         // Assert
         Assert.Equal(2.0, _data.Rules.Groups[0].NormalStrength);
@@ -208,7 +208,7 @@ public sealed class CompareViewModelTests : IDisposable
         await viewModel.RefreshAsync();
 
         // Assert
-        Assert.Equal(1.4, viewModel.Look.NormalStrength);
+        Assert.Equal(1.4, viewModel.Look[LookControl.NormalStrength].Value);
     }
 
     [Fact]

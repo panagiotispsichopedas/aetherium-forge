@@ -138,8 +138,19 @@ internal sealed class CompareFakeData : ICompareProjectData
     public Task<IReadOnlyList<JobRecord>> GetGroupJobsAsync(string group, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<JobRecord>>([.. Jobs.Where(job => job.Group == group && job.State != JobState.Skipped).OrderBy(job => job.Id)]);
 
-    public Task<IReadOnlyList<long>> FindDoneWithDifferentLookAsync(string group, LookSettings look, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<long>>([.. Jobs.Where(job => job.Group == group && job.State == JobState.Done).Select(job => job.Id)]);
+    public Dictionary<string, string> Values { get; } = new(StringComparer.Ordinal);
+
+    public Task<IReadOnlyList<JobRecord>> GetFinishedJobsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<JobRecord>>([.. Jobs.Where(job => job.State == JobState.Done).OrderBy(job => job.Id)]);
+
+    public Task<string?> GetProjectValueAsync(string key, CancellationToken cancellationToken) =>
+        Task.FromResult(Values.TryGetValue(key, out var value) ? value : null);
+
+    public Task SetProjectValueAsync(string key, string value, CancellationToken cancellationToken)
+    {
+        Values[key] = value;
+        return Task.CompletedTask;
+    }
 
     public Task<int> RequeueDoneAsync(IReadOnlyCollection<long> jobIds, CancellationToken cancellationToken)
     {

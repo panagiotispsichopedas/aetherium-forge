@@ -83,8 +83,26 @@ public static class LookControls
         [LookControl.Gamma] = new(LookControl.Gamma, "Gamma", 0.5, 2.0, 1.0, 0.01),
         [LookControl.Saturation] = new(LookControl.Saturation, "Saturation", 0.0, 2.0, 1.0, 0.01),
         [LookControl.Temperature] = new(LookControl.Temperature, "Temperature", -1.0, 1.0, 0.0, 0.01),
-        [LookControl.NormalStrength] = new(LookControl.NormalStrength, "Relief (normal strength)", 0.0, 3.0, 1.0, 0.05),
-        [LookControl.SpecularScale] = new(LookControl.SpecularScale, "Shininess (specular)", 0.0, 2.0, 1.0, 0.05),
+        [LookControl.NormalStrength] = new(LookControl.NormalStrength, "Relief", 0.0, 3.0, 1.0, 0.05),
+        [LookControl.SpecularScale] = new(LookControl.SpecularScale, "Shine", 0.0, 2.0, 1.0, 0.05),
+    };
+
+    /// <summary>Gets the controls that have a slider value, in display order (every control but Denoise).</summary>
+    public static IReadOnlyList<LookControl> Editable { get; } =
+    [
+        LookControl.AiStrength, LookControl.SharpenAmount, LookControl.SharpenRadius,
+        LookControl.Brightness, LookControl.Contrast, LookControl.Gamma, LookControl.Saturation, LookControl.Temperature,
+        LookControl.NormalStrength, LookControl.SpecularScale,
+    ];
+
+    /// <summary>Gets the Look panel section of a control.</summary>
+    /// <param name="control">The control.</param>
+    /// <returns>"Detail", "Colour" or "Surface".</returns>
+    public static string SectionOf(LookControl control) => control switch
+    {
+        LookControl.AiStrength or LookControl.SharpenAmount or LookControl.SharpenRadius or LookControl.Denoise => "Detail",
+        LookControl.NormalStrength or LookControl.SpecularScale => "Surface",
+        _ => "Colour",
     };
 
     /// <summary>Gets every control's range.</summary>

@@ -38,12 +38,23 @@ public interface ICompareProjectData
     /// <returns>The jobs, ordered by id.</returns>
     Task<IReadOnlyList<JobRecord>> GetGroupJobsAsync(string group, CancellationToken cancellationToken);
 
-    /// <summary>Gets the ids of the group's <see cref="JobState.Done"/> jobs whose look differs from <paramref name="look"/>.</summary>
-    /// <param name="group">The group name.</param>
-    /// <param name="look">The new look.</param>
+    /// <summary>Gets every <see cref="JobState.Done"/> job.</summary>
     /// <param name="cancellationToken">Cancels the read.</param>
-    /// <returns>The job ids.</returns>
-    Task<IReadOnlyList<long>> FindDoneWithDifferentLookAsync(string group, LookSettings look, CancellationToken cancellationToken);
+    /// <returns>The finished jobs, ordered by id.</returns>
+    Task<IReadOnlyList<JobRecord>> GetFinishedJobsAsync(CancellationToken cancellationToken);
+
+    /// <summary>Reads a project setting.</summary>
+    /// <param name="key">The key.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The value, or <see langword="null"/>.</returns>
+    Task<string?> GetProjectValueAsync(string key, CancellationToken cancellationToken);
+
+    /// <summary>Writes a project setting.</summary>
+    /// <param name="key">The key.</param>
+    /// <param name="value">The value.</param>
+    /// <param name="cancellationToken">Cancels the write.</param>
+    /// <returns>A task that completes when stored.</returns>
+    Task SetProjectValueAsync(string key, string value, CancellationToken cancellationToken);
 
     /// <summary>Returns <see cref="JobState.Done"/> jobs to <see cref="JobState.Queued"/>, then raises the session's jobs-changed event.</summary>
     /// <param name="jobIds">The job ids; jobs that are no longer Done are left alone.</param>

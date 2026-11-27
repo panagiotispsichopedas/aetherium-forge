@@ -89,16 +89,31 @@ public sealed class SessionCompareProjectData : ICompareProjectData
     }
 
     /// <inheritdoc />
-    /// <remarks>
-    /// TODO(M5 look hashes): use <c>JobStore.FindDoneWithDifferentLookAsync</c> once the Core look work records a look hash per job.
-    /// Until then every Done job of the group counts as different.
-    /// </remarks>
-    public async Task<IReadOnlyList<long>> FindDoneWithDifferentLookAsync(string group, LookSettings look, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<JobRecord>> GetFinishedJobsAsync(CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(group);
-        ArgumentNullException.ThrowIfNull(look);
-        var jobs = await GetGroupJobsAsync(group, cancellationToken).ConfigureAwait(false);
-        return [.. jobs.Where(job => job.State == JobState.Done).Select(job => job.Id)];
+        var (_, store) = Require();
+        var jobs = new List<JobRecord>();
+        await foreach (var job in store.GetJobsAsync(JobState.Done, cancellationToken).ConfigureAwait(false))
+        {
+            jobs.Add(job);
+        }
+
+        return [.. jobs.OrderBy(job => job.Id)];
+    }
+
+    /// <inheritdoc />
+    public Task<string?> GetProjectValueAsync(string key, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        return Require().Store.GetProjectValueAsync(key, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task SetProjectValueAsync(string key, string value, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(value);
+        return Require().Store.SetProjectValueAsync(key, value, cancellationToken);
     }
 
     /// <inheritdoc />

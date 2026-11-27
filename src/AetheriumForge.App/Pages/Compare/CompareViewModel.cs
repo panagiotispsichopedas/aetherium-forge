@@ -26,11 +26,14 @@ public sealed partial class CompareViewModel : ObservableObject
     /// <summary>The default number of random samples.</summary>
     public const int DefaultSampleCount = 10;
 
-    /// <summary>The question asked after a look is applied to a group with finished textures.</summary>
-    public const string ApplyToFinishedQuestion = "Apply to finished textures in this group?";
+    /// <summary>The start of the question asked after Apply when finished textures are affected ("Apply to N finished textures?").</summary>
+    public const string ApplyToFinishedQuestion = "Apply to";
+
+    /// <summary>How many affected file names the confirmation lists.</summary>
+    public const int AffectedListLimit = 8;
 
     /// <summary>The banner shown while a pipeline run is active.</summary>
-    public const string RunActiveReason = "A run is active. New GPU previews and rule changes (Apply look, Use model) are locked until it ends; cached previews still work.";
+    public const string RunActiveReason = "A run is active. New GPU previews and rule changes (Apply, Use model) are locked until it ends; cached previews still work.";
 
     private const int SearchLimit = 200;
     private const int ThumbnailSide = 128;
@@ -40,14 +43,15 @@ public sealed partial class CompareViewModel : ObservableObject
     private readonly ICompareProjectData _data;
     private readonly ICompareDialogs _dialogs;
     private readonly Random _random;
-    private readonly TimeProvider _time;
+    private readonly ILookScopeStore _looks;
+    private readonly Stack<(LookOverrides Overrides, PreviewRender Render)> _undo = new();
     private readonly ILogger<CompareViewModel> _logger;
     private readonly IForgeRunner? _runner;
     private readonly SynchronizationContext? _uiContext;
     private CancellationTokenSource? _loadCancellation;
-    private CancellationTokenSource? _fullRenderCancellation;
     private PreviewSample? _sample;
     private PreviewRender? _render;
+    private LookOverrides? _renderedOverrides;
     private ForgeRules? _rules;
 
     /// <summary>
@@ -57,7 +61,7 @@ public sealed partial class CompareViewModel : ObservableObject
     /// <param name="data">The project rules and jobs.</param>
     /// <param name="dialogs">Confirmation prompts.</param>
     /// <param name="random">Picks random samples; inject a seeded instance for deterministic picks.</param>
-    /// <param name="timeProvider">Clock for the full-resolution render delay.</param>
+    /// <param name="lookStore">Where scope looks are stored; defaults to <see cref="ProjectLookScopeStore"/> over <paramref name="data"/>.</param>
     /// <param name="logger">Logger; <see langword="null"/> disables logging.</param>
     /// <param name="runner">The pipeline runner, or <see langword="null"/> when none is registered; its state locks GPU previews and rule changes.</param>
     public CompareViewModel(
@@ -65,7 +69,7 @@ public sealed partial class CompareViewModel : ObservableObject
         ICompareProjectData data,
         ICompareDialogs dialogs,
         Random? random = null,
-        TimeProvider? timeProvider = null,
+        ILookScopeStore? lookStore = null,
         ILogger<CompareViewModel>? logger = null,
         IForgeRunner? runner = null)
     {
@@ -77,12 +81,24 @@ public sealed partial class CompareViewModel : ObservableObject
         _data = data;
         _dialogs = dialogs;
         _random = random ?? Random.Shared;
-        _time = timeProvider ?? TimeProvider.System;
+        _looks = lookStore ?? new ProjectLookScopeStore(data);
         _logger = logger ?? NullLogger<CompareViewModel>.Instance;
         _runner = runner;
         _uiContext = SynchronizationContext.Current;
 
-        Look.LookChanged += (_, _) => OnLookChanged();
+        Look.LookChanged += (_, _) => UpdateRenderState();
+        Look.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(LookPanelViewModel.Scope))
+            {
+                ClearUndo();
+            }
+            else if (e.PropertyName == nameof(LookPanelViewModel.IsScopeDirty))
+            {
+                ApplyCommand.NotifyCanExecuteChanged();
+                RevertCommand.NotifyCanExecuteChanged();
+            }
+        };
         _data.Changed += (_, _) => _ = RefreshAsync();
         if (runner is not null)
         {
@@ -214,7 +230,7 @@ public sealed partial class CompareViewModel : ObservableObject
     /// <summary>Gets or sets whether a pipeline run is active (any state but Idle).</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsGpuAvailable))]
-    [NotifyCanExecuteChangedFor(nameof(ApplyToGroupCommand), nameof(UseModelForGroupCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ApplyCommand), nameof(UseModelForGroupCommand))]
     public partial bool IsRunActive { get; set; }
 
     /// <summary>Gets whether an error is shown.</summary>
@@ -235,9 +251,16 @@ public sealed partial class CompareViewModel : ObservableObject
     [ObservableProperty]
     public partial double LoadProgress { get; set; }
 
-    /// <summary>Gets or sets whether the shown image is a downscaled draft.</summary>
+    /// <summary>Gets or sets whether the sliders differ from the shown render (the preview is out of date until Render).</summary>
     [ObservableProperty]
-    public partial bool IsDraft { get; set; }
+    [NotifyCanExecuteChangedFor(nameof(RenderCommand))]
+    public partial bool IsRenderPending { get; set; }
+
+    /// <summary>Gets whether Undo has a render to go back to.</summary>
+    public bool CanUndo => _undo.Count > 0;
+
+    /// <summary>Gets the undo depth (for tests and diagnostics).</summary>
+    public int UndoDepth => _undo.Count;
 
     /// <summary>Gets whether the previewed model differs from the group's model.</summary>
     public bool IsModelDifferentFromGroup => SelectedModel is not null && !string.Equals(SelectedModel, GroupModel, StringComparison.OrdinalIgnoreCase);
@@ -275,9 +298,6 @@ public sealed partial class CompareViewModel : ObservableObject
 
     /// <summary>Gets the zoom label.</summary>
     public string ZoomText => IsFitToView ? $"Fit ({DisplayScale * 100:F0}%)" : $"{Zoom}%";
-
-    /// <summary>Gets or sets the delay after the last slider change before the full-resolution render.</summary>
-    public TimeSpan FullRenderDelay { get; set; } = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
     /// Picks <paramref name="count"/> distinct jobs at random (a partial Fisher–Yates shuffle over the jobs in order). The same
@@ -344,9 +364,11 @@ public sealed partial class CompareViewModel : ObservableObject
         }
         else
         {
-            LoadGroupSettings();
+            LoadGroupModel();
         }
 
+        await LoadLayerAsync(LookScope.All);
+        await LoadLayerAsync(LookScope.Group);
         UpdateRunState();
     }
 
@@ -425,16 +447,28 @@ public sealed partial class CompareViewModel : ObservableObject
             return;
         }
 
-        Look.Load(preset.Look, notify: true);
-        Status = $"Preset {preset.Name}: {preset.Description}.";
+        Look.ApplyPreset(preset.Look);
+        Status = $"Preset {preset.Name} set at {ScopeName(Look.Scope)}: {preset.Description}. Render to see it.";
+    }
+
+    /// <summary>Gets the confirmation text for <paramref name="affected"/> finished textures.</summary>
+    /// <param name="affected">The affected finished jobs.</param>
+    /// <returns>The question, with the first file names.</returns>
+    public static string ApplyToFinishedMessage(IReadOnlyList<JobRecord> affected)
+    {
+        ArgumentNullException.ThrowIfNull(affected);
+        var names = affected.Take(AffectedListLimit).Select(job => $"  • {job.Path}");
+        var more = affected.Count > AffectedListLimit ? $"\n  …and {affected.Count - AffectedListLimit} more" : string.Empty;
+        return $"{ApplyToFinishedQuestion} {affected.Count} finished textures?\n\n{string.Join('\n', names)}{more}\n\nYes re-queues them with the new look. No keeps them; the look applies to textures forged from now on.";
     }
 
     /// <summary>
-    /// Writes the Look panel into the selected group's rules, then offers to re-queue the group's finished textures (default No).
+    /// Saves the edited scope's look (the rules for All and Group, the per-texture override for This texture), then lists the affected
+    /// finished textures and asks before re-queueing them (default No).
     /// </summary>
     /// <returns>A task that completes when done.</returns>
-    [RelayCommand(CanExecute = nameof(CanChangeRules))]
-    public async Task ApplyToGroupAsync()
+    [RelayCommand(CanExecute = nameof(CanApply))]
+    public async Task ApplyAsync()
     {
         UpdateRunState();
         if (IsRunActive)
@@ -443,46 +477,87 @@ public sealed partial class CompareViewModel : ObservableObject
             return;
         }
 
-        if (SelectedGroup is not { } groupName || !_data.HasProject)
+        if (!_data.HasProject)
         {
-            Status = _data.HasProject ? "Pick a group first." : PreviewEngine.NoProjectReason;
+            Status = PreviewEngine.NoProjectReason;
             return;
         }
 
-        var look = Look.ToSettings();
+        var scope = Look.Scope;
+        var group = SelectedGroup;
+        var path = SelectedSample?.Job.Path;
+        if (scope == LookScope.Group && group is null)
+        {
+            ShowError("Pick a group before applying a group look.");
+            return;
+        }
+
+        if (scope == LookScope.Texture && path is null)
+        {
+            ShowError("Pick a texture before applying a texture look.");
+            return;
+        }
+
+        var target = ScopeName(scope);
         try
         {
-            var rules = await _data.LoadRulesAsync(CancellationToken.None);
-            if (!TryReplaceGroup(rules, groupName, group => group with { Look = look, NormalStrength = look.NormalStrength }, out var updated))
+            await _looks.SaveAsync(scope, group, path, Look.CurrentOverrides, CancellationToken.None);
+            Look.MarkSaved(scope);
+            if (scope == LookScope.Group)
             {
-                Status = $"Group {groupName} is no longer in the rules.";
+                _rules = await _data.LoadRulesAsync(CancellationToken.None);
+            }
+
+            var affected = await _looks.FindAffectedFinishedAsync(scope, group, path, CancellationToken.None);
+            if (affected.Count == 0)
+            {
+                Status = $"Look saved for {target}.";
                 return;
             }
 
-            await _data.SaveRulesAsync(updated, CancellationToken.None);
-            _rules = updated;
-
-            var different = await _data.FindDoneWithDifferentLookAsync(groupName, look, CancellationToken.None);
-            if (different.Count == 0)
+            if (!await _dialogs.ConfirmAsync("Apply look", ApplyToFinishedMessage(affected)))
             {
-                Status = $"Look saved for {groupName}.";
+                Status = $"Look saved for {target}. Finished textures were kept.";
                 return;
             }
 
-            var message = $"{ApplyToFinishedQuestion}\n\n{different.Count} finished textures in {groupName} were made with a different look. Yes re-queues them; No keeps them and applies the look to new textures only.";
-            if (!await _dialogs.ConfirmAsync("Apply look", message))
-            {
-                Status = $"Look saved for {groupName}. Finished textures were kept.";
-                return;
-            }
-
-            var requeued = await _data.RequeueDoneAsync(different, CancellationToken.None);
-            Status = $"Look saved for {groupName}; {requeued} finished textures re-queued.";
+            var requeued = await _data.RequeueDoneAsync([.. affected.Select(job => job.Id)], CancellationToken.None);
+            Status = $"Look saved for {target}; {requeued} finished textures re-queued.";
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or Microsoft.Data.Sqlite.SqliteException or System.Text.Json.JsonException)
         {
-            ReportError($"Could not apply the look to {groupName}", ex);
+            ReportError($"Could not apply the look to {target}", ex);
         }
+    }
+
+    /// <summary>Discards the edited scope's unsaved changes.</summary>
+    [RelayCommand(CanExecute = nameof(CanRevert))]
+    public void Revert() => Look.Revert();
+
+    /// <summary>
+    /// Renders the current slider values onto the preview from the cached upscale. The previous values and their render go onto the
+    /// undo stack.
+    /// </summary>
+    /// <returns>A task that completes when the render is shown or superseded.</returns>
+    [RelayCommand(CanExecute = nameof(IsRenderPending))]
+    public Task RenderAsync() => RenderLookAsync(pushUndo: true);
+
+    /// <summary>Restores the slider values from before the last Render and shows that earlier render again (no re-render).</summary>
+    [RelayCommand(CanExecute = nameof(CanUndo))]
+    public void Undo()
+    {
+        if (!_undo.TryPop(out var entry))
+        {
+            return;
+        }
+
+        _render = entry.Render;
+        _renderedOverrides = entry.Overrides;
+        Look.RestoreOverrides(entry.Overrides);
+        UpdateImages();
+        UpdateRenderState();
+        RaiseUndoChanged();
+        Status = "Undid the last render.";
     }
 
     /// <summary>Makes the previewed model the selected group's model.</summary>
@@ -579,15 +654,12 @@ public sealed partial class CompareViewModel : ObservableObject
     /// <param name="offset">The offset in screen pixels.</param>
     public void SetSplitFromOffset(double offset) => Split = DisplayWidth <= 0 ? 0.5 : Math.Clamp(offset / DisplayWidth, 0.0, 1.0);
 
-    /// <summary>Renders the current look at full resolution now (also used by tests).</summary>
-    /// <returns>A task that completes when the render is shown or superseded.</returns>
-    public Task RenderNowAsync() => RenderAsync(draft: false);
-
     partial void OnSelectedGroupChanged(string? value)
     {
         SelectedStripSample = null;
         Samples.Clear();
-        LoadGroupSettings();
+        LoadGroupModel();
+        _ = LoadLayerAsync(LookScope.Group);
     }
 
     partial void OnSelectedModelChanged(string? value)
@@ -683,13 +755,42 @@ public sealed partial class CompareViewModel : ObservableObject
         PanY = Math.Clamp(PanY, -maxY, maxY);
     }
 
-    private void LoadGroupSettings()
+    private static string ScopeName(LookScope scope) => scope switch
+    {
+        LookScope.All => "All",
+        LookScope.Group => "this group",
+        _ => "this texture",
+    };
+
+    private void LoadGroupModel()
     {
         var group = _rules?.Groups.FirstOrDefault(rule => string.Equals(rule.Name, SelectedGroup, StringComparison.OrdinalIgnoreCase));
         GroupModel = group?.Model;
         SelectedModel = group?.Model;
-        var look = group?.Look ?? (group is null ? LookSettings.Neutral : LookSettings.Neutral with { NormalStrength = group.NormalStrength });
-        Look.Load(look, notify: _sample is not null);
+    }
+
+    private async Task LoadLayerAsync(LookScope scope)
+    {
+        if (!_data.HasProject)
+        {
+            return;
+        }
+
+        try
+        {
+            var overrides = await _looks.GetAsync(scope, SelectedGroup, SelectedSample?.Job.Path, CancellationToken.None);
+            Look.LoadLayer(scope, overrides);
+            if (scope == Look.Scope)
+            {
+                ClearUndo();
+            }
+
+            UpdateRenderState();
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or Microsoft.Data.Sqlite.SqliteException or System.Text.Json.JsonException)
+        {
+            ReportError($"Could not load the {ScopeName(scope)} look", ex);
+        }
     }
 
     private async Task LoadThumbnailsAsync(IReadOnlyList<CompareSampleViewModel> items)
@@ -715,9 +816,12 @@ public sealed partial class CompareViewModel : ObservableObject
         _engine.CancelRenders();
         _sample = null;
         _render = null;
+        ClearUndo();
         if (SelectedSample is not { } item)
         {
+            Look.LoadLayer(LookScope.Texture, LookOverrides.Empty);
             UpdateImages();
+            UpdateRenderState();
             return;
         }
 
@@ -729,6 +833,7 @@ public sealed partial class CompareViewModel : ObservableObject
         Look.UsesModel = request.UsesModel;
         IsLoading = true;
         LoadProgress = 0;
+        await LoadLayerAsync(LookScope.Texture);
         Status = request.UsesModel && !_engine.IsCached(request)
             ? $"Upscaling {item.Name} with {request.Model}…"
             : $"Loading {item.Name}…";
@@ -755,7 +860,7 @@ public sealed partial class CompareViewModel : ObservableObject
             item.Thumbnail ??= MakeThumbnail(sample.Source);
             UpdateImages();
             Status = $"{item.Name} · {item.SizeText} · {(sample.UsedModel ? request.Model : "Lanczos only")}";
-            await RenderAsync(draft: false);
+            await RenderLookAsync(pushUndo: false);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
@@ -774,53 +879,34 @@ public sealed partial class CompareViewModel : ObservableObject
         }
     }
 
-    private void OnLookChanged()
-    {
-        if (_sample is null)
-        {
-            return;
-        }
-
-        // A fast draft now, the full resolution once the slider rests.
-        _ = RenderAsync(draft: true);
-        _fullRenderCancellation?.Cancel();
-        var cancellation = new CancellationTokenSource();
-        _fullRenderCancellation = cancellation;
-        _ = RenderFullAfterDelayAsync(cancellation.Token);
-    }
-
-    private async Task RenderFullAfterDelayAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            await Task.Delay(FullRenderDelay, _time, cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            // A newer slider change restarted the delay.
-            return;
-        }
-
-        await RenderAsync(draft: false);
-    }
-
-    private async Task RenderAsync(bool draft)
+    private async Task RenderLookAsync(bool pushUndo)
     {
         if (_sample is not { } sample)
         {
             return;
         }
 
+        var previous = _render;
+        var previousOverrides = _renderedOverrides;
+        var overrides = Look.CurrentOverrides;
         try
         {
-            var outcome = await _engine.SubmitRenderAsync(sample, Look.ToSettings(), draft);
+            var outcome = await _engine.SubmitRenderAsync(sample, Look.ToSettings(), draft: false);
             if (!outcome.IsCurrent || !ReferenceEquals(_sample, sample) || outcome.Result is not { } render)
             {
                 return;
             }
 
+            if (pushUndo && previous is not null && previousOverrides is not null)
+            {
+                _undo.Push((previousOverrides, previous));
+                RaiseUndoChanged();
+            }
+
             _render = render;
+            _renderedOverrides = overrides;
             UpdateImages();
+            UpdateRenderState();
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or NotSupportedException)
         {
@@ -828,14 +914,37 @@ public sealed partial class CompareViewModel : ObservableObject
         }
     }
 
+    private void UpdateRenderState() => IsRenderPending = _sample is not null && (_render is null || !_render.Look.Equals(Look.ToSettings()));
+
+    private void ClearUndo()
+    {
+        if (_undo.Count == 0)
+        {
+            return;
+        }
+
+        _undo.Clear();
+        RaiseUndoChanged();
+    }
+
+    private void RaiseUndoChanged()
+    {
+        OnPropertyChanged(nameof(CanUndo));
+        OnPropertyChanged(nameof(UndoDepth));
+        UndoCommand.NotifyCanExecuteChanged();
+    }
+
     private void UpdateImages()
     {
         BeforeImage = _sample is null ? null : ChannelView.Convert(_sample.Source, Channel);
         AfterImage = _render is null ? null : ChannelView.Convert(_render.Image, Channel);
-        IsDraft = _render?.IsDraft ?? false;
     }
 
     private bool CanChangeRules() => !IsRunActive;
+
+    private bool CanApply() => !IsRunActive && Look.IsScopeDirty;
+
+    private bool CanRevert() => Look.IsScopeDirty;
 
     private void PostToUi(Action action)
     {

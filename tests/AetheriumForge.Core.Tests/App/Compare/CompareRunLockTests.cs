@@ -27,7 +27,7 @@ public sealed class CompareRunLockTests : IDisposable
         _runner.SetState(PipelineState.Running);
 
         // Assert
-        Assert.Equal((true, false, false, false), (viewModel.IsRunActive, viewModel.IsGpuAvailable, viewModel.ApplyToGroupCommand.CanExecute(null), viewModel.UseModelForGroupCommand.CanExecute(null)));
+        Assert.Equal((true, false, false, false), (viewModel.IsRunActive, viewModel.IsGpuAvailable, viewModel.ApplyCommand.CanExecute(null), viewModel.UseModelForGroupCommand.CanExecute(null)));
     }
 
     [Fact]
@@ -35,17 +35,18 @@ public sealed class CompareRunLockTests : IDisposable
     {
         // Arrange
         var viewModel = ViewModel();
+        viewModel.Look.SetValue(LookControl.Brightness, 0.2);
         _runner.SetState(PipelineState.Paused);
 
         // Act
         _runner.SetState(PipelineState.Idle);
 
         // Assert
-        Assert.Equal((false, true), (viewModel.IsRunActive, viewModel.ApplyToGroupCommand.CanExecute(null)));
+        Assert.Equal((false, true), (viewModel.IsRunActive, viewModel.ApplyCommand.CanExecute(null)));
     }
 
     [Fact]
-    public async Task ApplyToGroupAsync_RunActive_ShowsReasonAndDoesNotSave()
+    public async Task ApplyAsync_RunActive_ShowsReasonAndDoesNotSave()
     {
         // Arrange
         _data.Jobs.Add(CompareFakeData.Job(1, "Clutter"));
@@ -54,7 +55,7 @@ public sealed class CompareRunLockTests : IDisposable
         _runner.SetState(PipelineState.Running);
 
         // Act
-        await viewModel.ApplyToGroupAsync();
+        await viewModel.ApplyAsync();
 
         // Assert
         Assert.Equal((0, CompareViewModel.RunActiveReason, 0), (_data.Saves, viewModel.ErrorMessage, _dialogs.Questions.Count));
@@ -108,35 +109,18 @@ public sealed class CompareRunLockTests : IDisposable
         Assert.False(viewModel.HasError);
     }
 
-    [Theory]
-    [InlineData(LookControl.Brightness)]
-    [InlineData(LookControl.Contrast)]
-    [InlineData(LookControl.SharpenAmount)]
-    [InlineData(LookControl.NormalStrength)]
-    [InlineData(LookControl.SpecularScale)]
-    public void ResetControl_AfterPreset_RestoresThatControlOnly(LookControl control)
+    [Fact]
+    public async Task ApplyCommand_RunActive_CannotExecuteEvenWithChanges()
     {
         // Arrange
-        var look = new LookPanelViewModel();
-        look.Load(new AetheriumForge.Core.Rules.LookSettings
-        {
-            Brightness = 0.4, Contrast = 1.5, Sharpen = new AetheriumForge.Core.Rules.SharpenSettings(1.0, 2.0), NormalStrength = 2.0, SpecularScale = 0.5,
-        });
+        var viewModel = ViewModel();
+        await viewModel.RefreshAsync();
+        viewModel.Look.SetValue(LookControl.Brightness, 0.2);
 
         // Act
-        look.ResetControl(control);
+        _runner.SetState(PipelineState.Running);
 
         // Assert
-        var settings = look.ToSettings();
-        var values = new Dictionary<LookControl, double>
-        {
-            [LookControl.Brightness] = settings.Brightness,
-            [LookControl.Contrast] = settings.Contrast,
-            [LookControl.SharpenAmount] = settings.Sharpen.Amount,
-            [LookControl.NormalStrength] = settings.NormalStrength,
-            [LookControl.SpecularScale] = settings.SpecularScale,
-        };
-        Assert.Equal(1, values.Count(pair => pair.Value == LookControls.RangeOf(pair.Key).Neutral));
-        Assert.Equal(LookControls.RangeOf(control).Neutral, values[control]);
+        Assert.False(viewModel.ApplyCommand.CanExecute(null));
     }
 }

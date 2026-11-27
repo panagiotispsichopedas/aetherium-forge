@@ -5,61 +5,60 @@ using CommunityToolkit.Mvvm.ComponentModel;
 namespace AetheriumForge.App.Pages.Compare;
 
 /// <summary>
-/// The Look panel: one slider per <see cref="LookSettings"/> control, with per-kind applicability (IMPLEMENTATION_GUIDE §8).
+/// The Look panel (IMPLEMENTATION_GUIDE §8 and §14 "Look panel behaviour"): one slider per control, editing one scope
+/// (All / This group / This texture) at a time. Each scope keeps a saved layer and a working layer; the effective look resolves
+/// texture → group → All → neutral, control by control.
 /// </summary>
 public sealed partial class LookPanelViewModel : ObservableObject
 {
-    private int _suppressChanged;
+    private readonly Dictionary<LookScope, LookOverrides> _saved = new()
+    {
+        [LookScope.All] = LookOverrides.Empty,
+        [LookScope.Group] = LookOverrides.Empty,
+        [LookScope.Texture] = LookOverrides.Empty,
+    };
 
-    /// <summary>Initializes a new instance of the <see cref="LookPanelViewModel"/> class with the neutral look.</summary>
+    private readonly Dictionary<LookScope, LookOverrides> _working = new()
+    {
+        [LookScope.All] = LookOverrides.Empty,
+        [LookScope.Group] = LookOverrides.Empty,
+        [LookScope.Texture] = LookOverrides.Empty,
+    };
+
+    private readonly Dictionary<LookControl, LookControlViewModel> _rows;
+
+    /// <summary>Initializes a new instance of the <see cref="LookPanelViewModel"/> class with every scope empty (neutral).</summary>
     public LookPanelViewModel()
     {
-        Load(LookSettings.Neutral);
-        UpdateApplicability();
+        _rows = LookControls.Editable.ToDictionary(control => control, control => new LookControlViewModel(this, control));
+        Controls = [.. LookControls.Editable.Select(control => _rows[control])];
+        DetailControls = [.. Controls.Where(row => LookControls.SectionOf(row.Control) == "Detail")];
+        ColourControls = [.. Controls.Where(row => LookControls.SectionOf(row.Control) == "Colour")];
+        SurfaceControls = [.. Controls.Where(row => LookControls.SectionOf(row.Control) == "Surface")];
+        Refresh();
     }
 
-    /// <summary>Raised when the user changed any control (not when a whole look is loaded with <see cref="Load"/>).</summary>
+    /// <summary>Raised when the working look changed (a slider, a reset, a preset, an undo or a revert); never on a silent load.</summary>
     public event EventHandler? LookChanged;
 
-    /// <summary>Gets or sets the AI strength (0–1).</summary>
-    [ObservableProperty]
-    public partial double AiStrength { get; set; }
+    /// <summary>Gets every slider row.</summary>
+    public IReadOnlyList<LookControlViewModel> Controls { get; }
 
-    /// <summary>Gets or sets the sharpen amount.</summary>
-    [ObservableProperty]
-    public partial double SharpenAmount { get; set; }
+    /// <summary>Gets the Detail section rows.</summary>
+    public IReadOnlyList<LookControlViewModel> DetailControls { get; }
 
-    /// <summary>Gets or sets the sharpen radius.</summary>
-    [ObservableProperty]
-    public partial double SharpenRadius { get; set; }
+    /// <summary>Gets the Colour section rows.</summary>
+    public IReadOnlyList<LookControlViewModel> ColourControls { get; }
 
-    /// <summary>Gets or sets the brightness (−1–1).</summary>
-    [ObservableProperty]
-    public partial double Brightness { get; set; }
+    /// <summary>Gets the Surface section rows.</summary>
+    public IReadOnlyList<LookControlViewModel> SurfaceControls { get; }
 
-    /// <summary>Gets or sets the contrast (0.5–2).</summary>
-    [ObservableProperty]
-    public partial double Contrast { get; set; }
+    /// <summary>Gets the scopes, for the selector.</summary>
+    public IReadOnlyList<LookScope> Scopes { get; } = Enum.GetValues<LookScope>();
 
-    /// <summary>Gets or sets the gamma (0.5–2).</summary>
+    /// <summary>Gets or sets the scope the sliders edit.</summary>
     [ObservableProperty]
-    public partial double Gamma { get; set; }
-
-    /// <summary>Gets or sets the saturation (0–2).</summary>
-    [ObservableProperty]
-    public partial double Saturation { get; set; }
-
-    /// <summary>Gets or sets the temperature (−1–1).</summary>
-    [ObservableProperty]
-    public partial double Temperature { get; set; }
-
-    /// <summary>Gets or sets the normal strength.</summary>
-    [ObservableProperty]
-    public partial double NormalStrength { get; set; }
-
-    /// <summary>Gets or sets the specular scale (0–2).</summary>
-    [ObservableProperty]
-    public partial double SpecularScale { get; set; }
+    public partial LookScope Scope { get; set; } = LookScope.Group;
 
     /// <summary>Gets or sets the kind of the sample being previewed; decides which controls apply.</summary>
     [ObservableProperty]
@@ -69,137 +68,90 @@ public sealed partial class LookPanelViewModel : ObservableObject
     [ObservableProperty]
     public partial bool UsesModel { get; set; } = true;
 
-    /// <summary>Gets the slider ranges, keyed by control (for the view).</summary>
-    public IReadOnlyDictionary<LookControl, LookControlRange> Ranges { get; } = LookControls.Ranges;
-
-    /// <summary>Gets whether the AI-strength slider applies.</summary>
-    public bool IsAiStrengthEnabled => IsEnabled(LookControl.AiStrength);
-
-    /// <summary>Gets whether the sharpen sliders apply.</summary>
-    public bool IsSharpenEnabled => IsEnabled(LookControl.SharpenAmount);
-
-    /// <summary>Gets whether the colour-grading sliders apply.</summary>
-    public bool IsColourEnabled => IsEnabled(LookControl.Brightness);
-
-    /// <summary>Gets whether the normal-strength slider applies.</summary>
-    public bool IsNormalStrengthEnabled => IsEnabled(LookControl.NormalStrength);
-
-    /// <summary>Gets whether the specular slider applies.</summary>
-    public bool IsSpecularEnabled => IsEnabled(LookControl.SpecularScale);
-
     /// <summary>Gets whether the denoise slider applies (never yet: it needs a denoise model).</summary>
-    public bool IsDenoiseEnabled => IsEnabled(LookControl.Denoise);
-
-    /// <summary>Gets the AI-strength tooltip.</summary>
-    public string? AiStrengthTooltip => LookControls.DisabledReason(LookControl.AiStrength, Kind, UsesModel) ?? "1 = AI only, 0 = plain Lanczos. Lower it to tame painted-looking detail.";
-
-    /// <summary>Gets the sharpen tooltip.</summary>
-    public string? SharpenTooltip => LookControls.DisabledReason(LookControl.SharpenAmount, Kind, UsesModel) ?? "Unsharp mask after resizing; 0 = off.";
-
-    /// <summary>Gets the colour-grading tooltip.</summary>
-    public string? ColourTooltip => LookControls.DisabledReason(LookControl.Brightness, Kind, UsesModel) ?? "Colour grading in linear light (colour maps only).";
-
-    /// <summary>Gets the normal-strength tooltip.</summary>
-    public string? NormalStrengthTooltip => LookControls.DisabledReason(LookControl.NormalStrength, Kind, UsesModel) ?? "How 3D: scales the relief of the normal map.";
-
-    /// <summary>Gets the specular tooltip.</summary>
-    public string? SpecularTooltip => LookControls.DisabledReason(LookControl.SpecularScale, Kind, UsesModel) ?? "How shiny: scales specular intensity.";
+    public bool IsDenoiseEnabled => LookControls.AppliesTo(LookControl.Denoise, Kind, UsesModel);
 
     /// <summary>Gets the denoise tooltip.</summary>
     public string DenoiseTooltip { get; } = LookControls.DenoiseTooltip;
+
+    /// <summary>Gets whether any scope has unsaved changes.</summary>
+    public bool IsDirty => _working.Any(pair => !pair.Value.Equals(_saved[pair.Key]));
+
+    /// <summary>Gets whether the edited scope has unsaved changes.</summary>
+    public bool IsScopeDirty => !_working[Scope].Equals(_saved[Scope]);
+
+    /// <summary>Gets the working overrides of the edited scope.</summary>
+    public LookOverrides CurrentOverrides => _working[Scope];
+
+    /// <summary>Gets the row of <paramref name="control"/>.</summary>
+    /// <param name="control">The control.</param>
+    /// <returns>The row.</returns>
+    public LookControlViewModel this[LookControl control] => _rows[control];
+
+    /// <summary>Gets the working overrides of a scope.</summary>
+    /// <param name="scope">The scope.</param>
+    /// <returns>The overrides.</returns>
+    public LookOverrides Working(LookScope scope) => _working[scope];
+
+    /// <summary>Gets the saved overrides of a scope.</summary>
+    /// <param name="scope">The scope.</param>
+    /// <returns>The overrides.</returns>
+    public LookOverrides Saved(LookScope scope) => _saved[scope];
 
     /// <summary>Gets whether <paramref name="control"/> applies to the current sample.</summary>
     /// <param name="control">The control.</param>
     /// <returns><see langword="true"/> when it applies.</returns>
     public bool IsEnabled(LookControl control) => LookControls.AppliesTo(control, Kind, UsesModel);
 
-    /// <summary>Resets one control to its neutral value (a slider double-click); raises <see cref="LookChanged"/> when it changed.</summary>
-    /// <param name="control">The control.</param>
-    public void ResetControl(LookControl control)
+    /// <summary>Gets the effective look (all working layers resolved).</summary>
+    /// <returns>The look.</returns>
+    public LookSettings ToSettings() => LookLayers.Resolve(_working[LookScope.All], _working[LookScope.Group], _working[LookScope.Texture]);
+
+    /// <summary>Loads a scope's stored overrides as both saved and working (drops unsaved edits of that scope); raises no change.</summary>
+    /// <param name="scope">The scope.</param>
+    /// <param name="overrides">The stored overrides.</param>
+    public void LoadLayer(LookScope scope, LookOverrides overrides)
     {
-        var neutral = LookControls.RangeOf(control).Neutral;
-        switch (control)
-        {
-            case LookControl.AiStrength:
-                AiStrength = neutral;
-                break;
-            case LookControl.SharpenAmount:
-                SharpenAmount = neutral;
-                break;
-            case LookControl.SharpenRadius:
-                SharpenRadius = neutral;
-                break;
-            case LookControl.Brightness:
-                Brightness = neutral;
-                break;
-            case LookControl.Contrast:
-                Contrast = neutral;
-                break;
-            case LookControl.Gamma:
-                Gamma = neutral;
-                break;
-            case LookControl.Saturation:
-                Saturation = neutral;
-                break;
-            case LookControl.Temperature:
-                Temperature = neutral;
-                break;
-            case LookControl.NormalStrength:
-                NormalStrength = neutral;
-                break;
-            case LookControl.SpecularScale:
-                SpecularScale = neutral;
-                break;
-            default:
-                // Denoise has no look value yet (it needs a denoise model).
-                break;
-        }
+        ArgumentNullException.ThrowIfNull(overrides);
+        _saved[scope] = overrides;
+        _working[scope] = overrides;
+        Refresh();
     }
 
-    /// <summary>Builds the look from the sliders.</summary>
-    /// <returns>The look.</returns>
-    public LookSettings ToSettings() => new()
-    {
-        AiStrength = Range(LookControl.AiStrength).Clamp(AiStrength),
-        Sharpen = new SharpenSettings(Range(LookControl.SharpenAmount).Clamp(SharpenAmount), Range(LookControl.SharpenRadius).Clamp(SharpenRadius)),
-        Brightness = Range(LookControl.Brightness).Clamp(Brightness),
-        Contrast = Range(LookControl.Contrast).Clamp(Contrast),
-        Gamma = Range(LookControl.Gamma).Clamp(Gamma),
-        Saturation = Range(LookControl.Saturation).Clamp(Saturation),
-        Temperature = Range(LookControl.Temperature).Clamp(Temperature),
-        NormalStrength = Range(LookControl.NormalStrength).Clamp(NormalStrength),
-        SpecularScale = Range(LookControl.SpecularScale).Clamp(SpecularScale),
-    };
+    /// <summary>Sets a control at the edited scope.</summary>
+    /// <param name="control">The control.</param>
+    /// <param name="value">The value (clamped to the range).</param>
+    public void SetValue(LookControl control, double value) => SetWorking(_working[Scope].With(control, value));
 
-    /// <summary>Sets every slider from <paramref name="look"/> and raises <see cref="LookChanged"/> once when <paramref name="notify"/> is set.</summary>
-    /// <param name="look">The look; <see langword="null"/> means neutral.</param>
-    /// <param name="notify"><see langword="true"/> to raise <see cref="LookChanged"/> (a preset); <see langword="false"/> for a silent load.</param>
-    public void Load(LookSettings? look, bool notify = false)
-    {
-        look ??= LookSettings.Neutral;
-        _suppressChanged++;
-        try
-        {
-            AiStrength = look.AiStrength;
-            SharpenAmount = look.Sharpen.Amount;
-            SharpenRadius = look.Sharpen.Radius;
-            Brightness = look.Brightness;
-            Contrast = look.Contrast;
-            Gamma = look.Gamma;
-            Saturation = look.Saturation;
-            Temperature = look.Temperature;
-            NormalStrength = look.NormalStrength;
-            SpecularScale = look.SpecularScale;
-        }
-        finally
-        {
-            _suppressChanged--;
-        }
+    /// <summary>Clears a control at the edited scope, so it falls back to the inherited value (neutral at All).</summary>
+    /// <param name="control">The control.</param>
+    public void ResetControl(LookControl control) => SetWorking(_working[Scope].Without(control));
 
-        if (notify)
-        {
-            LookChanged?.Invoke(this, EventArgs.Empty);
-        }
+    /// <summary>Sets every control of a preset at the edited scope.</summary>
+    /// <param name="look">The preset look.</param>
+    public void ApplyPreset(LookSettings look)
+    {
+        ArgumentNullException.ThrowIfNull(look);
+        SetWorking(LookOverrides.FromLook(look, onlyNonNeutral: false));
+    }
+
+    /// <summary>Replaces the edited scope's working overrides (Undo).</summary>
+    /// <param name="overrides">The overrides.</param>
+    public void RestoreOverrides(LookOverrides overrides)
+    {
+        ArgumentNullException.ThrowIfNull(overrides);
+        SetWorking(overrides);
+    }
+
+    /// <summary>Discards the edited scope's unsaved changes.</summary>
+    public void Revert() => SetWorking(_saved[Scope]);
+
+    /// <summary>Marks a scope's working overrides as saved (after Apply).</summary>
+    /// <param name="scope">The scope.</param>
+    public void MarkSaved(LookScope scope)
+    {
+        _saved[scope] = _working[scope];
+        RaiseDirty();
     }
 
     /// <inheritdoc />
@@ -207,36 +159,59 @@ public sealed partial class LookPanelViewModel : ObservableObject
     {
         ArgumentNullException.ThrowIfNull(e);
         base.OnPropertyChanged(e);
-        switch (e.PropertyName)
+        if (e.PropertyName is nameof(Scope) or nameof(Kind) or nameof(UsesModel))
         {
-            case nameof(Kind) or nameof(UsesModel):
-                UpdateApplicability();
-                break;
-            case nameof(AiStrength) or nameof(SharpenAmount) or nameof(SharpenRadius) or nameof(Brightness) or nameof(Contrast) or nameof(Gamma)
-                or nameof(Saturation) or nameof(Temperature) or nameof(NormalStrength) or nameof(SpecularScale):
-                if (_suppressChanged == 0)
-                {
-                    LookChanged?.Invoke(this, EventArgs.Empty);
-                }
-
-                break;
+            Refresh();
         }
     }
 
-    private static LookControlRange Range(LookControl control) => LookControls.RangeOf(control);
-
-    private void UpdateApplicability()
+    private static string DescriptionOf(LookControl control) => control switch
     {
-        OnPropertyChanged(nameof(IsAiStrengthEnabled));
-        OnPropertyChanged(nameof(IsSharpenEnabled));
-        OnPropertyChanged(nameof(IsColourEnabled));
-        OnPropertyChanged(nameof(IsNormalStrengthEnabled));
-        OnPropertyChanged(nameof(IsSpecularEnabled));
+        LookControl.AiStrength => "1 = AI only, 0 = plain Lanczos. Lower it to tame painted-looking detail.",
+        LookControl.SharpenAmount or LookControl.SharpenRadius => "Unsharp mask after resizing; 0 = off.",
+        LookControl.NormalStrength => "Relief: how 3D the normal map looks.",
+        LookControl.SpecularScale => "Shine: scales specular intensity.",
+        _ => "Colour grading in linear light (colour maps only).",
+    };
+
+    private void SetWorking(LookOverrides overrides)
+    {
+        if (overrides.Equals(_working[Scope]))
+        {
+            return;
+        }
+
+        _working[Scope] = overrides;
+        Refresh();
+        LookChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void Refresh()
+    {
+        // OnPropertyChanged can run from property initialisers before the rows exist.
+        if (_rows is null)
+        {
+            return;
+        }
+
+        var current = _working[Scope];
+        foreach (var row in Controls)
+        {
+            var (inherited, source) = LookLayers.Inherited(Scope, row.Control, _working[LookScope.All], _working[LookScope.Group]);
+            var isSet = current.TryGet(row.Control, out var own);
+            row.Update(isSet ? own : inherited, isSet, inherited, source);
+            row.IsApplicable = IsEnabled(row.Control);
+            row.Tooltip = LookControls.DisabledReason(row.Control, Kind, UsesModel) ?? DescriptionOf(row.Control);
+        }
+
         OnPropertyChanged(nameof(IsDenoiseEnabled));
-        OnPropertyChanged(nameof(AiStrengthTooltip));
-        OnPropertyChanged(nameof(SharpenTooltip));
-        OnPropertyChanged(nameof(ColourTooltip));
-        OnPropertyChanged(nameof(NormalStrengthTooltip));
-        OnPropertyChanged(nameof(SpecularTooltip));
+        RaiseDirty();
+    }
+
+    private void RaiseDirty()
+    {
+        OnPropertyChanged(nameof(IsDirty));
+        OnPropertyChanged(nameof(IsScopeDirty));
+        OnPropertyChanged(nameof(CurrentOverrides));
     }
 }

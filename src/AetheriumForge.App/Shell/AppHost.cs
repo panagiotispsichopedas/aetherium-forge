@@ -61,7 +61,6 @@ public static class AppHost
             sp.GetRequiredService<Pages.Compare.PreviewEngine>(),
             sp.GetRequiredService<Pages.Compare.ICompareProjectData>(),
             sp.GetRequiredService<Pages.Compare.ICompareDialogs>(),
-            timeProvider: sp.GetRequiredService<TimeProvider>(),
             logger: sp.GetService<Microsoft.Extensions.Logging.ILogger<Pages.Compare.CompareViewModel>>(),
             runner: sp.GetService<IForgeRunner>()));
         services.AddSingleton<ComparePagePlaceholder>(sp => new ComparePagePlaceholder(sp.GetRequiredService<Pages.Compare.CompareViewModel>()));
