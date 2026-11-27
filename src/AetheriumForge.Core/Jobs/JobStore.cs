@@ -12,7 +12,7 @@ namespace AetheriumForge.Core.Jobs;
 /// Every operation opens its own pooled connection, so the store is safe to call from several pipeline workers at once.
 /// The database runs in WAL mode; SQLite serialises writers and Microsoft.Data.Sqlite retries while the database is busy.
 /// </remarks>
-public sealed class JobStore : IAsyncDisposable
+public sealed partial class JobStore : IAsyncDisposable
 {
     /// <summary>Error recorded on jobs that a rescan removed from the gap set.</summary>
     public const string ProvidedByModError = "now provided by a mod";
