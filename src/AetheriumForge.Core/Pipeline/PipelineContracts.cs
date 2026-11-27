@@ -103,6 +103,21 @@ public sealed record PipelineOptions
 
     /// <summary>Gets the minimum interval between progress reports.</summary>
     public TimeSpan ProgressInterval { get; init; } = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>
+    /// Gets the maximum number of queued jobs one run takes, or <see langword="null"/> for all. Jobs beyond the limit are never started and
+    /// stay Queued, so a limited run ends without abandoning work in flight.
+    /// </summary>
+    public int? MaxJobs { get; init; }
+
+    /// <summary>Gets a model that replaces every job's own model, or <see langword="null"/> to use each job's model.</summary>
+    public string? ModelOverride { get; init; }
+
+    /// <summary>
+    /// Gets the initial seconds per source megapixel for jobs that run no model (Lanczos only, for example parallax maps), so the ETA is
+    /// known before the first such job finishes. Real samples replace it.
+    /// </summary>
+    public double NoModelSecondsPerMegapixel { get; init; } = 0.05;
 }
 
 /// <summary>

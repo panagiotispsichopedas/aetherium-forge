@@ -33,7 +33,16 @@ internal sealed record ForgeRunSettings(string? ModelOverride, int Device, int T
 /// <param name="Models">Installed models.</param>
 /// <param name="TexconvPath">The texconv executable.</param>
 /// <param name="Run">Command-line settings.</param>
-internal sealed record ForgeContext(JobStore Store, ProjectLayout Project, string DataFolder, ForgeRules Rules, IReadOnlyList<ModelInfo> Models, string TexconvPath, ForgeRunSettings Run);
+/// <param name="Processes">Tracks texconv processes so a forced exit (second Ctrl+C) can kill them; <see langword="null"/> skips tracking.</param>
+internal sealed record ForgeContext(
+    JobStore Store,
+    ProjectLayout Project,
+    string DataFolder,
+    ForgeRules Rules,
+    IReadOnlyList<ModelInfo> Models,
+    string TexconvPath,
+    ForgeRunSettings Run,
+    ChildProcessTracker? Processes = null);
 
 /// <summary>
 /// The CLI's single composition root: builds the host and registers every service. <see cref="IForgePipeline"/> is created by one
@@ -81,11 +90,17 @@ internal static class CompositionRoot
         services.AddSingleton(forge);
         services.AddSingleton(forge.Run);
         services.AddSingleton(forge.Store);
-        services.AddSingleton(new PipelineOptions { WorkRoot = forge.Project.WorkRoot, OutputRoot = forge.Project.OutputRoot });
+        services.AddSingleton(new PipelineOptions
+        {
+            WorkRoot = forge.Project.WorkRoot,
+            OutputRoot = forge.Project.OutputRoot,
+            MaxJobs = forge.Run.Limit,
+            ModelOverride = forge.Run.ModelOverride,
+        });
 
         services.AddSingleton<ITextureSource>(_ => new ArchiveTextureSource(forge.DataFolder));
         services.AddSingleton<ITextureCodec>(sp => new Texconv(
-            new TexconvOptions { ExecutablePath = forge.TexconvPath, GpuAdapter = forge.Run.Device },
+            new TexconvOptions { ExecutablePath = forge.TexconvPath, GpuAdapter = forge.Run.Device, ProcessTracker = forge.Processes },
             sp.GetRequiredService<ILogger<Texconv>>()));
         services.AddSingleton(sp => new UpscalerFactory(
             forge.Models,

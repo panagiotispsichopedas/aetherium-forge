@@ -154,7 +154,7 @@ internal sealed class ForgeCommand
             output.WriteLine($"Log:      {session.Logging.LogFile}");
             output.WriteLine();
 
-            var context = new ForgeContext(store, project, dataFolder, rules, models, texconv, run);
+            var context = new ForgeContext(store, project, dataFolder, rules, models, texconv, run, session.Cancellation.Processes);
             using var host = CompositionRoot.Build(session.Logging, context);
             var pipeline = host.Services.GetRequiredService<IForgePipeline>();
             log.Information("Forging with {Pipeline} from {Project}: models {Models}, device {Device}, tile {Tile}, limit {Limit}",
@@ -162,17 +162,17 @@ internal sealed class ForgeCommand
 
             var interactive = !Console.IsOutputRedirected && ReferenceEquals(output, Console.Out);
             var view = new ForgeConsoleView(output, interactive, readKeys: !Console.IsInputRedirected);
-            // SequentialPipeline applies --limit itself; the staged engine runs the whole queue, so the CLI stops it at the limit.
-            var watchedLimit = pipeline is SequentialPipeline ? null : run.Limit;
+            // Both pipelines apply --limit themselves (PipelineOptions.MaxJobs / SequentialPipeline), so jobs past the limit are never
+            // started and nothing in flight is thrown away.
             ForgeRunOutcome outcome;
             using (session.Logging.QuietConsole())
             {
-                outcome = await RunWithViewAsync(pipeline, view, session.Cancellation, log, watchedLimit).ConfigureAwait(false);
+                outcome = await RunWithViewAsync(pipeline, view, session.Cancellation, log, limit: null).ConfigureAwait(false);
             }
 
             var summary = outcome.Summary;
             var userStopped = session.Cancellation.IsCancellationRequested;
-            var verdict = userStopped ? "Stopped" : outcome.LimitReached ? $"Finished (limit of {run.Limit:N0} reached)" : "Finished";
+            var verdict = userStopped ? "Stopped" : run.Limit is { } jobLimit ? $"Finished (limit of {jobLimit:N0})" : "Finished";
             output.WriteLine();
             output.WriteLine($"{verdict} in {ProgressFormatter.FormatElapsed(summary.Elapsed)}: {summary.Done:N0} done, {summary.Failed:N0} failed, {summary.Requeued:N0} returned to the queue.");
             if (summary.Failed > 0)

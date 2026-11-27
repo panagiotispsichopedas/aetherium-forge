@@ -37,6 +37,9 @@ internal sealed class ConsoleCancellation : IDisposable
         }
     }
 
+    /// <summary>Gets the child processes (texconv) to kill on a forced exit; pass it to <see cref="Core.Imaging.TexconvOptions.ProcessTracker"/>.</summary>
+    public Core.Imaging.ChildProcessTracker Processes { get; } = new();
+
     /// <summary>Gets the token cancelled by the first Ctrl+C (or by <see cref="Cancel"/>).</summary>
     public CancellationToken Token => _cts.Token;
 
@@ -65,8 +68,9 @@ internal sealed class ConsoleCancellation : IDisposable
             return true;
         }
 
-        // Second press: undo console changes, then let Windows terminate the process. Work in progress returns to Queued on the
-        // next start (crash recovery).
+        // Second press: kill texconv children (they would otherwise outlive us and lock the work folder), undo console changes, then
+        // let Windows terminate the process. Work in progress returns to Queued on the next start (crash recovery).
+        Processes.KillAll();
         try
         {
             _restoreConsole();

@@ -62,6 +62,10 @@ public sealed partial class ForgePipeline : IForgePipeline
         ArgumentOutOfRangeException.ThrowIfLessThan(options.StageCapacity, 1, nameof(options));
         ArgumentOutOfRangeException.ThrowIfLessThan(options.MaxAttempts, 1, nameof(options));
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.ProgressInterval, TimeSpan.Zero, nameof(options));
+        if (options.MaxJobs is { } maxJobs)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(maxJobs, 1, nameof(options));
+        }
         ValidateFolders(options, processor);
 
         _store = store;
@@ -117,11 +121,18 @@ public sealed partial class ForgePipeline : IForgePipeline
             WipeWorkRoot();
             runId = await _store.StartRunAsync(CancellationToken.None).ConfigureAwait(false);
 
+            _eta.Seed(NoModelKey, _options.NoModelSecondsPerMegapixel);
+
             var jobs = new List<JobRecord>();
             await foreach (var job in _store.GetJobsAsync(JobState.Queued, CancellationToken.None).ConfigureAwait(false))
             {
+                if (_options.MaxJobs is { } maxJobs && jobs.Count >= maxJobs)
+                {
+                    break;
+                }
+
                 jobs.Add(job);
-                run.AddRemaining(job.Id, EtaKeyOf(job), MegapixelsOf(job));
+                run.AddRemaining(job.Id, EtaKeyOf(job, _options.ModelOverride), MegapixelsOf(job));
             }
 
             run.Total = jobs.Count;
@@ -245,8 +256,17 @@ public sealed partial class ForgePipeline : IForgePipeline
 
     private static double MegapixelsOf(JobRecord record) => Math.Max(0, record.SourceWidth) * (double)Math.Max(0, record.SourceHeight) / 1_000_000d;
 
-    private static string EtaKeyOf(JobRecord record) =>
-        string.IsNullOrEmpty(record.Model) || string.Equals(record.Kind, nameof(TextureKind.Parallax), StringComparison.OrdinalIgnoreCase) ? NoModelKey : record.Model;
+    // The ETA key must be the model that actually runs (the override when set), or the remaining jobs keep a key that never gets a rate.
+    private static string EtaKeyOf(JobRecord record, string? modelOverride)
+    {
+        if (string.Equals(record.Kind, nameof(TextureKind.Parallax), StringComparison.OrdinalIgnoreCase))
+        {
+            return NoModelKey;
+        }
+
+        var model = string.IsNullOrEmpty(modelOverride) ? record.Model : modelOverride;
+        return string.IsNullOrEmpty(model) ? NoModelKey : model;
+    }
 
     private static string FullPathWithSeparator(string path)
     {
@@ -393,6 +413,11 @@ public sealed partial class ForgePipeline : IForgePipeline
                 try
                 {
                     job = ToTextureJob(record, NormalStrengthForGroup);
+                    if (_options.ModelOverride is { Length: > 0 } modelOverride)
+                    {
+                        job = job with { Model = modelOverride };
+                    }
+
                     _processor.GetOutputPath(job.Path);
                 }
                 catch (Exception ex) when (ex is InvalidDataException or ArgumentException)
@@ -405,7 +430,7 @@ public sealed partial class ForgePipeline : IForgePipeline
                     continue;
                 }
 
-                var item = new WorkItem(record, job, EtaKeyOf(record), MegapixelsOf(record));
+                var item = new WorkItem(record, job, EtaKeyOf(record, _options.ModelOverride), MegapixelsOf(record));
                 run.Admit();
                 await WriteOrAbandonAsync(run, input, item, ct).ConfigureAwait(false);
             }
