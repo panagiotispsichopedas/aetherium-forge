@@ -1,14 +1,19 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using AetheriumForge.Core.Common;
+using AetheriumForge.Core.Rules;
+using AetheriumForge.Core.Textures;
 using Microsoft.Data.Sqlite;
 
 namespace AetheriumForge.Core.Jobs;
 
 /// <summary>
-/// SQLite-backed store of a project's settings, texture jobs and runs (IMPLEMENTATION_GUIDE §12).
+/// SQLite-backed store of a project's settings, texture jobs, runs and per-texture look overrides (IMPLEMENTATION_GUIDE §8, §12).
 /// </summary>
 /// <remarks>
+/// Opening a database created by an older version upgrades it in place: the <c>look_hash</c> column and the <c>texture_look</c> table are
+/// added when missing, safely even when two processes open it at once.
 /// Every operation opens its own pooled connection, so the store is safe to call from several pipeline workers at once.
 /// The database runs in WAL mode; SQLite serialises writers and Microsoft.Data.Sqlite retries while the database is busy.
 /// </remarks>
@@ -30,13 +35,15 @@ public sealed partial class JobStore : IAsyncDisposable
           grp TEXT, target INT, model TEXT,
           state TEXT NOT NULL,
           attempts INT DEFAULT 0, error TEXT,
-          seconds REAL, finished_at TEXT
+          seconds REAL, finished_at TEXT,
+          look_hash TEXT
         );
         CREATE INDEX IF NOT EXISTS job_state ON job(state);
         CREATE TABLE IF NOT EXISTS run (id INTEGER PRIMARY KEY, started TEXT, ended TEXT, done INT, failed INT);
+        CREATE TABLE IF NOT EXISTS texture_look (path TEXT PRIMARY KEY, look_json TEXT NOT NULL, updated_at TEXT);
         """;
 
-    private const string JobColumns = "id, path, archive, src_w, src_h, format, kind, grp, target, model, state, attempts, error, seconds, finished_at";
+    private const string JobColumns = "id, path, archive, src_w, src_h, format, kind, grp, target, model, state, attempts, error, seconds, finished_at, look_hash";
 
     private const string UpsertSql = """
         INSERT INTO job (path, archive, src_w, src_h, format, kind, grp, target, model, state, attempts, error, seconds, finished_at)
@@ -103,6 +110,7 @@ public sealed partial class JobStore : IAsyncDisposable
         {
             await ExecuteAsync(connection, "PRAGMA journal_mode=WAL;", ct).ConfigureAwait(false);
             await ExecuteAsync(connection, SchemaSql, ct).ConfigureAwait(false);
+            await MigrateAsync(connection, ct).ConfigureAwait(false);
         }
 
         return store;
@@ -330,7 +338,7 @@ public sealed partial class JobStore : IAsyncDisposable
         await ExecuteNonQueryAsync("UPDATE job SET state = 'Running' WHERE id = $id AND state = 'Queued';", [("$id", id)], ct).ConfigureAwait(false) == 1;
 
     /// <summary>
-    /// Marks a job as finished successfully and clears its error.
+    /// Marks a job as finished successfully and clears its error. Its look hash is left as it is.
     /// </summary>
     /// <param name="id">The job id.</param>
     /// <param name="seconds">Processing time in seconds.</param>
@@ -343,6 +351,345 @@ public sealed partial class JobStore : IAsyncDisposable
             "UPDATE job SET state = 'Done', error = NULL, seconds = $seconds, finished_at = $finished_at WHERE id = $id;",
             [("$seconds", seconds), ("$finished_at", FormatTimestamp(_timeProvider.GetUtcNow()))],
             ct);
+
+    /// <summary>
+    /// Marks a job as finished successfully, clears its error and records the hash of the look it was finished with (§8).
+    /// </summary>
+    /// <param name="id">The job id.</param>
+    /// <param name="seconds">Processing time in seconds.</param>
+    /// <param name="lookHash">The stable hash of the effective look for the job's kind (<see cref="LookSettings.GetStableHash(TextureKind)"/>), or <see langword="null"/> to record that it is unknown.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>A task that completes when the state is stored.</returns>
+    /// <exception cref="KeyNotFoundException">No job has this id.</exception>
+    public Task MarkDoneAsync(long id, double seconds, string? lookHash, CancellationToken ct) =>
+        UpdateJobAsync(
+            id,
+            "UPDATE job SET state = 'Done', error = NULL, seconds = $seconds, finished_at = $finished_at, look_hash = $look_hash WHERE id = $id;",
+            [("$seconds", seconds), ("$finished_at", FormatTimestamp(_timeProvider.GetUtcNow())), ("$look_hash", (object?)lookHash ?? DBNull.Value)],
+            ct);
+
+    /// <summary>
+    /// Finds the <see cref="JobState.Done"/> jobs of a group whose recorded look hash differs from <paramref name="lookHash"/>. Jobs with no
+    /// recorded look (finished before looks were recorded) count as different.
+    /// </summary>
+    /// <remarks>
+    /// Hashes are per kind, so one hash fits a group only when its jobs share the kind's applicable controls. For the
+    /// "Apply to finished textures?" flow use <see cref="FindDoneWithDifferentLookAsync(string, LookSettings, CancellationToken)"/>.
+    /// </remarks>
+    /// <param name="group">The group name, compared case-insensitively.</param>
+    /// <param name="lookHash">The hash to compare with.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The jobs in id order.</returns>
+    public async Task<IReadOnlyList<JobRecord>> FindDoneWithDifferentLookAsync(string group, string lookHash, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        ArgumentNullException.ThrowIfNull(lookHash);
+
+        var jobs = new List<JobRecord>();
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                command.CommandText = $"""
+                    SELECT {JobColumns} FROM job
+                    WHERE state = 'Done' AND grp = $grp COLLATE NOCASE AND (look_hash IS NULL OR look_hash <> $look_hash)
+                    ORDER BY id;
+                    """;
+                command.Parameters.AddWithValue("$grp", group);
+                command.Parameters.AddWithValue("$look_hash", lookHash);
+                var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                await using (reader.ConfigureAwait(false))
+                {
+                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        jobs.Add(ReadJob(reader));
+                    }
+                }
+            }
+        }
+
+        return jobs;
+    }
+
+    /// <summary>
+    /// Finds the <see cref="JobState.Done"/> jobs of a group that were finished with a different look than <paramref name="look"/>, for the
+    /// "Apply to finished textures?" flow (§8). Each job is compared with the hash of <paramref name="look"/> for its own kind
+    /// (<see cref="LookSettings.GetStableHash(TextureKind)"/>), so a change to, say, the normal strength returns only the
+    /// group's normal maps. Jobs with no recorded look, or with a kind that cannot be parsed, count as different.
+    /// </summary>
+    /// <param name="group">The group name, compared case-insensitively.</param>
+    /// <param name="look">The group's current effective look.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The jobs in id order.</returns>
+    public async Task<IReadOnlyList<JobRecord>> FindDoneWithDifferentLookAsync(string group, LookSettings look, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        ArgumentNullException.ThrowIfNull(look);
+
+        var hashes = new Dictionary<TextureKind, string>();
+        var jobs = new List<JobRecord>();
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                command.CommandText = $"SELECT {JobColumns} FROM job WHERE state = 'Done' AND grp = $grp COLLATE NOCASE ORDER BY id;";
+                command.Parameters.AddWithValue("$grp", group);
+                var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                await using (reader.ConfigureAwait(false))
+                {
+                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        var job = ReadJob(reader);
+                        if (job.LookHash is null
+                            || !TryParseKind(job.Kind, out var kind)
+                            || !string.Equals(job.LookHash, HashFor(kind), StringComparison.Ordinal))
+                        {
+                            jobs.Add(job);
+                        }
+                    }
+                }
+            }
+        }
+
+        return jobs;
+
+        string HashFor(TextureKind kind)
+        {
+            if (!hashes.TryGetValue(kind, out var hash))
+            {
+                hash = look.GetStableHash(kind);
+                hashes[kind] = hash;
+            }
+
+            return hash;
+        }
+    }
+
+    /// <summary>
+    /// Finds the <see cref="JobState.Done"/> jobs whose effective look would change after a scope edit (§8 "Apply to N finished textures?").
+    /// For each Done job, <paramref name="effectiveLookAfterChange"/> gives its effective look under the edited scopes (it receives the job
+    /// and the texture override currently stored for its path), and the job is returned when that look's hash for the job's kind differs
+    /// from the hash recorded when the job finished.
+    /// </summary>
+    /// <remarks>
+    /// Jobs with no recorded hash (finished before looks were recorded) or an unknown kind are always returned. Typical resolvers:
+    /// <c>(job, texture) =&gt; LookResolver.Resolve(editedRules, job.Group, texture)</c> after an All or Group edit, and the same with the
+    /// pending override substituted for the edited path after a "This texture" edit.
+    /// </remarks>
+    /// <param name="effectiveLookAfterChange">Resolves a job's effective look after the change.</param>
+    /// <param name="group">Only consider jobs of this group (case-insensitive); <see langword="null"/> considers every group (an All edit).</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The affected jobs in id order.</returns>
+    public async Task<IReadOnlyList<JobRecord>> FindDoneAffectedByLookChangeAsync(
+        Func<JobRecord, LookOverrides?, LookSettings> effectiveLookAfterChange,
+        string? group = null,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(effectiveLookAfterChange);
+
+        var overrides = (await ListTextureLooksAsync(ct).ConfigureAwait(false)).ToDictionary(l => l.Path, l => l.Look, StringComparer.Ordinal);
+        var affected = new List<JobRecord>();
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                if (group is null)
+                {
+                    command.CommandText = $"SELECT {JobColumns} FROM job WHERE state = 'Done' ORDER BY id;";
+                }
+                else
+                {
+                    command.CommandText = $"SELECT {JobColumns} FROM job WHERE state = 'Done' AND grp = $grp COLLATE NOCASE ORDER BY id;";
+                    command.Parameters.AddWithValue("$grp", group);
+                }
+
+                var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                await using (reader.ConfigureAwait(false))
+                {
+                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        var job = ReadJob(reader);
+                        if (job.LookHash is null || !TryParseKind(job.Kind, out var kind))
+                        {
+                            affected.Add(job);
+                            continue;
+                        }
+
+                        LookSettings after = effectiveLookAfterChange(job, overrides.GetValueOrDefault(job.Path));
+                        if (!string.Equals(after.GetStableHash(kind), job.LookHash, StringComparison.Ordinal))
+                        {
+                            affected.Add(job);
+                        }
+                    }
+                }
+            }
+        }
+
+        return affected;
+    }
+
+    /// <summary>
+    /// Reads the "This texture" look override of a path (§8).
+    /// </summary>
+    /// <param name="path">The canonical game path (normalised before lookup).</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The override, or <see langword="null"/> when the texture has none.</returns>
+    /// <exception cref="JsonException">The stored override is corrupt.</exception>
+    public async Task<LookOverrides?> GetTextureLookAsync(string path, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        var result = await ExecuteScalarAsync("SELECT look_json FROM texture_look WHERE path = $path;", [("$path", GamePath.Normalize(path))], ct).ConfigureAwait(false);
+        return result is string json ? LookOverrides.FromJson(json) : null;
+    }
+
+    /// <summary>
+    /// Stores (inserts or replaces) the "This texture" look override of a path. An empty override removes the row, as it changes nothing.
+    /// </summary>
+    /// <param name="path">The canonical game path (normalised before storing).</param>
+    /// <param name="look">The controls the texture sets.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>A task that completes when the override is stored.</returns>
+    /// <exception cref="ArgumentException">A value in <paramref name="look"/> is out of range.</exception>
+    public async Task SetTextureLookAsync(string path, LookOverrides look, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(look);
+
+        await SetTextureLooksAsync(new Dictionary<string, LookOverrides> { [path] = look }, replaceExisting: false, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Stores several texture overrides in one transaction (used by <see cref="TextureLooksFile.ImportAsync"/>). Empty overrides remove
+    /// their rows. Every override is validated before anything is written.
+    /// </summary>
+    /// <param name="looks">The overrides by canonical path (normalised before storing).</param>
+    /// <param name="replaceExisting"><see langword="true"/> removes every other override first.</param>
+    /// <param name="ct">Cancels the operation; nothing is written when cancelled.</param>
+    /// <returns>A task that completes when the overrides are stored.</returns>
+    /// <exception cref="ArgumentException">A value is out of range.</exception>
+    public async Task SetTextureLooksAsync(IReadOnlyDictionary<string, LookOverrides> looks, bool replaceExisting, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(looks);
+
+        var rows = new List<(string Path, string? Json)>(looks.Count);
+        foreach (var (path, look) in looks)
+        {
+            ArgumentNullException.ThrowIfNull(path, nameof(looks));
+            ArgumentNullException.ThrowIfNull(look, nameof(looks));
+            try
+            {
+                look.Validate($"Texture '{path}'");
+            }
+            catch (JsonException ex)
+            {
+                throw new ArgumentException(ex.Message, nameof(looks), ex);
+            }
+
+            rows.Add((GamePath.Normalize(path), look.IsEmpty ? null : look.ToJson()));
+        }
+
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+            await using (transaction.ConfigureAwait(false))
+            {
+                if (replaceExisting)
+                {
+                    await ExecuteAsync(connection, "DELETE FROM texture_look;", ct, transaction).ConfigureAwait(false);
+                }
+
+                var upsert = connection.CreateCommand();
+                var delete = connection.CreateCommand();
+                await using (upsert.ConfigureAwait(false))
+                await using (delete.ConfigureAwait(false))
+                {
+                    upsert.Transaction = transaction;
+                    upsert.CommandText = """
+                        INSERT INTO texture_look (path, look_json, updated_at) VALUES ($path, $look_json, $updated_at)
+                        ON CONFLICT(path) DO UPDATE SET look_json = excluded.look_json, updated_at = excluded.updated_at;
+                        """;
+                    var pathParameter = upsert.Parameters.Add("$path", SqliteType.Text);
+                    var jsonParameter = upsert.Parameters.Add("$look_json", SqliteType.Text);
+                    upsert.Parameters.AddWithValue("$updated_at", FormatTimestamp(_timeProvider.GetUtcNow()));
+
+                    delete.Transaction = transaction;
+                    delete.CommandText = "DELETE FROM texture_look WHERE path = $path;";
+                    var deletePath = delete.Parameters.Add("$path", SqliteType.Text);
+
+                    foreach (var (path, json) in rows)
+                    {
+                        if (json is null)
+                        {
+                            deletePath.Value = path;
+                            await delete.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            pathParameter.Value = path;
+                            jsonParameter.Value = json;
+                            await upsert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        }
+                    }
+                }
+
+                await transaction.CommitAsync(ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Removes the "This texture" look override of a path.
+    /// </summary>
+    /// <param name="path">The canonical game path (normalised before lookup).</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns><see langword="true"/> when an override was removed.</returns>
+    public async Task<bool> RemoveTextureLookAsync(string path, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        return await ExecuteNonQueryAsync("DELETE FROM texture_look WHERE path = $path;", [("$path", GamePath.Normalize(path))], ct).ConfigureAwait(false) == 1;
+    }
+
+    /// <summary>
+    /// Lists every "This texture" look override, ordered by path.
+    /// </summary>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The overrides.</returns>
+    /// <exception cref="JsonException">A stored override is corrupt.</exception>
+    public async Task<IReadOnlyList<TextureLook>> ListTextureLooksAsync(CancellationToken ct = default)
+    {
+        var looks = new List<TextureLook>();
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                command.CommandText = "SELECT path, look_json, updated_at FROM texture_look ORDER BY path;";
+                var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                await using (reader.ConfigureAwait(false))
+                {
+                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        looks.Add(new TextureLook(
+                            reader.GetString(0),
+                            LookOverrides.FromJson(reader.GetString(1)),
+                            reader.IsDBNull(2) ? DateTimeOffset.MinValue : ParseTimestamp(reader.GetString(2))));
+                    }
+                }
+            }
+        }
+
+        return looks;
+    }
 
     /// <summary>
     /// Marks a job as failed, records the error and increments its attempt count.
@@ -422,6 +769,100 @@ public sealed partial class JobStore : IAsyncDisposable
                 var skipped = await ApplyRescanCoreAsync(connection, transaction, currentGapPaths, unreadableArchives, ct).ConfigureAwait(false);
                 await transaction.CommitAsync(ct).ConfigureAwait(false);
                 return skipped;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Applies rule changes (from <see cref="Rules.RulesApplier.Preview"/>) in a single transaction: each row takes its new group, target,
+    /// model, state and error. A row is updated only while it is still in the change's <see cref="Rules.JobRuleChange.OldState"/>, and
+    /// <see cref="JobState.Running"/> rows are never touched, so a row the pipeline took meanwhile is left alone.
+    /// </summary>
+    /// <param name="changes">The changes.</param>
+    /// <param name="ct">Cancels the operation; nothing is written when cancelled.</param>
+    /// <returns>The number of rows updated.</returns>
+    /// <remarks>A row leaving <see cref="JobState.Done"/> loses its processing time and finish time; its attempt count is kept.</remarks>
+    /// <exception cref="ArgumentException">A change targets a state other than <see cref="JobState.Queued"/> or <see cref="JobState.Skipped"/>.</exception>
+    public Task<int> ApplyRuleChangesAsync(IEnumerable<Rules.JobRuleChange> changes, CancellationToken ct = default) =>
+        ApplyRuleChangesAsync(changes, null, ct);
+
+    /// <summary>
+    /// Applies rule changes like <see cref="ApplyRuleChangesAsync(IEnumerable{Rules.JobRuleChange}, CancellationToken)"/> and, in the same
+    /// transaction, stores <paramref name="rulesJson"/> under <see cref="Rules.RulesApplier.RulesProjectKey"/>: either both are written or neither.
+    /// </summary>
+    /// <param name="changes">The changes.</param>
+    /// <param name="rulesJson">The rules JSON to store, or <see langword="null"/> to leave the stored rules alone.</param>
+    /// <param name="ct">Cancels the operation; nothing is written when cancelled.</param>
+    /// <returns>The number of rows updated.</returns>
+    /// <exception cref="ArgumentException">A change targets a state other than <see cref="JobState.Queued"/> or <see cref="JobState.Skipped"/>.</exception>
+    public async Task<int> ApplyRuleChangesAsync(IEnumerable<Rules.JobRuleChange> changes, string? rulesJson, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(changes);
+
+        const string sql = """
+            UPDATE job SET
+              grp = $grp, target = $target, model = $model, state = $state, error = $error,
+              seconds = CASE WHEN state = 'Done' THEN NULL ELSE seconds END,
+              finished_at = CASE WHEN state = 'Done' THEN NULL ELSE finished_at END
+            WHERE id = $id AND state = $old AND state <> 'Running';
+            """;
+
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+            await using (transaction.ConfigureAwait(false))
+            {
+                var command = connection.CreateCommand();
+                await using (command.ConfigureAwait(false))
+                {
+                    command.Transaction = transaction;
+                    command.CommandText = sql;
+                    var id = command.Parameters.Add("$id", SqliteType.Integer);
+                    var old = command.Parameters.Add("$old", SqliteType.Text);
+                    var group = command.Parameters.Add("$grp", SqliteType.Text);
+                    var target = command.Parameters.Add("$target", SqliteType.Integer);
+                    var model = command.Parameters.Add("$model", SqliteType.Text);
+                    var state = command.Parameters.Add("$state", SqliteType.Text);
+                    var error = command.Parameters.Add("$error", SqliteType.Text);
+
+                    var affected = 0;
+                    foreach (var change in changes)
+                    {
+                        ArgumentNullException.ThrowIfNull(change, nameof(changes));
+                        if (change.NewState is not (JobState.Queued or JobState.Skipped))
+                        {
+                            throw new ArgumentException($"Job {change.Id}: a rule change can only queue or skip a job, not set it to {change.NewState}.", nameof(changes));
+                        }
+
+                        id.Value = change.Id;
+                        old.Value = change.OldState.ToString();
+                        group.Value = (object?)change.Group ?? DBNull.Value;
+                        target.Value = change.Target;
+                        model.Value = (object?)change.Model ?? DBNull.Value;
+                        state.Value = change.NewState.ToString();
+                        error.Value = (object?)change.Error ?? DBNull.Value;
+
+                        affected += await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    }
+
+                    if (rulesJson is not null)
+                    {
+                        var setRules = connection.CreateCommand();
+                        await using (setRules.ConfigureAwait(false))
+                        {
+                            setRules.Transaction = transaction;
+                            setRules.CommandText = "INSERT INTO project (key, value) VALUES ($key, $value) ON CONFLICT(key) DO UPDATE SET value = excluded.value;";
+                            setRules.Parameters.AddWithValue("$key", Rules.RulesApplier.RulesProjectKey);
+                            setRules.Parameters.AddWithValue("$value", rulesJson);
+                            await setRules.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        }
+                    }
+
+                    await transaction.CommitAsync(ct).ConfigureAwait(false);
+
+                    return affected;
+                }
             }
         }
     }
@@ -528,6 +969,9 @@ public sealed partial class JobStore : IAsyncDisposable
 
     private static JobState ParseState(string value) => Enum.Parse<JobState>(value, ignoreCase: false);
 
+    private static bool TryParseKind(string value, out TextureKind kind) =>
+        Enum.TryParse(value, ignoreCase: true, out kind) && Enum.IsDefined(kind) && !int.TryParse(value, out _);
+
     private static JobRecord ReadJob(SqliteDataReader reader) => new(
         Id: reader.GetInt64(0),
         Path: reader.GetString(1),
@@ -543,7 +987,54 @@ public sealed partial class JobStore : IAsyncDisposable
         Attempts: reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
         Error: reader.IsDBNull(12) ? null : reader.GetString(12),
         Seconds: reader.IsDBNull(13) ? null : reader.GetDouble(13),
-        FinishedAt: reader.IsDBNull(14) ? null : ParseTimestamp(reader.GetString(14)));
+        FinishedAt: reader.IsDBNull(14) ? null : ParseTimestamp(reader.GetString(14)),
+        LookHash: reader.IsDBNull(15) ? null : reader.GetString(15));
+
+    /// <summary>Upgrades a database created by an older version: adds the <c>look_hash</c> column (M5) when it is missing.</summary>
+    private static async Task MigrateAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        var hasLookHash = false;
+        var command = connection.CreateCommand();
+        await using (command.ConfigureAwait(false))
+        {
+            command.CommandText = "SELECT name FROM pragma_table_info('job');";
+            var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            await using (reader.ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    if (string.Equals(reader.GetString(0), "look_hash", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasLookHash = true;
+                    }
+                }
+            }
+        }
+
+        if (!hasLookHash)
+        {
+            await AddLookHashColumnAsync(connection, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Adds the <c>look_hash</c> column. Two processes can open an old database at once and both see the column missing; the second
+    /// <c>ALTER TABLE</c> then fails with "duplicate column name", which means the column is there, so that error is handled as success.
+    /// </summary>
+    /// <param name="connection">An open connection.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>A task that completes when the column exists.</returns>
+    internal static async Task AddLookHashColumnAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        try
+        {
+            await ExecuteAsync(connection, "ALTER TABLE job ADD COLUMN look_hash TEXT;", ct).ConfigureAwait(false);
+        }
+        catch (SqliteException ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+        {
+            // Another process added the column between our check and our ALTER: the schema is already what we need.
+        }
+    }
 
     private static async Task<int> UpsertCoreAsync(SqliteConnection connection, SqliteTransaction transaction, IEnumerable<JobRecord> jobs, CancellationToken ct)
     {

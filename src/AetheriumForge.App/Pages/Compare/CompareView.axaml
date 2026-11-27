@@ -1,0 +1,222 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:compare="using:AetheriumForge.App.Pages.Compare"
+             x:Class="AetheriumForge.App.Pages.Compare.CompareView"
+             x:DataType="compare:CompareViewModel">
+  <UserControl.KeyBindings>
+    <KeyBinding Gesture="Ctrl+R" Command="{Binding RenderCommand}" />
+    <KeyBinding Gesture="Ctrl+Z" Command="{Binding UndoCommand}" />
+  </UserControl.KeyBindings>
+  <UserControl.Resources>
+    <compare:RgbaImageBitmapConverter x:Key="Bitmap" />
+    <!-- One Look panel slider row: label, inheritance, value, slider with a faint marker at the inherited value, and a reset button. -->
+    <DataTemplate x:Key="LookRow" x:DataType="compare:LookControlViewModel">
+      <Grid ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto,Auto" Margin="0,0,0,2"
+            ToolTip.Tip="{Binding Tooltip}" ToolTip.ShowOnDisabled="True">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Classes="label" Text="{Binding Label}" />
+          <TextBlock Text="{Binding InheritedFrom}" IsVisible="{Binding IsInherited}" FontSize="11" FontStyle="Italic" Opacity="0.5" VerticalAlignment="Center" />
+        </StackPanel>
+        <TextBlock Grid.Column="1" Classes="value" Text="{Binding ValueText}" />
+        <Panel Grid.Row="1" Grid.ColumnSpan="2">
+          <Slider Minimum="{Binding Minimum}" Maximum="{Binding Maximum}" Value="{Binding InheritedValue, Mode=OneWay}" IsVisible="{Binding IsSetHere}"
+                  IsHitTestVisible="False" Focusable="False" Opacity="0.3" ToolTip.Tip="{Binding InheritedText}" />
+          <Slider Minimum="{Binding Minimum}" Maximum="{Binding Maximum}" SmallChange="{Binding Step}" Value="{Binding Value}"
+                  IsEnabled="{Binding IsApplicable}" AutomationProperties.Name="{Binding Label}" DoubleTapped="OnSliderDoubleTapped" />
+        </Panel>
+        <Button Grid.Row="1" Grid.Column="2" Content="↺" Command="{Binding ResetCommand}" AutomationProperties.Name="{Binding ResetName}"
+                ToolTip.Tip="{Binding ResetName}" Padding="6,2" Margin="4,0,0,0" VerticalAlignment="Center" />
+      </Grid>
+    </DataTemplate>
+  </UserControl.Resources>
+  <UserControl.Styles>
+    <Style Selector="TextBlock.section">
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Margin" Value="0,12,0,4" />
+    </Style>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Opacity" Value="0.85" />
+    </Style>
+    <Style Selector="TextBlock.value">
+      <Setter Property="Opacity" Value="0.6" />
+      <Setter Property="HorizontalAlignment" Value="Right" />
+      <Setter Property="FontFeatures" Value="tnum" />
+    </Style>
+    <Style Selector="Slider">
+      <Setter Property="Margin" Value="0,-6,0,0" />
+    </Style>
+  </UserControl.Styles>
+
+  <Grid ColumnDefinitions="250,*,290" RowDefinitions="Auto,*,Auto">
+    <!-- Title -->
+    <StackPanel Grid.ColumnSpan="3" Orientation="Horizontal" Spacing="12" Margin="0,0,0,8">
+      <TextBlock Text="Compare" FontSize="24" FontWeight="SemiBold" />
+      <TextBlock Text="{Binding Status}" VerticalAlignment="Bottom" Margin="0,0,0,4" Opacity="0.7" TextTrimming="CharacterEllipsis"
+                 ToolTip.Tip="{Binding Status}" />
+    </StackPanel>
+
+    <!-- Left: what to preview -->
+    <ScrollViewer Grid.Row="1" Grid.RowSpan="2" Grid.Column="0" Margin="0,0,12,0">
+      <StackPanel Spacing="6">
+        <TextBlock Classes="section" Text="Group" Margin="0,0,0,4" />
+        <ComboBox ItemsSource="{Binding Groups}" SelectedItem="{Binding SelectedGroup}" HorizontalAlignment="Stretch" PlaceholderText="No project open" />
+        <Grid ColumnDefinitions="*,Auto" Margin="0,4,0,0">
+          <Button Content="Preview random from group" Command="{Binding PreviewRandomCommand}" HorizontalAlignment="Stretch"
+                  ToolTip.Tip="Picks random textures of the group for the thumbnail strip." />
+          <ComboBox Grid.Column="1" ItemsSource="{Binding SampleCountOptions}" SelectedItem="{Binding SampleCount}" Margin="6,0,0,0" MinWidth="64"
+                    ToolTip.Tip="How many samples" />
+        </Grid>
+
+        <TextBlock Classes="section" Text="Model" />
+        <ComboBox ItemsSource="{Binding Models}" SelectedItem="{Binding SelectedModel}" HorizontalAlignment="Stretch" PlaceholderText="No model installed"
+                  ToolTip.Tip="Preview another installed model on the same samples." />
+        <Button Content="Use this model for the group" Command="{Binding UseModelForGroupCommand}" IsEnabled="{Binding IsModelDifferentFromGroup}"
+                HorizontalAlignment="Stretch" />
+        <TextBlock Text="{Binding GroupModel, StringFormat='Group model: {0}'}" Opacity="0.6" FontSize="12" TextWrapping="Wrap" />
+
+        <TextBlock Classes="section" Text="Finished textures" />
+        <Grid ColumnDefinitions="*,Auto">
+          <TextBox Text="{Binding SearchText}" PlaceholderText="Search by path" />
+          <Button Grid.Column="1" Content="Find" Command="{Binding SearchCommand}" Margin="6,0,0,0" IsDefault="True" />
+        </Grid>
+        <ListBox ItemsSource="{Binding SearchResults}" SelectedItem="{Binding SelectedSearchResult}" MaxHeight="360">
+          <ListBox.ItemTemplate>
+            <DataTemplate x:DataType="compare:CompareSampleViewModel">
+              <StackPanel ToolTip.Tip="{Binding FullPath}">
+                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                <TextBlock Text="{Binding SizeText}" FontSize="11" Opacity="0.6" />
+              </StackPanel>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </StackPanel>
+    </ScrollViewer>
+
+    <!-- Centre: before/after -->
+    <DockPanel Grid.Row="1" Grid.Column="1">
+      <Border DockPanel.Dock="Top" IsVisible="{Binding HasError}" Background="#33E5484D" BorderBrush="#FFE5484D" BorderThickness="1" CornerRadius="4"
+              Padding="10,6" Margin="0,0,0,6" AutomationProperties.Name="Error">
+        <Grid ColumnDefinitions="*,Auto">
+          <SelectableTextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" VerticalAlignment="Center" />
+          <Button Grid.Column="1" Content="Dismiss" Command="{Binding DismissErrorCommand}" Margin="8,0,0,0" VerticalAlignment="Top" />
+        </Grid>
+      </Border>
+      <Border DockPanel.Dock="Top" IsVisible="{Binding IsRunActive}" Background="#33F5A524" BorderBrush="#FFF5A524" BorderThickness="1" CornerRadius="4"
+              Padding="10,6" Margin="0,0,0,6" AutomationProperties.Name="Run active">
+        <TextBlock Text="{Binding RunLockReason}" TextWrapping="Wrap" />
+      </Border>
+      <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,*,Auto" Margin="0,0,0,6">
+        <ComboBox ItemsSource="{Binding ChannelModes}" SelectedItem="{Binding Channel}" MinWidth="96" ToolTip.Tip="Channel view" />
+        <Button Grid.Column="1" Content="−" Command="{Binding ZoomOutCommand}" AutomationProperties.Name="Zoom out" Margin="8,0,0,0" ToolTip.Tip="Zoom out (mouse wheel)" />
+        <Button Grid.Column="2" Content="+" Command="{Binding ZoomInCommand}" AutomationProperties.Name="Zoom in" Margin="4,0,0,0" ToolTip.Tip="Zoom in (mouse wheel)" />
+        <Button Grid.Column="3" Content="Fit" Command="{Binding FitToViewCommand}" AutomationProperties.Name="Fit to view" Margin="4,0,0,0" />
+        <TextBlock Grid.Column="4" Text="{Binding ZoomText}" VerticalAlignment="Center" Margin="8,0" MinWidth="72" Opacity="0.7" />
+        <Slider Grid.Column="5" Minimum="0" Maximum="1" Value="{Binding Split}" Margin="8,0" VerticalAlignment="Center"
+                ToolTip.Tip="Split between before (left) and after (right); you can also drag the line" />
+        <StackPanel Grid.Column="6" Orientation="Horizontal" Spacing="4">
+          <Border IsVisible="{Binding IsRenderPending}" Background="#33F5A524" CornerRadius="3" Padding="6,2" VerticalAlignment="Center">
+            <TextBlock Text="Preview out of date" FontSize="12" />
+          </Border>
+          <Button Content="Render" Command="{Binding RenderCommand}" IsVisible="{Binding IsRenderPending}" Classes="accent"
+                  AutomationProperties.Name="Render" ToolTip.Tip="Apply the slider values to the preview (Ctrl+R)" />
+          <Button Content="Undo" Command="{Binding UndoCommand}" AutomationProperties.Name="Undo"
+                  ToolTip.Tip="Back to the slider values and render before the last Render (Ctrl+Z)" />
+        </StackPanel>
+      </Grid>
+      <ProgressBar DockPanel.Dock="Bottom" Minimum="0" Maximum="1" Value="{Binding LoadProgress}" IsVisible="{Binding IsLoading}" Height="4" Margin="0,4,0,0" />
+
+      <Border x:Name="Viewport" ClipToBounds="True" CornerRadius="4" Background="#FF1B1B1F" Cursor="SizeAll">
+        <Panel>
+          <Panel x:Name="Stage" Width="{Binding DisplayWidth}" Height="{Binding DisplayHeight}" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <Panel.RenderTransform>
+              <TranslateTransform X="{Binding PanX}" Y="{Binding PanY}" />
+            </Panel.RenderTransform>
+            <Image Source="{Binding AfterImage, Converter={StaticResource Bitmap}}" Stretch="Fill" RenderOptions.BitmapInterpolationMode="None" />
+            <Border Width="{Binding SplitOffset}" HorizontalAlignment="Left" ClipToBounds="True">
+              <Image Source="{Binding BeforeImage, Converter={StaticResource Bitmap}}" Stretch="Fill" HorizontalAlignment="Left"
+                     Width="{Binding DisplayWidth}" Height="{Binding DisplayHeight}" RenderOptions.BitmapInterpolationMode="None" />
+            </Border>
+            <Canvas>
+              <Rectangle Canvas.Left="{Binding SplitOffset}" Width="2" Height="{Binding DisplayHeight}" Fill="#E0FFFFFF" Cursor="SizeWestEast" Margin="-1,0,0,0" />
+            </Canvas>
+          </Panel>
+          <TextBlock Text="Before" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,8" Foreground="White" Opacity="0.75" />
+          <TextBlock Text="After" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="10,8" Foreground="White" Opacity="0.75" />
+        </Panel>
+      </Border>
+    </DockPanel>
+
+    <!-- Bottom: thumbnail strip -->
+    <ListBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding Samples}" SelectedItem="{Binding SelectedStripSample}" Margin="0,8,0,0"
+             ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Disabled">
+      <ListBox.ItemsPanel>
+        <ItemsPanelTemplate>
+          <StackPanel Orientation="Horizontal" Spacing="4" />
+        </ItemsPanelTemplate>
+      </ListBox.ItemsPanel>
+      <ListBox.ItemTemplate>
+        <DataTemplate x:DataType="compare:CompareSampleViewModel">
+          <StackPanel Width="104" Spacing="2" ToolTip.Tip="{Binding FullPath}">
+            <Border Width="96" Height="96" Background="#FF1B1B1F" CornerRadius="3">
+              <Panel>
+                <Image Source="{Binding Thumbnail, Converter={StaticResource Bitmap}}" Stretch="Uniform" />
+                <Ellipse Width="8" Height="8" Fill="#FF4CC38A" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="4"
+                         IsVisible="{Binding IsCached}" ToolTip.Tip="Upscale cached: instant preview" />
+              </Panel>
+            </Border>
+            <TextBlock Text="{Binding Name}" FontSize="11" TextTrimming="CharacterEllipsis" />
+          </StackPanel>
+        </DataTemplate>
+      </ListBox.ItemTemplate>
+    </ListBox>
+
+    <!-- Right: Look panel -->
+    <DockPanel Grid.Row="1" Grid.RowSpan="2" Grid.Column="2" Margin="12,0,0,0">
+      <!-- Action bar: unsaved indicator, Revert, Apply (primary, bottom-right). -->
+      <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto,Auto" Margin="0,8,0,0">
+        <TextBlock Text="Unsaved changes" IsVisible="{Binding Look.IsScopeDirty}" VerticalAlignment="Center" FontSize="12" Opacity="0.75" />
+        <Button Grid.Column="1" Content="Revert" Command="{Binding RevertCommand}" Margin="0,0,6,0" AutomationProperties.Name="Revert"
+                ToolTip.Tip="Discard the unsaved changes of this scope" />
+        <Button Grid.Column="2" Content="Apply" Command="{Binding ApplyCommand}" Classes="accent" AutomationProperties.Name="Apply"
+                ToolTip.Tip="Save this scope's look. You are asked before finished textures are re-queued." />
+      </Grid>
+      <ScrollViewer>
+        <StackPanel Spacing="2" DataContext="{Binding Look}" x:DataType="compare:LookPanelViewModel">
+          <TextBlock Classes="section" Text="Scope" Margin="0,0,0,4" />
+          <ComboBox ItemsSource="{Binding Scopes}" SelectedItem="{Binding Scope}" HorizontalAlignment="Stretch" AutomationProperties.Name="Scope"
+                    ToolTip.Tip="All: every group. Group: this group. Texture: only the selected texture. Each level stores only the controls it sets." />
+
+          <TextBlock Classes="section" Text="Presets" />
+          <ItemsControl ItemsSource="{Binding $parent[UserControl].((compare:CompareViewModel)DataContext).Presets}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <WrapPanel />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="compare:LookPreset">
+                <Button Content="{Binding Name}" ToolTip.Tip="{Binding Description}" Margin="0,0,4,4"
+                        Command="{Binding $parent[UserControl].((compare:CompareViewModel)DataContext).ApplyPresetCommand}" CommandParameter="{Binding}" />
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+          <TextBlock Text="Moving a slider does not render: press Render (Ctrl+R). ↺ resets a control to its inherited value." FontSize="11" Opacity="0.6" TextWrapping="Wrap" />
+
+          <TextBlock Classes="section" Text="Detail" />
+          <ItemsControl ItemsSource="{Binding DetailControls}" ItemTemplate="{StaticResource LookRow}" />
+          <!-- Denoise stays hidden until a denoise model exists: it has no look value to bind yet. -->
+          <StackPanel IsVisible="{Binding IsDenoiseEnabled}" ToolTip.Tip="{Binding DenoiseTooltip}">
+            <TextBlock Classes="label" Text="Denoise" />
+            <Slider Minimum="0" Maximum="1" Value="0" IsEnabled="False" />
+          </StackPanel>
+
+          <TextBlock Classes="section" Text="Colour" />
+          <ItemsControl ItemsSource="{Binding ColourControls}" ItemTemplate="{StaticResource LookRow}" />
+
+          <TextBlock Classes="section" Text="Surface" />
+          <ItemsControl ItemsSource="{Binding SurfaceControls}" ItemTemplate="{StaticResource LookRow}" />
+        </StackPanel>
+      </ScrollViewer>
+    </DockPanel>
+  </Grid>
+</UserControl>

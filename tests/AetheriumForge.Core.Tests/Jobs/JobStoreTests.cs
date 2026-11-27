@@ -59,7 +59,7 @@ public sealed class JobStoreTests : IAsyncLifetime
         var objects = await ScalarAsync("SELECT group_concat(name, ',') FROM (SELECT name FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' ORDER BY name);");
 
         // Assert
-        Assert.Equal("job,job_state,project,run", objects);
+        Assert.Equal("job,job_state,project,run,texture_look", objects);
     }
 
     [Fact]

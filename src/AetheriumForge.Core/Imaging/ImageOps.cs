@@ -6,7 +6,7 @@ namespace AetheriumForge.Core.Imaging;
 /// Pixel post-processing for one texture (IMPLEMENTATION_GUIDE §10 steps 3, 5, 6 and 7): channel split and merge, resizing and
 /// normal-map renormalisation. The maths follows the reference prototype (<c>run.py</c>, Pillow + NumPy) but works in float.
 /// </summary>
-public static class ImageOps
+public static partial class ImageOps
 {
     private const float ByteToUnit = 1f / 255f;
     private const float MinimumNormalZ = 0.05f;

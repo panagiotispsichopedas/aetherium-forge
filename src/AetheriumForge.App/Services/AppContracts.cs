@@ -97,6 +97,12 @@ public enum AppPage
 
     /// <summary>Installed and downloadable models, GPU profile.</summary>
     Models,
+
+    /// <summary>Rules editor: groups, exclusions, live counts (M5).</summary>
+    Rules,
+
+    /// <summary>Before/after compare and the per-group look panel (M5).</summary>
+    Compare,
 }
 
 /// <summary>

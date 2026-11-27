@@ -80,12 +80,44 @@ public static class AppHost
         services.AddModelsPage();
         services.AddSingleton<ModelsPagePlaceholder>(sp => new ModelsPagePlaceholder(sp.GetRequiredService<Pages.Models.ModelsViewModel>()));
 
+        // ── PAGE: Rules (M5) ──
+        // IStyleSelection is shared with Compare (TryAdd, so whichever block registers it first wins and both get the same instance).
+        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<AetheriumForge.App.Pages.Rules.IStyleSelection, AetheriumForge.App.Pages.Rules.StyleSelection>(services);
+        services.AddSingleton<AetheriumForge.App.Pages.Rules.IRulesPageServices, AetheriumForge.App.Pages.Rules.AvaloniaRulesPageServices>();
+        services.AddSingleton<AetheriumForge.App.Pages.Rules.RulesViewModel>();
+        services.AddSingleton<RulesPagePlaceholder>(sp => new RulesPagePlaceholder(sp.GetRequiredService<AetheriumForge.App.Pages.Rules.RulesViewModel>()));
+
+        // ── PAGE: Compare (M5) ──
+        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<AetheriumForge.App.Pages.Rules.IStyleSelection, AetheriumForge.App.Pages.Rules.StyleSelection>(services);
+        services.AddSingleton(sp => new Pages.Compare.ProjectPreviewBackend(sp.GetService<IProjectSession>(), sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>()));
+        services.AddSingleton(sp =>
+        {
+            // The runner is optional (the Run page registers it); without one there is no run to yield the GPU to.
+            return new Pages.Compare.PreviewEngine(
+                sp.GetRequiredService<Pages.Compare.ProjectPreviewBackend>(),
+                () => sp.GetService<IForgeRunner>()?.State ?? Core.Pipeline.PipelineState.Idle,
+                logger: sp.GetService<Microsoft.Extensions.Logging.ILogger<Pages.Compare.PreviewEngine>>(),
+                gpuLock: sp.GetService<Core.Concurrency.GpuWorkLock>() is { } gpuLock ? new Pages.Compare.GpuWorkLockGate(gpuLock) : null);
+        });
+        services.AddSingleton<Pages.Compare.ICompareProjectData>(sp => new Pages.Compare.SessionCompareProjectData(sp.GetService<IProjectSession>()));
+        services.AddSingleton<Pages.Compare.ICompareDialogs, Pages.Compare.AvaloniaCompareDialogs>();
+        services.AddSingleton(sp => new Pages.Compare.CompareViewModel(
+            sp.GetRequiredService<Pages.Compare.PreviewEngine>(),
+            sp.GetRequiredService<Pages.Compare.ICompareProjectData>(),
+            sp.GetRequiredService<Pages.Compare.ICompareDialogs>(),
+            logger: sp.GetService<Microsoft.Extensions.Logging.ILogger<Pages.Compare.CompareViewModel>>(),
+            runner: sp.GetService<IForgeRunner>(),
+            selection: sp.GetService<AetheriumForge.App.Pages.Rules.IStyleSelection>()));
+        services.AddSingleton<ComparePagePlaceholder>(sp => new ComparePagePlaceholder(sp.GetRequiredService<Pages.Compare.CompareViewModel>()));
+
         services.AddSingleton<IReadOnlyDictionary<AppPage, object>>(sp => new Dictionary<AppPage, object>
         {
             [AppPage.Scan] = sp.GetRequiredService<ScanPagePlaceholder>().ViewModel,
             [AppPage.Queue] = sp.GetRequiredService<QueuePagePlaceholder>().ViewModel,
             [AppPage.Run] = sp.GetRequiredService<RunPagePlaceholder>().ViewModel,
             [AppPage.Models] = sp.GetRequiredService<ModelsPagePlaceholder>().ViewModel,
+            [AppPage.Rules] = sp.GetRequiredService<RulesPagePlaceholder>().ViewModel,
+            [AppPage.Compare] = sp.GetRequiredService<ComparePagePlaceholder>().ViewModel,
         });
         services.AddSingleton<MainWindowViewModel>();
         services.AddSingleton<MainWindow>();
@@ -101,4 +133,8 @@ public static class AppHost
     internal sealed record RunPagePlaceholder(object ViewModel);
 
     internal sealed record ModelsPagePlaceholder(object ViewModel);
+
+    internal sealed record RulesPagePlaceholder(object ViewModel);
+
+    internal sealed record ComparePagePlaceholder(object ViewModel);
 }
