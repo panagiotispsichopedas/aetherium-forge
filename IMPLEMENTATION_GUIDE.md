@@ -264,13 +264,30 @@ Also skip cubemaps (caps2 `0x200`).
 
 ### Groups (editable rules, evaluated top-down, first match wins)
 
+**Default groups.** Each is a separate group so it can carry its own look. All use `realesrgan-x4plus`, `maxFactor` 4 and a neutral look unless noted. The order is the evaluation order.
+
+| # | Group | Match | Cap | Notes |
+|---|---|---|---|---|
+| 1 | Armor | `*\armor\*` | 4096 | Includes DLC and Creation Club armor (`textures\dlc01\armor\…`). |
+| 2 | Weapons | `*\weapons\*` | 4096 | |
+| 3 | Clothes | `*\clothes\*` | 4096 | |
+| 4 | Creatures | `textures\actors\*` | 4096 | `textures\actors\character\` stays excluded (skin mods own it). |
+| 5 | Architecture | `*\architecture\*`, `*\dungeons\*` | 4096 | |
+| 6 | Landscape | `*\landscape\*`, `*\plants\*`, `*\trees\*` | 4096 | Terrain LOD stays excluded. |
+| 7 | Clutter | `*\clutter\*` | 2048 | Relief (`normalStrength`) 1.4. |
+| 8 | Large | `*` | 4096 | Catch-all. |
+
+On the reference install the old two-group default sent 437 armor, 266 weapon and 364 clothing textures (plus DLC) to "Large". With these defaults each category can be styled on its own. Existing projects keep their stored rules; the Rules page offers "Reset to defaults" to adopt the new set.
+
 ```json
 {
+  "look": { },
   "groups": [
-    { "name": "Clutter",  "match": ["*\\clutter\\*"], "cap": 2048, "maxFactor": 4,
-      "model": "realesrgan-x4plus", "normalStrength": 1.4 },
-    { "name": "Large",    "match": ["*"],             "cap": 4096, "maxFactor": 4,
-      "model": "realesrgan-x4plus", "normalStrength": 1.0 }
+    { "name": "Armor",   "match": ["*\\armor\\*"],   "cap": 4096, "maxFactor": 4, "model": "realesrgan-x4plus", "look": { } },
+    { "name": "Weapons", "match": ["*\\weapons\\*"], "cap": 4096, "maxFactor": 4, "model": "realesrgan-x4plus", "look": { } },
+    "…",
+    { "name": "Clutter", "match": ["*\\clutter\\*"], "cap": 2048, "maxFactor": 4, "model": "realesrgan-x4plus", "look": { "normalStrength": 1.4 } },
+    { "name": "Large",   "match": ["*"],             "cap": 4096, "maxFactor": 4, "model": "realesrgan-x4plus", "look": { } }
   ],
   "minSource": 128,
   "exclude": [ "...see above..." ]
@@ -307,7 +324,14 @@ Each group can carry an optional `look` block that steers how the output looks. 
 
 Order in §10: upscale → AI-strength blend → resize → sharpen → colour grading (colour kinds) → normal strength (normals) → specular scale → merge alpha → encode.
 
-The look block is part of the rules JSON, so it is saved with the project and exported with the rules. The job store records a hash of the effective look per job. Changing a group's look re-queues its finished jobs only when the user confirms ("Apply to finished textures?").
+**Scopes: All → Group → This texture.** A look can be set at three levels, and each level stores only the controls it changes:
+- **All:** the top-level `look` in the rules JSON. It applies to every group.
+- **Group:** the group's `look`. Controls it sets replace those from All.
+- **This texture:** a per-texture override for one path, stored in the project database (table `texture_look(path TEXT PRIMARY KEY, look_json TEXT, updated_at TEXT)`, not in the rules JSON, so rules stay portable). Controls it sets replace those from the group.
+
+The **effective look** of a job resolves control by control: texture override, else group, else All, else neutral. The pipeline renders with the effective look. The job store records the effective look's hash, covering only the controls that apply to the job's kind. Changing any scope lists the finished jobs whose effective hash changes, and re-queues them only when the user confirms ("Apply to N finished textures?").
+
+The All and group looks are part of the rules JSON, so they are saved with the project and exported with the rules. Per-texture overrides travel with the project; they can be exported separately as `texture-looks.json`.
 
 ---
 
@@ -455,7 +479,13 @@ The app follows the workflow, not the build order. The left rail is a **stepper*
 | Step | Replaces | Contents |
 |---|---|---|
 | **1 · Project** | Scan | Game detection, project folder, scan and rescan, a trimmed summary (four tiles), "Next: Style". |
-| **2 · Style** | Rules + Compare | Groups on the left (drag to reorder; first match wins), a large before/after preview in the centre with the sample strip, and a right panel with **Matching** (patterns, size range, kinds), **Output** (model, largest size, scale) and **Look** (§8 sliders and presets) tabs. Every group setting is edited here and only here, including the model and relief (normal strength). One action bar: Apply, Revert, unsaved-changes indicator, and confirmation before finished textures change. |
+| **2 · Style** | Rules + Compare | Groups on the left (drag to reorder; first match wins), a large before/after preview in the centre with the sample strip, and a right panel with **Matching** (patterns, size range, kinds), **Output** (model, largest size, scale) and **Look** (§8 sliders and presets) tabs.
+  - **Look panel behaviour:**
+    - A **scope selector** (All / This group / This texture) chooses which level the sliders edit. Sliders show the inherited value as a faint marker, and controls not set at the current scope read "inherited from Group" or "inherited from All".
+    - Each slider has a small **reset** button beside it. It clears the control at the current scope, so the control falls back to the inherited value (neutral at All).
+    - Moving sliders never renders automatically. A pending change shows a **Render** button and marks the preview "out of date". Render applies the settings to the preview from the cached upscale.
+    - **Undo** restores the slider values from before the last Render, and shows that earlier render from the cache. Each Render pushes onto an undo stack.
+    - "Apply" saves the current scope's look (the rules for All and Group, `texture_look` for This texture), then asks before re-queueing affected finished textures. Every group setting is edited here and only here, including the model and relief (normal strength). One action bar: Apply, Revert, unsaved-changes indicator, and confirmation before finished textures change. |
 | **3 · Forge** | Run + Queue | **Pre-flight checklist** (project scanned, models installed, GPU calibrated, texconv found, disk space), each failed check with a fix button. Start is disabled until the required checks pass. Below it: overall progress and ETA, stage lanes, and tabs In progress / Queued / Failed / Done / Log. Filters and bulk actions (Retry, Skip, Re-queue) live in the tabs and are locked with a visible reason while forging. |
 | **4 · Package** | Package | M6 (below). |
 | Models & GPU (tool) | Models + Settings | Downloads, calibration, adapter, advanced settings. Also reached from pre-flight fixes. |
