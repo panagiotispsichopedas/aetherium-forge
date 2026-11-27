@@ -1,6 +1,7 @@
 using AetheriumForge.Core.Jobs;
 using AetheriumForge.Core.Pipeline;
 using AetheriumForge.Core.Textures;
+using Microsoft.Data.Sqlite;
 
 namespace AetheriumForge.Core.Tests.Pipeline;
 
@@ -144,7 +145,7 @@ public sealed class ForgePipelineTests : IAsyncLifetime
         var (pipeline, _, _, _) = Create(codec, new PipelineFakeUpscaler { Tiles = 20, TileDelay = TimeSpan.FromMilliseconds(10) });
         using var stop = new CancellationTokenSource();
         var run = pipeline.RunAsync(null, stop.Token);
-        await WaitUntilAsync(() => codec.CommitCount >= 1);
+        await WaitUntilAsync(() => OutputFiles().Length >= 1);
 
         // Act
         await stop.CancelAsync();
@@ -163,7 +164,7 @@ public sealed class ForgePipelineTests : IAsyncLifetime
         var (pipeline, _, _, _) = Create(codec, new PipelineFakeUpscaler { Tiles = 20, TileDelay = TimeSpan.FromMilliseconds(10) });
         using var stop = new CancellationTokenSource();
         var run = pipeline.RunAsync(null, stop.Token);
-        await WaitUntilAsync(() => codec.CommitCount >= 1);
+        await WaitUntilAsync(() => OutputFiles().Length >= 1);
 
         // Act
         await stop.CancelAsync();
@@ -206,19 +207,21 @@ public sealed class ForgePipelineTests : IAsyncLifetime
         var (first, _, _, _) = Create(codec, upscaler);
         using var stop = new CancellationTokenSource();
         var run = first.RunAsync(null, stop.Token);
-        await WaitUntilAsync(() => codec.CommitCount >= 2);
+        await WaitUntilAsync(() => OutputFiles().Length >= 2);
         await stop.CancelAsync();
         await run.WaitAsync(WaitTimeout, Ct);
-        var (second, _, _, _) = Create(codec, upscaler);
+        var doneAfterFirst = (await AllJobsAsync()).Where(j => j.State == JobState.Done).Select(j => j.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var (second, secondSource, _, _) = Create(codec, upscaler);
 
         // Act
         var summary = await second.RunAsync(null, Ct);
 
-        // Assert: every texture committed exactly once across both runs, all Done, every file complete.
+        // Assert: the second run touches only what the first did not finish, each once; all Done; every file complete.
         var jobs = await AllJobsAsync();
         Assert.Equal(
-            (12, true, 12, true),
-            (jobs.Count(j => j.State == JobState.Done), codec.Commits.Values.All(n => n == 1), codec.Commits.Count, OutputFiles().All(f => File.ReadAllBytes(f).SequenceEqual(PipelineFakeCodec.EncodedBytes))));
+            (12, false, 12 - doneAfterFirst.Count, true, 12, true),
+            (jobs.Count(j => j.State == JobState.Done), secondSource.Reads.Keys.Any(doneAfterFirst.Contains), secondSource.Reads.Count, secondSource.Reads.Values.All(n => n == 1),
+                OutputFiles().Length, OutputFiles().All(f => File.ReadAllBytes(f).SequenceEqual(PipelineFakeCodec.EncodedBytes))));
         Assert.False(summary.Stopped);
     }
 
@@ -275,7 +278,7 @@ public sealed class ForgePipelineTests : IAsyncLifetime
         // Assert
         var broken = (await AllJobsAsync()).Single(j => j.Path.Contains(PipelineFakeSource.FailMarker, StringComparison.Ordinal));
         Assert.Equal(
-            (4, 1, JobState.Failed, 1, 2, true),
+            (4, 1, JobState.Failed, 2, 2, true),
             (summary.Done, summary.Failed, broken.State, broken.Attempts, source.Reads[broken.Path], broken.Error!.Contains("cannot read", StringComparison.Ordinal)));
     }
 
@@ -524,6 +527,183 @@ public sealed class ForgePipelineTests : IAsyncLifetime
         Assert.Throws<InvalidDataException>(act);
     }
 
+    // Review round 1 (PR #11): one test per item.
+
+    [Fact]
+    public async Task RunAsync_ProgressHandlerThrows_RunCompletes()
+    {
+        // Arrange (item 1)
+        await SeedAsync(4);
+        var (pipeline, _, _, _) = Create(options: Options() with { ProgressInterval = TimeSpan.FromMilliseconds(5) });
+
+        // Act
+        var summary = await pipeline.RunAsync(new ThrowingProgress(), Ct);
+
+        // Assert
+        Assert.Equal((4, PipelineState.Idle), (summary.Done, pipeline.State));
+    }
+
+    [Fact]
+    public async Task RunAsync_PathIntoStagingFolder_FailsInProducerWithoutDecodeOrAttempt()
+    {
+        // Arrange (item 2): the path passes the row checks but GetOutputPath rejects it.
+        await _store.UpsertJobsAsync([Record($@"{TextureProcessor.StagingFolderName}\evil.dds")], Ct);
+        var (pipeline, source, _, _) = Create();
+
+        // Act
+        var summary = await pipeline.RunAsync(null, Ct);
+
+        // Assert
+        var job = (await AllJobsAsync())[0];
+        Assert.Equal((1, 0, JobState.Failed, 0), (summary.Failed, source.Reads.Count, job.State, job.Attempts));
+    }
+
+    [Fact]
+    public async Task RunAsync_MarkDoneFailsAfterCommit_CountsDoneAndKeepsRunAlive()
+    {
+        // Arrange (item 3): the job row disappears between the encode and MarkDone, so every MarkDone throws.
+        await SeedAsync(1);
+        var codec = new PipelineFakeCodec { OnEncoded = _ => DeleteJobRows() };
+        var (pipeline, source, _, _) = Create(codec);
+
+        // Act
+        var summary = await pipeline.RunAsync(null, Ct);
+
+        // Assert: committed once, counted Done, not retried, no texture or work folder left behind.
+        Assert.Equal((1, 0, 1, 1, 0), (summary.Done, summary.Failed, source.Reads.Values.Sum(), OutputFiles().Length, WorkEntries().Length));
+    }
+
+    [Fact]
+    public async Task RunAsync_StopKillsEncodeOnLastAttempt_RequeuesInsteadOfFailing()
+    {
+        // Arrange (item 4): with one attempt, a stop that makes the encoder throw a non-cancellation error.
+        await SeedAsync(2);
+        var codec = new PipelineFakeCodec { EncodeDelay = TimeSpan.FromSeconds(10), ThrowIOExceptionWhenCancelled = true };
+        var (pipeline, _, _, _) = Create(codec, new PipelineFakeUpscaler { Tiles = 1 }, Options() with { MaxAttempts = 1 });
+        using var stop = new CancellationTokenSource();
+        var run = pipeline.RunAsync(null, stop.Token);
+        await WaitUntilAsync(() => !codec.EncodeTargets.IsEmpty);
+
+        // Act
+        await stop.CancelAsync();
+        var summary = await run.WaitAsync(WaitTimeout, Ct);
+
+        // Assert
+        var jobs = await AllJobsAsync();
+        Assert.Equal((0, 2, 0), (summary.Failed, jobs.Count(j => j.State == JobState.Queued), jobs.Sum(j => j.Attempts)));
+    }
+
+    [Fact]
+    public async Task RunAsync_ManyJobsSeveralModels_EtaGetsOneEntryPerModel()
+    {
+        // Arrange (item 5): 20 model jobs and 5 parallax jobs are two models, not 25 entries.
+        await SeedAsync(20);
+        await _store.UpsertJobsAsync(Enumerable.Range(0, 5).Select(i => Record($@"textures\t\h{i}_p.dds") with { Kind = nameof(TextureKind.Parallax) }), Ct);
+        var eta = new FakeEtaEstimator();
+        var (pipeline, _, _, _) = Create(upscaler: new PipelineFakeUpscaler { Tiles = 3, TileDelay = TimeSpan.FromMilliseconds(5) }, options: Options() with { ProgressInterval = TimeSpan.FromMilliseconds(5) }, eta: eta);
+
+        // Act
+        await pipeline.RunAsync(new RecordingProgress<PipelineProgress>(), Ct);
+
+        // Assert
+        Assert.InRange(eta.MaxEntries, 1, 2);
+    }
+
+    [Fact]
+    public async Task RunAsync_EveryEncodeFailsWithTinyChannels_FinishesWithoutDeadlock()
+    {
+        // Arrange (items 6 and 7): failures retried from the last stage while every channel is full.
+        await SeedAsync(10);
+        var codec = new PipelineFakeCodec { FailAllEncodes = true };
+        var options = Options() with { InputCapacity = 1, StageCapacity = 1, DecodeWorkers = 1, PostProcessWorkers = 1, EncodeWorkers = 1, MaxAttempts = 3 };
+        var (pipeline, _, _, _) = Create(codec, options: options);
+
+        // Act
+        var summary = await pipeline.RunAsync(null, Ct).WaitAsync(WaitTimeout, Ct);
+
+        // Assert: all failed after three attempts each, and the attempts are persisted.
+        var jobs = await AllJobsAsync();
+        Assert.Equal((10, 30, true), (summary.Failed, codec.EncodeTargets.Count, jobs.All(j => j is { State: JobState.Failed, Attempts: 3 })));
+    }
+
+    [Fact]
+    public async Task RunAsync_RescanSkipsJobDuringRun_JobNotProcessed()
+    {
+        // Arrange (item 8): the run loads 4 jobs, then a rescan drops two of them before they are taken.
+        await SeedAsync(4);
+        var (pipeline, source, _, _) = Create();
+        var progress = new RecordingProgress<PipelineProgress>();
+        var run = pipeline.RunAsync(progress, Ct);
+        pipeline.Pause();
+        await WaitUntilAsync(() => progress.Reports.Count > 0);
+        var keep = (await AllJobsAsync()).Take(2).Select(j => j.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        await _store.ApplyRescanAsync(keep, Ct);
+
+        // Act
+        pipeline.Unpause();
+        var summary = await run.WaitAsync(WaitTimeout, Ct);
+
+        // Assert
+        var jobs = await AllJobsAsync();
+        Assert.Equal(
+            (2, 2, true, 2),
+            (summary.Done, jobs.Count(j => j.State == JobState.Skipped), source.Reads.Keys.All(keep.Contains), progress.Reports[^1].Value.Total));
+    }
+
+    [Fact]
+    public async Task RunAsync_Commit_StagesOnOutputVolumeThenMoves()
+    {
+        // Arrange (item 9)
+        await SeedAsync(3);
+        var codec = new PipelineFakeCodec();
+        var (pipeline, _, _, _) = Create(codec);
+        var staging = Path.Combine(OutputRoot, TextureProcessor.StagingFolderName) + Path.DirectorySeparatorChar;
+
+        // Act
+        await pipeline.RunAsync(null, Ct);
+
+        // Assert: the codec only ever wrote into the staging folder; outputs are in place and staging is empty.
+        Assert.Equal(
+            (true, 3, 0),
+            (codec.EncodeTargets.All(t => t.StartsWith(staging, StringComparison.OrdinalIgnoreCase)), OutputFiles().Length, StagingEntries().Length));
+    }
+
+    [Fact]
+    public async Task RunAsync_LeftoverStagingFiles_WipedAtStart()
+    {
+        // Arrange (item 9): a crash left an uncommitted staged file.
+        await SeedAsync(1);
+        var staging = Path.Combine(OutputRoot, TextureProcessor.StagingFolderName);
+        Directory.CreateDirectory(staging);
+        await File.WriteAllTextAsync(Path.Combine(staging, "deadbeef.dds"), "partial", Ct);
+        var (pipeline, _, _, _) = Create();
+
+        // Act
+        await pipeline.RunAsync(null, Ct);
+
+        // Assert
+        Assert.Equal((0, 1), (StagingEntries().Length, OutputFiles().Length));
+    }
+
+    [Fact]
+    public async Task RunAsync_StoppedDuringEncode_LeavesStagingEmpty()
+    {
+        // Arrange (item 9)
+        await SeedAsync(2);
+        var codec = new PipelineFakeCodec { EncodeDelay = TimeSpan.FromSeconds(10) };
+        var (pipeline, _, _, _) = Create(codec, new PipelineFakeUpscaler { Tiles = 1 });
+        using var stop = new CancellationTokenSource();
+        var run = pipeline.RunAsync(null, stop.Token);
+        await WaitUntilAsync(() => !codec.EncodeTargets.IsEmpty);
+
+        // Act
+        await stop.CancelAsync();
+        await run.WaitAsync(WaitTimeout, Ct);
+
+        // Assert
+        Assert.Equal((0, 0), (StagingEntries().Length, OutputFiles().Length));
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow + WaitTimeout;
@@ -554,12 +734,13 @@ public sealed class ForgePipelineTests : IAsyncLifetime
     private (ForgePipeline Pipeline, PipelineFakeSource Source, PipelineFakeCodec Codec, FakeEtaEstimator Eta) Create(
         PipelineFakeCodec? codec = null,
         PipelineFakeUpscaler? upscaler = null,
-        PipelineOptions? options = null)
+        PipelineOptions? options = null,
+        FakeEtaEstimator? eta = null)
     {
         var source = new PipelineFakeSource();
         codec ??= new PipelineFakeCodec();
         upscaler ??= new PipelineFakeUpscaler();
-        var eta = new FakeEtaEstimator();
+        eta ??= new FakeEtaEstimator();
         var processor = new TextureProcessor(source, codec, _ => upscaler, OutputRoot, WorkRoot);
         return (new ForgePipeline(_store, processor, eta, options ?? Options()), source, codec, eta);
     }
@@ -578,7 +759,33 @@ public sealed class ForgePipelineTests : IAsyncLifetime
         return jobs;
     }
 
-    private string[] OutputFiles() => Directory.Exists(OutputRoot) ? Directory.GetFiles(OutputRoot, "*", SearchOption.AllDirectories) : [];
+    /// <summary>Committed textures (everything under <c>textures\</c>; the hidden staging folder is not output).</summary>
+    private string[] OutputFiles()
+    {
+        var textures = Path.Combine(OutputRoot, "textures");
+        return Directory.Exists(textures) ? Directory.GetFiles(textures, "*", SearchOption.AllDirectories) : [];
+    }
+
+    private string[] StagingEntries()
+    {
+        var staging = Path.Combine(OutputRoot, TextureProcessor.StagingFolderName);
+        return Directory.Exists(staging) ? Directory.GetFileSystemEntries(staging) : [];
+    }
+
+    /// <summary>Deletes every job row behind the store's back, so the next MarkDone fails (synchronous: runs inside the fake codec).</summary>
+    private void DeleteJobRows()
+    {
+        using var connection = new SqliteConnection($"Data Source={Path.Combine(_root, "project.db")};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM job;";
+        command.ExecuteNonQuery();
+    }
 
     private string[] WorkEntries() => Directory.Exists(WorkRoot) ? Directory.GetFileSystemEntries(WorkRoot) : [];
+
+    private sealed class ThrowingProgress : IProgress<PipelineProgress>
+    {
+        public void Report(PipelineProgress value) => throw new InvalidOperationException("broken progress handler");
+    }
 }

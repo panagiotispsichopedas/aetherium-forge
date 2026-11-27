@@ -50,6 +50,22 @@ public sealed class TextureProcessorTests : IDisposable
     }
 
     [Fact]
+    public async Task ProcessAsync_Commit_MovesFromHiddenStagingFolderToOutput()
+    {
+        // Arrange
+        var (processor, _, _) = Create(Solid(8, 8, 1, 2, 3, 255));
+        var staging = Path.Combine(_root, "out", TextureProcessor.StagingFolderName);
+
+        // Act
+        var result = await processor.ProcessAsync(Job(TextureKind.Diffuse, 32, 32), null, PauseToken.None, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal(
+            (true, true, 0),
+            (File.Exists(result.OutputPath), new DirectoryInfo(staging).Attributes.HasFlag(FileAttributes.Hidden), Directory.GetFileSystemEntries(staging).Length));
+    }
+
+    [Fact]
     public async Task ProcessAsync_NoModel_SkipsModel()
     {
         var (processor, _, upscaler) = Create(Solid(16, 16, 128, 128, 128, 255));
@@ -161,6 +177,8 @@ public sealed class TextureProcessorTests : IDisposable
     [InlineData(@"\evil.dds")]
     [InlineData("C:evil.dds")]
     [InlineData(@"\\server\share\evil.dds")]
+    [InlineData(@".aetherium-tmp\evil.dds")]
+    [InlineData(@".AETHERIUM-TMP/evil.dds")]
     [InlineData("")]
     public void GetOutputPath_EscapingPath_ThrowsArgumentException(string canonicalPath)
     {
@@ -239,11 +257,12 @@ public sealed class TextureProcessorTests : IDisposable
 
         public Task<RgbaImage> DecodeAsync(string ddsPath, string workFolder, CancellationToken ct = default) => Task.FromResult(decoded);
 
-        public Task EncodeBc7Async(RgbaImage image, string outputDdsPath, string workFolder, bool srgb, CancellationToken ct = default)
+        public async Task EncodeBc7Async(RgbaImage image, string outputDdsPath, string workFolder, bool srgb, CancellationToken ct = default)
         {
             Encoded = image;
             EncodedSrgb = srgb;
-            return Task.CompletedTask;
+            Directory.CreateDirectory(Path.GetDirectoryName(outputDdsPath)!);
+            await File.WriteAllBytesAsync(outputDdsPath, [0x44, 0x44, 0x53, 0x20], ct);
         }
     }
 

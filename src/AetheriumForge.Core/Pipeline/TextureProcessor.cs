@@ -18,13 +18,19 @@ namespace AetheriumForge.Core.Pipeline;
 /// <item>Normal maps are renormalised after resizing, with the group's normal strength.</item>
 /// <item>Parallax/height maps (<see cref="TextureKind.Parallax"/>) and jobs without a model skip the model and use Lanczos-3 only (§8).</item>
 /// </list>
-/// <para>The output file appears only when it is complete: the encoder writes in the work folder and moves the finished
-/// file into place, so an interrupted item never leaves a partial texture.</para>
+/// <para>The output file appears only when it is complete: the encoder writes the finished file into the hidden staging folder
+/// <c>&lt;outputRoot&gt;\.aetherium-tmp\</c> (<see cref="StagingFolderName"/>), which is on the output's own volume, and a
+/// same-volume move then commits it atomically, wherever the work folder lives. An interrupted item never leaves a partial
+/// texture under <c>textures\</c>. The staging folder is wiped when the pipeline starts and must never be packaged (the M6
+/// packager reads only <c>textures\</c>).</para>
 /// <para>The work is split into stage methods (decode, upscale, post-process, encode) that the staged pipeline (§11) calls
 /// from different workers; <see cref="ProcessAsync"/> composes them for single-texture use.</para>
 /// </remarks>
 public sealed partial class TextureProcessor
 {
+    /// <summary>Name of the hidden staging folder inside the output folder; never part of a packaged mod.</summary>
+    public const string StagingFolderName = ".aetherium-tmp";
+
     private static readonly char[] PathSeparators = ['\\', '/'];
 
     private readonly ITextureSource _source;
@@ -65,12 +71,17 @@ public sealed partial class TextureProcessor
     /// <summary>Gets the folder for temporary files.</summary>
     internal string WorkRoot => _workRoot;
 
+    /// <summary>Gets the hidden staging folder on the output volume (<c>&lt;outputRoot&gt;\.aetherium-tmp</c>).</summary>
+    internal string StagingRoot => Path.Combine(_outputRoot, StagingFolderName);
+
     /// <summary>
     /// Gets the output path for a canonical resource path.
     /// </summary>
     /// <param name="canonicalPath">For example <c>textures\clutter\bucket01.dds</c>.</param>
     /// <returns>The full output file path, always inside the output folder.</returns>
-    /// <exception cref="ArgumentException"><paramref name="canonicalPath"/> is rooted, has a <c>..</c> segment, or does not resolve to a file inside the output folder.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="canonicalPath"/> is rooted, has a <c>..</c> segment, points into the staging folder, or does not resolve to a file inside the output folder.
+    /// </exception>
     public string GetOutputPath(string canonicalPath)
     {
         ArgumentNullException.ThrowIfNull(canonicalPath);
@@ -80,12 +91,18 @@ public sealed partial class TextureProcessor
             throw new ArgumentException($"Texture path '{canonicalPath}' must be relative to the output folder.", nameof(canonicalPath));
         }
 
-        foreach (var segment in canonicalPath.Split(PathSeparators))
+        var segments = canonicalPath.Split(PathSeparators);
+        foreach (var segment in segments)
         {
             if (segment == "..")
             {
                 throw new ArgumentException($"Texture path '{canonicalPath}' must not contain '..' segments.", nameof(canonicalPath));
             }
+        }
+
+        if (string.Equals(segments[0], StagingFolderName, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException($"Texture path '{canonicalPath}' must not point into the staging folder.", nameof(canonicalPath));
         }
 
         var root = Path.GetFullPath(_outputRoot);
@@ -147,7 +164,7 @@ public sealed partial class TextureProcessor
 
         var work = Path.Combine(_workRoot, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
-        var texture = new DecodedTexture(job, outputPath, work, TryDeleteWorkFolder);
+        var texture = new DecodedTexture(job, outputPath, work, TryDeletePath);
         try
         {
             // 1. Extract
@@ -222,7 +239,8 @@ public sealed partial class TextureProcessor
     }
 
     /// <summary>
-    /// Stages 8–9: encodes BC7 inside the texture's work folder and atomically moves the finished file into the output folder.
+    /// Stages 8–9: encodes BC7 (temporary files in the texture's work folder) into the staging folder on the output volume, then
+    /// atomically moves the finished file into place.
     /// </summary>
     /// <param name="texture">The post-processed texture. The caller still owns it and disposes it afterwards.</param>
     /// <param name="cancellationToken">Cancels the encode; nothing is committed when cancelled.</param>
@@ -234,7 +252,27 @@ public sealed partial class TextureProcessor
         var output = texture.Output ?? throw new InvalidOperationException("The texture has not been post-processed.");
 
         var clock = Stopwatch.StartNew();
-        await _codec.EncodeBc7Async(output, texture.OutputPath, texture.WorkFolder, Texconv.IsSrgbFormat(texture.SourceDxgiFormat), cancellationToken).ConfigureAwait(false);
+        var staging = StagingRoot;
+        if (!Directory.Exists(staging))
+        {
+            var created = Directory.CreateDirectory(staging);
+            created.Attributes |= FileAttributes.Hidden;
+        }
+
+        // The codec may cross volumes into the staging file (a copy, not atomic); only the final same-volume move commits.
+        var staged = Path.Combine(staging, $"{Path.GetFileName(texture.WorkFolder)}.dds");
+        texture.StagingPath = staged;
+        await _codec.EncodeBc7Async(output, staged, texture.WorkFolder, Texconv.IsSrgbFormat(texture.SourceDxgiFormat), cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var targetFolder = Path.GetDirectoryName(texture.OutputPath);
+        if (!string.IsNullOrEmpty(targetFolder))
+        {
+            Directory.CreateDirectory(targetFolder);
+        }
+
+        File.Move(staged, texture.OutputPath, overwrite: true);
+        texture.StagingPath = null;
         texture.Encode = clock.Elapsed;
 
         var timings = new StageTimings(texture.Extract, texture.Decode, texture.Upscale, texture.PostProcess, texture.Encode);
@@ -266,28 +304,32 @@ public sealed partial class TextureProcessor
         return elapsed;
     }
 
-    private void TryDeleteWorkFolder(string work)
+    private void TryDeletePath(string path)
     {
         try
         {
-            if (Directory.Exists(work))
+            if (Directory.Exists(path))
             {
-                Directory.Delete(work, recursive: true);
+                Directory.Delete(path, recursive: true);
+            }
+            else if (File.Exists(path))
+            {
+                File.Delete(path);
             }
         }
         catch (IOException ex)
         {
-            LogWorkCleanupFailed(ex, work);
+            LogWorkCleanupFailed(ex, path);
         }
         catch (UnauthorizedAccessException ex)
         {
-            LogWorkCleanupFailed(ex, work);
+            LogWorkCleanupFailed(ex, path);
         }
     }
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Processed {Path}: {SourceWidth}×{SourceHeight} → {Width}×{Height} in {Seconds:F1} s")]
     private partial void LogProcessed(string path, int sourceWidth, int sourceHeight, int width, int height, double seconds);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Could not delete work folder {Folder}; it is cleaned on the next start")]
-    private partial void LogWorkCleanupFailed(Exception exception, string folder);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Could not delete temporary {Path}; it is cleaned on the next start")]
+    private partial void LogWorkCleanupFailed(Exception exception, string path);
 }

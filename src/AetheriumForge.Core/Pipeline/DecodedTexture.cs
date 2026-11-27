@@ -9,7 +9,7 @@ namespace AetheriumForge.Core.Pipeline;
 /// <remarks>Not thread-safe: exactly one stage owns the texture at a time.</remarks>
 internal sealed class DecodedTexture : IDisposable
 {
-    private readonly Action<string> _deleteWorkFolder;
+    private readonly Action<string> _deletePath;
     private int _disposed;
 
     /// <summary>
@@ -18,14 +18,17 @@ internal sealed class DecodedTexture : IDisposable
     /// <param name="job">The job.</param>
     /// <param name="outputPath">Validated final output path.</param>
     /// <param name="workFolder">Private work folder (already created).</param>
-    /// <param name="deleteWorkFolder">Deletes the work folder; must not throw.</param>
-    public DecodedTexture(TextureJob job, string outputPath, string workFolder, Action<string> deleteWorkFolder)
+    /// <param name="deletePath">Deletes a folder or file (the work folder, an uncommitted staging file); must not throw.</param>
+    public DecodedTexture(TextureJob job, string outputPath, string workFolder, Action<string> deletePath)
     {
         Job = job;
         OutputPath = outputPath;
         WorkFolder = workFolder;
-        _deleteWorkFolder = deleteWorkFolder;
+        _deletePath = deletePath;
     }
+
+    /// <summary>Gets or sets the staging file on the output volume while an encode is not yet committed; <see langword="null"/> otherwise.</summary>
+    public string? StagingPath { get; set; }
 
     /// <summary>Gets the job.</summary>
     public TextureJob Job { get; }
@@ -78,7 +81,7 @@ internal sealed class DecodedTexture : IDisposable
     /// <summary>Gets the source size in megapixels.</summary>
     public double SourceMegapixels => SourceWidth * (double)SourceHeight / 1_000_000d;
 
-    /// <summary>Releases the image data and deletes the work folder.</summary>
+    /// <summary>Releases the image data and deletes the work folder and any uncommitted staging file.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -89,6 +92,11 @@ internal sealed class DecodedTexture : IDisposable
         Rgb = null;
         Alpha = null;
         Output = null;
-        _deleteWorkFolder(WorkFolder);
+        if (StagingPath is { } staged)
+        {
+            _deletePath(staged);
+        }
+
+        _deletePath(WorkFolder);
     }
 }

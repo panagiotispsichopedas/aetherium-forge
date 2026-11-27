@@ -134,23 +134,35 @@ public sealed partial class ForgePipeline : IForgePipeline
         }
         finally
         {
-            // Abandoned jobs are still Running; return them to Queued (attempts unchanged), then close the run row.
-            requeued = await _store.RequeueInterruptedAsync(CancellationToken.None).ConfigureAwait(false);
-            if (runId is { } id)
+            try
             {
-                await _store.EndRunAsync(id, run.Done, run.Failed, CancellationToken.None).ConfigureAwait(false);
-            }
+                // Committed outputs whose Done mark failed get one more chance before anything is requeued, so a committed
+                // texture is not re-encoded as new work by the next run.
+                await FlushUnrecordedDoneAsync(run).ConfigureAwait(false);
 
-            TimeSpan elapsedAtEnd;
-            lock (_gate)
+                // Abandoned jobs are still Running; return them to Queued (attempts unchanged), then close the run row.
+                requeued = await _store.RequeueInterruptedAsync(CancellationToken.None).ConfigureAwait(false);
+                if (runId is { } id)
+                {
+                    await _store.EndRunAsync(id, run.Done, run.Failed, CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+            finally
             {
-                _activeClock.Stop();
-                _pause.Resume();
-                _state = PipelineState.Idle;
-                elapsedAtEnd = _activeClock.Elapsed;
-            }
+                TimeSpan elapsedAtEnd;
+                lock (_gate)
+                {
+                    _activeClock.Stop();
+                    _pause.Resume();
+                    _state = PipelineState.Idle;
+                    elapsedAtEnd = _activeClock.Elapsed;
+                }
 
-            progress?.Report(Snapshot(run, PipelineState.Idle, elapsedAtEnd));
+                if (progress is not null)
+                {
+                    ReportSafely(progress, Snapshot(run, PipelineState.Idle, elapsedAtEnd));
+                }
+            }
         }
 
         var elapsed = ActiveElapsed();
@@ -287,6 +299,9 @@ public sealed partial class ForgePipeline : IForgePipeline
         var decoded = Channel.CreateBounded<WorkItem>(Bounded(_options.StageCapacity));
         var upscaled = Channel.CreateBounded<WorkItem>(Bounded(_options.StageCapacity, singleWriter: true));
         var processed = Channel.CreateBounded<WorkItem>(Bounded(_options.StageCapacity));
+        // Unbounded on purpose, and still bounded in practice: an item enters it only by leaving a stage after a failure, so it
+        // never holds more than the items in flight (InputCapacity + 3 × StageCapacity + workers + 1). A bounded channel here
+        // would deadlock: a failing encode worker would block on it while the producer blocks on the full input channel.
         var retries = Channel.CreateUnbounded<WorkItem>();
         run.Retries = retries.Writer;
         run.Stage(PipelineStage.Decode).QueuedCount = () => input.Reader.Count;
@@ -378,12 +393,14 @@ public sealed partial class ForgePipeline : IForgePipeline
                 try
                 {
                     job = ToTextureJob(record, NormalStrengthForGroup);
+                    _processor.GetOutputPath(job.Path);
                 }
-                catch (InvalidDataException ex)
+                catch (Exception ex) when (ex is InvalidDataException or ArgumentException)
                 {
-                    // A broken row cannot succeed on retry: fail it without entering the pipeline.
+                    // A broken row (bad kind or size, or a path outside the output folder) cannot succeed on retry: fail it
+                    // without decoding and without counting an attempt.
                     LogJobFailed(ex, record.Path, ex.Message);
-                    await _store.MarkFailedAsync(record.Id, ex.Message, CancellationToken.None).ConfigureAwait(false);
+                    await _store.MarkFailedAsync(record.Id, ex.Message, 0, CancellationToken.None).ConfigureAwait(false);
                     run.RecordFailure(record.Id, $"{record.Path}: {ex.Message}");
                     continue;
                 }
@@ -431,9 +448,21 @@ public sealed partial class ForgePipeline : IForgePipeline
                 continue;
             }
 
+            if (!item.Taken)
+            {
+                // Take the job only if it is still Queued: a rescan during the run (for example "now provided by a mod") wins.
+                if (!await _store.TryMarkRunningAsync(item.Record.Id, CancellationToken.None).ConfigureAwait(false))
+                {
+                    LogJobNoLongerQueued(item.Record.Path);
+                    run.RecordNotTaken(item);
+                    continue;
+                }
+
+                item.Taken = true;
+            }
+
             var succeeded = await ProcessItemAsync(run, tracker, item, async () =>
             {
-                await _store.MarkRunningAsync(item.Record.Id, CancellationToken.None).ConfigureAwait(false);
                 item.Texture = await _processor.DecodeAsync(item.Job, pause, ct).ConfigureAwait(false);
             }, ct).ConfigureAwait(false);
             if (succeeded)
@@ -510,11 +539,21 @@ public sealed partial class ForgePipeline : IForgePipeline
             }, ct).ConfigureAwait(false);
             if (committed && result is not null)
             {
-                // Only the encoder's atomic move makes the item count as finished (§10 step 9). Bookkeeping after the commit is
-                // not a job failure: an error here is a fault of the run, never a retry of committed work.
-                await _store.MarkDoneAsync(item.Record.Id, result.Timings.Total.TotalSeconds, CancellationToken.None).ConfigureAwait(false);
-                item.Texture!.Dispose();
-                item.Texture = null;
+                // Only the encoder's atomic move makes the item count as finished (§10 step 9), so from here on the job is done
+                // whatever happens to the bookkeeping: it is never retried or re-encoded as new work.
+                try
+                {
+                    if (!await TryMarkDoneAsync(item.Record.Id, item.Record.Path, result.Timings.Total.TotalSeconds).ConfigureAwait(false))
+                    {
+                        run.AddUnrecordedDone(item.Record.Id, item.Record.Path, result.Timings.Total.TotalSeconds);
+                    }
+                }
+                finally
+                {
+                    item.Texture?.Dispose();
+                    item.Texture = null;
+                }
+
                 run.RecordDone(item, result.Timings.Total, ActiveElapsed());
                 _eta.Record(result.UsedModel ? item.Job.Model : NoModelKey, item.SourceMegapixels, result.Timings.Total);
             }
@@ -557,15 +596,16 @@ public sealed partial class ForgePipeline : IForgePipeline
         item.Texture = null;
         var path = item.Record.Path;
 
+        if (ct.IsCancellationRequested)
+        {
+            // A failure during a stop (for example texconv killed by the stop) says nothing about the texture, on any attempt:
+            // requeue it instead of failing it.
+            run.Abandon(item);
+            return;
+        }
+
         if (item.Attempt < _options.MaxAttempts)
         {
-            if (ct.IsCancellationRequested)
-            {
-                // Attempts remain but the run is stopping: requeue instead of failing.
-                run.Abandon(item);
-                return;
-            }
-
             LogJobRetry(exception, path, item.Attempt, _options.MaxAttempts, exception.Message);
             run.LastError = $"{path}: {exception.Message}";
             item.Attempt++;
@@ -579,9 +619,55 @@ public sealed partial class ForgePipeline : IForgePipeline
         }
 
         LogJobFailed(exception, path, exception.Message);
-        await _store.MarkFailedAsync(item.Record.Id, exception.Message, CancellationToken.None).ConfigureAwait(false);
+        await _store.MarkFailedAsync(item.Record.Id, exception.Message, item.Attempt, CancellationToken.None).ConfigureAwait(false);
         run.RecordFailure(item.Record.Id, $"{path}: {exception.Message}");
         run.Release();
+    }
+
+    /// <summary>Marks a committed job Done, retrying a few times; a final failure is logged loudly and reported as false.</summary>
+    private async Task<bool> TryMarkDoneAsync(long id, string path, double seconds)
+    {
+        const int MaxTries = 3;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await _store.MarkDoneAsync(id, seconds, CancellationToken.None).ConfigureAwait(false);
+                return true;
+            }
+            catch (Exception ex) when (attempt < MaxTries)
+            {
+                LogMarkDoneRetry(ex, path, attempt);
+                await Task.Delay(TimeSpan.FromMilliseconds(100 * attempt), CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LogMarkDoneFailed(ex, path);
+                return false;
+            }
+        }
+    }
+
+    /// <summary>Gives committed outputs whose Done mark failed during the run a last chance before jobs are requeued.</summary>
+    private async Task FlushUnrecordedDoneAsync(RunContext run)
+    {
+        foreach (var (id, path, seconds) in run.TakeUnrecordedDone())
+        {
+            await TryMarkDoneAsync(id, path, seconds).ConfigureAwait(false);
+        }
+    }
+
+    private void ReportSafely(IProgress<PipelineProgress> progress, PipelineProgress snapshot)
+    {
+        try
+        {
+            progress.Report(snapshot);
+        }
+        catch (Exception ex)
+        {
+            // A broken progress handler must not fault the run or hide a worker's exception.
+            LogProgressHandlerFailed(ex);
+        }
     }
 
     private async Task ReportLoopAsync(RunContext run, IProgress<PipelineProgress> progress, CancellationToken ct)
@@ -598,7 +684,7 @@ public sealed partial class ForgePipeline : IForgePipeline
                     (state, elapsed) = (_state, _activeClock.Elapsed);
                 }
 
-                progress.Report(Snapshot(run, state, elapsed));
+                ReportSafely(progress, Snapshot(run, state, elapsed));
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -646,6 +732,24 @@ public sealed partial class ForgePipeline : IForgePipeline
 
     private void WipeWorkRoot()
     {
+        // Leftover staging files on the output volume are never committed outputs: remove the whole staging folder.
+        var staging = _processor.StagingRoot;
+        try
+        {
+            if (Directory.Exists(staging))
+            {
+                Directory.Delete(staging, recursive: true);
+            }
+        }
+        catch (IOException ex)
+        {
+            LogWipeFailed(ex, staging);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            LogWipeFailed(ex, staging);
+        }
+
         var root = _options.WorkRoot;
         Directory.CreateDirectory(root);
         foreach (var entry in Directory.EnumerateFileSystemEntries(root))
@@ -687,8 +791,20 @@ public sealed partial class ForgePipeline : IForgePipeline
     [LoggerMessage(Level = LogLevel.Error, Message = "A pipeline worker faulted; stopping the run")]
     private partial void LogWorkerFaulted(Exception exception);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Could not delete {Entry} from the work folder")]
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Could not delete {Entry} while cleaning temporary folders")]
     private partial void LogWipeFailed(Exception exception, string entry);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "{Path} is no longer queued (changed by a rescan); skipped in this run")]
+    private partial void LogJobNoLongerQueued(string path);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{Path} is committed but marking it Done failed (try {Attempt}); retrying")]
+    private partial void LogMarkDoneRetry(Exception exception, string path, int attempt);
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "{Path} is committed to the output folder but could not be marked Done in the job store")]
+    private partial void LogMarkDoneFailed(Exception exception, string path);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "The progress handler threw; the run continues")]
+    private partial void LogProgressHandlerFailed(Exception exception);
 
     /// <summary>One job travelling through the stages.</summary>
     private sealed class WorkItem(JobRecord record, TextureJob job, string etaModel, double sourceMegapixels)
@@ -702,6 +818,9 @@ public sealed partial class ForgePipeline : IForgePipeline
         public double SourceMegapixels { get; } = sourceMegapixels;
 
         public int Attempt { get; set; } = 1;
+
+        /// <summary>Gets or sets a value indicating whether this run marked the job Running (it stays Running across retries).</summary>
+        public bool Taken { get; set; }
 
         public DecodedTexture? Texture { get; set; }
     }
@@ -761,7 +880,10 @@ public sealed partial class ForgePipeline : IForgePipeline
     {
         private readonly Lock _gate = new();
         private readonly Dictionary<long, (string Model, double Megapixels)> _remaining = [];
+        private readonly Dictionary<string, (int Count, double Megapixels)> _remainingByModel = new(StringComparer.Ordinal);
         private readonly Queue<(TimeSpan At, double Megapixels)> _recent = new();
+        private readonly List<(long Id, string Path, double Seconds)> _unrecordedDone = [];
+        private int _total;
         private int _done;
         private int _failed;
         private int _outstanding;
@@ -778,7 +900,11 @@ public sealed partial class ForgePipeline : IForgePipeline
 
         public ChannelWriter<WorkItem>? Retries { get; set; }
 
-        public int Total { get; set; }
+        public int Total
+        {
+            get => Volatile.Read(ref _total);
+            set => Volatile.Write(ref _total, value);
+        }
 
         public int Done => Volatile.Read(ref _done);
 
@@ -807,16 +933,50 @@ public sealed partial class ForgePipeline : IForgePipeline
         {
             lock (_gate)
             {
+                RemoveRemaining(id);
                 _remaining[id] = (model, megapixels);
+                var (count, sum) = _remainingByModel.GetValueOrDefault(model);
+                _remainingByModel[model] = (count + 1, sum + megapixels);
             }
         }
 
+        /// <summary>Gets the remaining source megapixels per model; O(models), from sums kept up to date as jobs finish.</summary>
+        /// <returns>One entry per model with remaining work (seconds-per-megapixel estimates are linear, so sums suffice).</returns>
         public IEnumerable<(string Model, double SourceMegapixels)> RemainingByModel()
         {
             lock (_gate)
             {
-                // Seconds-per-megapixel estimates are linear, so per-model sums are enough and keep this O(models).
-                return [.. _remaining.Values.GroupBy(v => v.Model, StringComparer.Ordinal).Select(g => (g.Key, g.Sum(v => v.Megapixels)))];
+                return [.. _remainingByModel.Select(kv => (kv.Key, kv.Value.Megapixels))];
+            }
+        }
+
+        /// <summary>The job is no longer Queued in the database (a rescan changed it): it leaves this run without a result.</summary>
+        public void RecordNotTaken(WorkItem item)
+        {
+            lock (_gate)
+            {
+                RemoveRemaining(item.Record.Id);
+            }
+
+            Interlocked.Decrement(ref _total);
+            Abandon(item);
+        }
+
+        public void AddUnrecordedDone(long id, string path, double seconds)
+        {
+            lock (_gate)
+            {
+                _unrecordedDone.Add((id, path, seconds));
+            }
+        }
+
+        public (long Id, string Path, double Seconds)[] TakeUnrecordedDone()
+        {
+            lock (_gate)
+            {
+                var pending = _unrecordedDone.ToArray();
+                _unrecordedDone.Clear();
+                return pending;
             }
         }
 
@@ -851,7 +1011,7 @@ public sealed partial class ForgePipeline : IForgePipeline
         {
             lock (_gate)
             {
-                _remaining.Remove(item.Record.Id);
+                RemoveRemaining(item.Record.Id);
                 _busySeconds += busy.TotalSeconds;
                 _recent.Enqueue((at, item.SourceMegapixels));
             }
@@ -864,11 +1024,31 @@ public sealed partial class ForgePipeline : IForgePipeline
         {
             lock (_gate)
             {
-                _remaining.Remove(id);
+                RemoveRemaining(id);
             }
 
             LastError = error;
             Interlocked.Increment(ref _failed);
+        }
+
+        /// <summary>Removes a job from the remaining set and its model's sum; the caller holds the lock.</summary>
+        private void RemoveRemaining(long id)
+        {
+            if (!_remaining.Remove(id, out var entry))
+            {
+                return;
+            }
+
+            var (count, megapixels) = _remainingByModel[entry.Model];
+            if (count <= 1)
+            {
+                // Drop a model with no jobs left, so the ETA never waits on a model that has no work.
+                _remainingByModel.Remove(entry.Model);
+            }
+            else
+            {
+                _remainingByModel[entry.Model] = (count - 1, Math.Max(0, megapixels - entry.Megapixels));
+            }
         }
 
         public double Throughput(TimeSpan now)

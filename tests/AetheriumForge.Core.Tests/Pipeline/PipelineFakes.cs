@@ -75,17 +75,44 @@ internal sealed class PipelineFakeCodec : ITextureCodec
         }
     }
 
+    /// <summary>Gets a value indicating whether every encode throws (a codec that always fails).</summary>
+    public bool FailAllEncodes { get; init; }
+
+    /// <summary>Gets a value indicating whether a cancelled encode throws <see cref="IOException"/> (like a killed texconv) instead of OCE.</summary>
+    public bool ThrowIOExceptionWhenCancelled { get; init; }
+
+    /// <summary>Gets an action run after each encode wrote its file (receives the path the codec wrote).</summary>
+    public Action<string>? OnEncoded { get; init; }
+
+    /// <summary>Gets the paths the codec was asked to write.</summary>
+    public ConcurrentQueue<string> EncodeTargets { get; } = new();
+
     public async Task EncodeBc7Async(RgbaImage image, string outputDdsPath, string workFolder, bool srgb, CancellationToken ct = default)
     {
         EncodeGauge.Enter();
         try
         {
+            EncodeTargets.Enqueue(outputDdsPath);
+            if (FailAllEncodes)
+            {
+                throw new IOException("encoder failed");
+            }
+
             var temp = Path.Combine(workFolder, "encode.tmp");
             await File.WriteAllBytesAsync(temp, EncodedBytes, ct);
-            await Task.Delay(EncodeDelay, ct);
+            try
+            {
+                await Task.Delay(EncodeDelay, ct);
+            }
+            catch (OperationCanceledException) when (ThrowIOExceptionWhenCancelled)
+            {
+                throw new IOException("texconv was killed");
+            }
+
             Directory.CreateDirectory(Path.GetDirectoryName(outputDdsPath)!);
             File.Move(temp, outputDdsPath, overwrite: true);
             Commits.AddOrUpdate(outputDdsPath, 1, (_, n) => n + 1);
+            OnEncoded?.Invoke(outputDdsPath);
         }
         finally
         {
@@ -153,7 +180,12 @@ internal sealed class PipelineFakeUpscaler : IUpscaler
 /// <summary>Records every finished job; estimates one second per remaining megapixel.</summary>
 internal sealed class FakeEtaEstimator : IEtaEstimator
 {
+    private int _maxEntries;
+
     public ConcurrentQueue<(string Model, double Megapixels, TimeSpan Elapsed)> Records { get; } = new();
+
+    /// <summary>Gets the most entries any <see cref="Estimate"/> call received.</summary>
+    public int MaxEntries => Volatile.Read(ref _maxEntries);
 
     public void Seed(string model, double secondsPerMegapixel)
     {
@@ -161,8 +193,18 @@ internal sealed class FakeEtaEstimator : IEtaEstimator
 
     public void Record(string model, double sourceMegapixels, TimeSpan elapsed) => Records.Enqueue((model, sourceMegapixels, elapsed));
 
-    public TimeSpan? Estimate(IEnumerable<(string Model, double SourceMegapixels)> remaining, double parallelism = 1.0) =>
-        TimeSpan.FromSeconds(remaining.Sum(r => r.SourceMegapixels) / parallelism);
+    public TimeSpan? Estimate(IEnumerable<(string Model, double SourceMegapixels)> remaining, double parallelism = 1.0)
+    {
+        var entries = remaining.ToArray();
+        int max;
+        do
+        {
+            max = Volatile.Read(ref _maxEntries);
+        }
+        while (entries.Length > max && Interlocked.CompareExchange(ref _maxEntries, entries.Length, max) != max);
+
+        return TimeSpan.FromSeconds(entries.Sum(r => r.SourceMegapixels) / parallelism);
+    }
 }
 
 /// <summary>Thread-safe progress sink that keeps every report.</summary>
