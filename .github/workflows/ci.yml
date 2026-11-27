@@ -1,11 +1,13 @@
 name: CI
 
 # Build and test only. No packages are produced here; see release.yml.
+# Also runs for PRs into the feature/** integration branches, so sub-PRs are verified on GitHub runners
+# instead of by local full-suite runs.
 on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, 'feature/**']
   workflow_dispatch:
 
 permissions:
@@ -35,7 +37,9 @@ jobs:
         run: dotnet build AetheriumForge.slnx --configuration Release --no-restore
 
       - name: Test
-        run: dotnet test --solution AetheriumForge.slnx --configuration Release --no-build --coverage --coverage-output-format cobertura --results-directory TestResults
+        shell: pwsh
+        # The coverage settings exclude Avalonia's generated XAML code, whose names contain U+0001 and crash the Cobertura writer.
+        run: dotnet test --solution AetheriumForge.slnx --configuration Release --no-build --coverage --coverage-output-format cobertura --coverage-settings "$PWD/CodeCoverage.config" --results-directory TestResults
 
       - name: Upload test results
         if: always()
