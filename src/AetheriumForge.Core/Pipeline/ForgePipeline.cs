@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Threading.Channels;
+using AetheriumForge.Core.Common;
 using AetheriumForge.Core.Jobs;
+using AetheriumForge.Core.Rules;
 using AetheriumForge.Core.Textures;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -79,7 +81,24 @@ public sealed partial class ForgePipeline : IForgePipeline
     /// Gets the normal-map strength for a rule group (the job table stores only the group name). When <see langword="null"/>,
     /// or for jobs without a group, the strength is 1.0.
     /// </summary>
+    /// <remarks>Kept for compatibility; <see cref="LookForGroup"/> wins when it returns a look.</remarks>
     public Func<string, double>? NormalStrengthForGroup { get; init; }
+
+    /// <summary>
+    /// Gets the effective look (§8) for a rule group, for example <c>name =&gt; rules.Groups.First(...).EffectiveLook</c>. When it is
+    /// <see langword="null"/> or returns <see langword="null"/>, the job gets the neutral look with <see cref="NormalStrengthForGroup"/>'s
+    /// strength. The stable hash of the job's effective look for its kind (<see cref="LookSettings.GetStableHash(TextureKind)"/>) is
+    /// stored on the job when it is marked Done.
+    /// </summary>
+    public Func<string, LookSettings?>? LookForGroup { get; init; }
+
+    /// <summary>
+    /// Gets the per-job look resolver (§8 scopes): given the job's group (or <see langword="null"/>) and the job's "This texture" override
+    /// (or <see langword="null"/>), it returns the effective look, normally <c>(group, texture) =&gt; LookResolver.Resolve(rules, group, texture)</c>.
+    /// When set, it wins over <see cref="LookForGroup"/> and <see cref="NormalStrengthForGroup"/>, and the pipeline loads the texture
+    /// overrides from the job store once at the start of each run.
+    /// </summary>
+    public Func<string?, LookOverrides?, LookSettings>? ResolveLook { get; init; }
 
     /// <inheritdoc />
     public PipelineState State
@@ -136,6 +155,12 @@ public sealed partial class ForgePipeline : IForgePipeline
             }
 
             run.Total = jobs.Count;
+            if (ResolveLook is not null)
+            {
+                run.TextureLooks = (await _store.ListTextureLooksAsync(CancellationToken.None).ConfigureAwait(false))
+                    .ToDictionary(l => l.Path, l => l.Look, StringComparer.Ordinal);
+            }
+
             LogRunStarted(jobs.Count, recovered);
 
             if (!stopToken.IsCancellationRequested && jobs.Count > 0)
@@ -216,10 +241,16 @@ public sealed partial class ForgePipeline : IForgePipeline
     /// <see cref="JobRecord.Target"/> (rounded like the rule evaluator).
     /// </summary>
     /// <param name="record">The job row.</param>
-    /// <param name="normalStrengthForGroup">Optional group → normal strength lookup.</param>
+    /// <param name="normalStrengthForGroup">Optional group → normal strength lookup (used when there is no look).</param>
+    /// <param name="lookForGroup">Optional group → effective look lookup; a returned look wins over the normal strength lookup.</param>
+    /// <param name="resolvedLook">The job's fully resolved look (§8 scopes); when set it wins over both lookups.</param>
     /// <returns>The texture job. <see cref="TextureJob.SourceDxgiFormat"/> is left null; the decode stage reads it from the DDS header.</returns>
     /// <exception cref="InvalidDataException">The kind is unknown, or the source or target size is missing.</exception>
-    internal static TextureJob ToTextureJob(JobRecord record, Func<string, double>? normalStrengthForGroup = null)
+    internal static TextureJob ToTextureJob(
+        JobRecord record,
+        Func<string, double>? normalStrengthForGroup = null,
+        Func<string, LookSettings?>? lookForGroup = null,
+        LookSettings? resolvedLook = null)
     {
         ArgumentNullException.ThrowIfNull(record);
 
@@ -239,7 +270,9 @@ public sealed partial class ForgePipeline : IForgePipeline
         }
 
         var sourceMax = Math.Max(record.SourceWidth, record.SourceHeight);
-        var strength = record.Group is { } group && normalStrengthForGroup is not null ? normalStrengthForGroup(group) : 1.0;
+        var look = resolvedLook ?? (record.Group is { } lookGroup && lookForGroup is not null ? lookForGroup(lookGroup) : null);
+        var strength = look?.NormalStrength
+            ?? (record.Group is { } group && normalStrengthForGroup is not null ? normalStrengthForGroup(group) : 1.0);
 
         return new TextureJob(
             record.Path,
@@ -248,7 +281,8 @@ public sealed partial class ForgePipeline : IForgePipeline
             Scale(record.SourceWidth, record.Target, sourceMax),
             Scale(record.SourceHeight, record.Target, sourceMax),
             record.Model ?? string.Empty,
-            strength);
+            strength,
+            Look: look);
     }
 
     private static int Scale(int dimension, int targetMax, int sourceMax) =>
@@ -412,7 +446,8 @@ public sealed partial class ForgePipeline : IForgePipeline
                 TextureJob job;
                 try
                 {
-                    job = ToTextureJob(record, NormalStrengthForGroup);
+                    var resolved = ResolveLook?.Invoke(record.Group, run.TextureLooks?.GetValueOrDefault(GamePath.Normalize(record.Path)));
+                    job = ToTextureJob(record, NormalStrengthForGroup, LookForGroup, resolved);
                     if (_options.ModelOverride is { Length: > 0 } modelOverride)
                     {
                         job = job with { Model = modelOverride };
@@ -568,9 +603,10 @@ public sealed partial class ForgePipeline : IForgePipeline
                 // whatever happens to the bookkeeping: it is never retried or re-encoded as new work.
                 try
                 {
-                    if (!await TryMarkDoneAsync(item.Record.Id, item.Record.Path, result.Timings.Total.TotalSeconds).ConfigureAwait(false))
+                    var lookHash = item.Job.EffectiveLook.GetStableHash(item.Job.Kind);
+                    if (!await TryMarkDoneAsync(item.Record.Id, item.Record.Path, result.Timings.Total.TotalSeconds, lookHash).ConfigureAwait(false))
                     {
-                        run.AddUnrecordedDone(item.Record.Id, item.Record.Path, result.Timings.Total.TotalSeconds);
+                        run.AddUnrecordedDone(item.Record.Id, item.Record.Path, result.Timings.Total.TotalSeconds, lookHash);
                     }
                 }
                 finally
@@ -650,14 +686,14 @@ public sealed partial class ForgePipeline : IForgePipeline
     }
 
     /// <summary>Marks a committed job Done, retrying a few times; a final failure is logged loudly and reported as false.</summary>
-    private async Task<bool> TryMarkDoneAsync(long id, string path, double seconds)
+    private async Task<bool> TryMarkDoneAsync(long id, string path, double seconds, string lookHash)
     {
         const int MaxTries = 3;
         for (var attempt = 1; ; attempt++)
         {
             try
             {
-                await _store.MarkDoneAsync(id, seconds, CancellationToken.None).ConfigureAwait(false);
+                await _store.MarkDoneAsync(id, seconds, lookHash, CancellationToken.None).ConfigureAwait(false);
                 return true;
             }
             catch (Exception ex) when (attempt < MaxTries)
@@ -676,9 +712,9 @@ public sealed partial class ForgePipeline : IForgePipeline
     /// <summary>Gives committed outputs whose Done mark failed during the run a last chance before jobs are requeued.</summary>
     private async Task FlushUnrecordedDoneAsync(RunContext run)
     {
-        foreach (var (id, path, seconds) in run.TakeUnrecordedDone())
+        foreach (var (id, path, seconds, lookHash) in run.TakeUnrecordedDone())
         {
-            await TryMarkDoneAsync(id, path, seconds).ConfigureAwait(false);
+            await TryMarkDoneAsync(id, path, seconds, lookHash).ConfigureAwait(false);
         }
     }
 
@@ -907,7 +943,10 @@ public sealed partial class ForgePipeline : IForgePipeline
         private readonly Dictionary<long, (string Model, double Megapixels)> _remaining = [];
         private readonly Dictionary<string, (int Count, double Megapixels)> _remainingByModel = new(StringComparer.Ordinal);
         private readonly Queue<(TimeSpan At, double Megapixels)> _recent = new();
-        private readonly List<(long Id, string Path, double Seconds)> _unrecordedDone = [];
+        private readonly List<(long Id, string Path, double Seconds, string LookHash)> _unrecordedDone = [];
+
+        /// <summary>Gets or sets the texture look overrides by normalised path, loaded at the start of the run (only with a resolver).</summary>
+        public Dictionary<string, LookOverrides>? TextureLooks { get; set; }
         private int _total;
         private int _done;
         private int _failed;
@@ -987,15 +1026,15 @@ public sealed partial class ForgePipeline : IForgePipeline
             Abandon(item);
         }
 
-        public void AddUnrecordedDone(long id, string path, double seconds)
+        public void AddUnrecordedDone(long id, string path, double seconds, string lookHash)
         {
             lock (_gate)
             {
-                _unrecordedDone.Add((id, path, seconds));
+                _unrecordedDone.Add((id, path, seconds, lookHash));
             }
         }
 
-        public (long Id, string Path, double Seconds)[] TakeUnrecordedDone()
+        public (long Id, string Path, double Seconds, string LookHash)[] TakeUnrecordedDone()
         {
             lock (_gate)
             {

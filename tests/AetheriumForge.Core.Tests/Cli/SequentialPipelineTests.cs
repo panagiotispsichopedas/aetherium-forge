@@ -197,14 +197,14 @@ public sealed class SequentialPipelineTests
         // Arrange
         await using var fixture = await PipelineFixture.CreateAsync(queued: 1);
         var calls = 0;
-        var pipeline = fixture.CreatePipeline(markDone: async (id, seconds) =>
+        var pipeline = fixture.CreatePipeline(markDone: async (id, seconds, lookHash) =>
         {
             if (++calls < 3)
             {
                 throw new Microsoft.Data.Sqlite.SqliteException("database is locked", 5);
             }
 
-            await fixture.Store.MarkDoneAsync(id, seconds);
+            await fixture.Store.MarkDoneAsync(id, seconds, lookHash, CancellationToken.None);
         });
 
         // Act
@@ -252,5 +252,20 @@ public sealed class SequentialPipelineTests
 
         // Assert
         Assert.False(File.Exists(stale));
+    }
+
+    [Fact]
+    public async Task RunAsync_DoneJob_StoresEffectiveLookHashForKind()
+    {
+        // Arrange: the default rules put textures\test\ into the neutral "Large" group; the jobs are diffuse.
+        await using var fixture = await PipelineFixture.CreateAsync(queued: 1);
+        var pipeline = fixture.CreatePipeline();
+
+        // Act
+        await pipeline.RunAsync(null, TestContext.Current.CancellationToken);
+
+        // Assert
+        var done = await fixture.Store.GetJobsAsync(JobState.Done, TestContext.Current.CancellationToken).SingleAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(Core.Rules.LookSettings.Neutral.GetStableHash(Core.Textures.TextureKind.Diffuse), done.LookHash);
     }
 }

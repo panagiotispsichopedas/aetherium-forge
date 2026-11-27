@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using AetheriumForge.Core.Imaging;
+using AetheriumForge.Core.Rules;
 using AetheriumForge.Core.Textures;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -16,6 +17,8 @@ namespace AetheriumForge.Core.Pipeline;
 /// <item>Alpha is kept only when some pixel is below 255, and never goes through the AI model; it is resized with bicubic.</item>
 /// <item>RGB goes through the model, then Lanczos-3 to the exact target size.</item>
 /// <item>Normal maps are renormalised after resizing, with the group's normal strength.</item>
+/// <item>The group's look (§8, <see cref="TextureJob.Look"/>) is applied by <see cref="LookRenderer"/> after resizing; a Lanczos upscale of the
+/// source is computed only when the look's AI strength is below 1. A neutral look gives exactly the M2 output.</item>
 /// <item>Parallax/height maps (<see cref="TextureKind.Parallax"/>) and jobs without a model skip the model and use Lanczos-3 only (§8).</item>
 /// </list>
 /// <para>The output file appears only when it is complete: the encoder writes the finished file into the hidden staging folder
@@ -216,13 +219,14 @@ public sealed partial class TextureProcessor
         }
 
         var clock = Stopwatch.StartNew();
+        texture.SourceRgb = LookRenderer.NeedsLanczos(texture.Job.EffectiveLook) ? rgb : null;
         texture.Rgb = await _upscalers(texture.Job.Model).UpscaleAsync(rgb, progress, pause, cancellationToken).ConfigureAwait(false);
         texture.UsedModel = true;
         texture.Upscale = clock.Elapsed;
     }
 
     /// <summary>
-    /// Stages 5–7: resizes to the target size, renormalises normal maps and merges alpha (CPU).
+    /// Stages 5–7: resizes to the target size, applies the look (normal renormalisation included) and merges alpha (CPU).
     /// </summary>
     /// <param name="texture">The texture; its planes are released and <see cref="DecodedTexture.Output"/> is set.</param>
     /// <exception cref="InvalidOperationException"><paramref name="texture"/> has no RGB planes.</exception>
@@ -232,9 +236,10 @@ public sealed partial class TextureProcessor
         var rgb = texture.Rgb ?? throw new InvalidOperationException("The texture has no RGB planes to post-process.");
 
         var clock = Stopwatch.StartNew();
-        texture.Output = PostProcess(texture.Job, rgb, texture.Alpha);
+        texture.Output = PostProcess(texture.Job, rgb, texture.Alpha, texture.SourceRgb);
         texture.Rgb = null;
         texture.Alpha = null;
+        texture.SourceRgb = null;
         texture.PostProcess = clock.Elapsed;
     }
 
@@ -281,21 +286,28 @@ public sealed partial class TextureProcessor
         return new TextureResult(texture.OutputPath, output.Width, output.Height, texture.HadAlpha, texture.UsedModel, timings);
     }
 
-    internal static RgbaImage PostProcess(TextureJob job, PlanarImage rgb, PlanarImage? alpha)
+    /// <summary>
+    /// Resizes the model output (and alpha) to the job's target size and renders the job's look.
+    /// </summary>
+    /// <param name="job">The job.</param>
+    /// <param name="rgb">The model output (or the source RGB when no model ran).</param>
+    /// <param name="alpha">The source alpha, or <see langword="null"/>.</param>
+    /// <param name="sourceRgb">The source RGB for the AI-strength blend, or <see langword="null"/> when the look does not blend.</param>
+    /// <returns>The RGBA image to encode.</returns>
+    internal static RgbaImage PostProcess(TextureJob job, PlanarImage rgb, PlanarImage? alpha, PlanarImage? sourceRgb = null)
     {
-        var resized = rgb.Width == job.TargetWidth && rgb.Height == job.TargetHeight
-            ? rgb
-            : ImageOps.Resize(rgb, job.TargetWidth, job.TargetHeight, ResizeFilter.Lanczos3);
-
-        if (job.Kind == TextureKind.Normal)
-        {
-            ImageOps.RenormalizeNormals(resized, job.NormalStrength);
-        }
-
+        LookSettings look = job.EffectiveLook;
+        var resized = ResizeTo(rgb, job.TargetWidth, job.TargetHeight, ResizeFilter.Lanczos3);
+        var lanczos = sourceRgb is not null && LookRenderer.NeedsLanczos(look)
+            ? ResizeTo(sourceRgb, job.TargetWidth, job.TargetHeight, ResizeFilter.Lanczos3)
+            : resized;
         var resizedAlpha = alpha is null ? null : ImageOps.Resize(alpha, job.TargetWidth, job.TargetHeight, ResizeFilter.Bicubic);
 
-        return ImageOps.ToRgba(resized, resizedAlpha);
+        return LookRenderer.Render(new LookInput(resized, lanczos, resizedAlpha, job.Kind), look);
     }
+
+    private static PlanarImage ResizeTo(PlanarImage image, int width, int height, ResizeFilter filter) =>
+        image.Width == width && image.Height == height ? image : ImageOps.Resize(image, width, height, filter);
 
     private static TimeSpan Lap(Stopwatch clock)
     {

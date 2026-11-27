@@ -54,6 +54,9 @@ internal sealed class DecodedTexture : IDisposable
     /// <summary>Gets or sets the kept alpha plane; <see langword="null"/> when the source is opaque or after post-processing.</summary>
     public PlanarImage? Alpha { get; set; }
 
+    /// <summary>Gets or sets the source RGB kept for the look's AI-strength blend, or <see langword="null"/> when the look does not need it.</summary>
+    public PlanarImage? SourceRgb { get; set; }
+
     /// <summary>Gets or sets a value indicating whether the source alpha channel was kept.</summary>
     public bool HadAlpha { get; set; }
 
@@ -91,6 +94,7 @@ internal sealed class DecodedTexture : IDisposable
 
         Rgb = null;
         Alpha = null;
+        SourceRgb = null;
         Output = null;
         if (StagingPath is { } staged)
         {
