@@ -12,12 +12,16 @@ namespace AetheriumForge.Native;
 /// <remarks>
 /// <list type="bullet">
 /// <item><see cref="GpuAdapterInfo.DirectMLDeviceId"/> is the <c>IDXGIFactory1::EnumAdapters1</c> index, which ONNX Runtime's
-/// DirectML provider uses as its <c>deviceId</c>. Adapters are matched between enumerations by LUID.</item>
+/// DirectML provider uses as its <c>deviceId</c>. Adapters are matched between enumerations by LUID. The index is a snapshot: it can
+/// change when an adapter is attached, detached or reordered (eGPU, driver reinstall, Basic Render Driver fallback). Consumers must
+/// not persist it; persist the adapter identity instead and re-resolve the index from a fresh <see cref="GetAdapters"/> call right
+/// before creating an ONNX Runtime session.</item>
 /// <item>Order is <c>IDXGIFactory6::EnumAdapterByGpuPreference(HIGH_PERFORMANCE)</c>; without <c>IDXGIFactory6</c> it is the
 /// <c>EnumAdapters1</c> order.</item>
 /// <item><see cref="GpuAdapterInfo.IsIntegrated"/> comes from D3D12 <c>D3D12_FEATURE_DATA_ARCHITECTURE.UMA</c>, cached per LUID
 /// because creating a device is expensive. When D3D12 is unavailable the heuristic "dedicated memory &lt; 512 MB and shared
-/// memory &gt; 0" applies. Software adapters are never reported as integrated.</item>
+/// memory &gt; 0" applies for that call only; a failed probe is not cached and is retried on the next call. Software adapters are
+/// never reported as integrated.</item>
 /// <item>A new DXGI factory is created per call, so adapter changes (driver update, eGPU) are picked up. Every COM reference is
 /// released before the call returns.</item>
 /// <item>Nothing throws when DXGI is missing or fails: <see cref="GetAdapters"/> returns an empty list and
@@ -26,6 +30,9 @@ namespace AetheriumForge.Native;
 /// </remarks>
 public sealed unsafe partial class DxgiAdapterProvider : IGpuAdapterProvider
 {
+    /// <summary>The GPU node <see cref="QueryVideoMemory"/> reads: node 0, the one ONNX Runtime's DirectML provider runs on.</summary>
+    internal const uint VideoMemoryNodeIndex = 0;
+
     private readonly ILogger<DxgiAdapterProvider> _logger;
     private readonly ConcurrentDictionary<long, bool> _integratedByLuid = new();
 
@@ -60,6 +67,11 @@ public sealed unsafe partial class DxgiAdapterProvider : IGpuAdapterProvider
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Reads node 0 only (<see cref="VideoMemoryNodeIndex"/>), so the result covers single-node adapters, which is every adapter
+    /// apart from linked-display-adapter (SLI/CrossFire LDA) setups. This is deliberate: ONNX Runtime's DirectML provider creates
+    /// its device and queues on node 0, so node 0's local budget is the memory a session can use. Summing nodes would overstate it.
+    /// </remarks>
     public VideoMemoryInfo? QueryVideoMemory(long luid)
     {
         var factory = CreateFactory();
@@ -310,7 +322,7 @@ public sealed unsafe partial class DxgiAdapterProvider : IGpuAdapterProvider
         try
         {
             QueryVideoMemoryInfoData info;
-            hr = DxgiNative.QueryVideoMemoryInfo(adapter3, 0, DxgiNative.MemorySegmentGroupLocal, &info);
+            hr = DxgiNative.QueryVideoMemoryInfo(adapter3, VideoMemoryNodeIndex, DxgiNative.MemorySegmentGroupLocal, &info);
             if (!NativeFormat.Succeeded(hr))
             {
                 LogCallFailed("IDXGIAdapter3::QueryVideoMemoryInfo", index, new HResult(hr));
@@ -325,6 +337,34 @@ public sealed unsafe partial class DxgiAdapterProvider : IGpuAdapterProvider
         }
     }
 
+    /// <summary>
+    /// Resolves whether an adapter is integrated. Only a definitive D3D12 <c>UMA</c> answer is cached; when the probe fails
+    /// (D3D12 missing, device creation failed, device removed) the memory heuristic answers this call and the next call probes again.
+    /// </summary>
+    /// <param name="cache">Definitive answers by LUID.</param>
+    /// <param name="luid">The adapter LUID.</param>
+    /// <param name="dedicated">Dedicated video memory in bytes, for the heuristic.</param>
+    /// <param name="shared">Shared system memory in bytes, for the heuristic.</param>
+    /// <param name="probe">The D3D12 <c>UMA</c> probe; <see langword="null"/> means it could not tell.</param>
+    /// <returns><see langword="true"/> when the adapter is integrated.</returns>
+    internal static bool ResolveIntegrated(ConcurrentDictionary<long, bool> cache, long luid, ulong dedicated, ulong shared, Func<bool?> probe)
+    {
+        ArgumentNullException.ThrowIfNull(cache);
+        ArgumentNullException.ThrowIfNull(probe);
+        if (cache.TryGetValue(luid, out var cached))
+        {
+            return cached;
+        }
+
+        if (probe() is bool uma)
+        {
+            cache[luid] = uma;
+            return uma;
+        }
+
+        return NativeFormat.LooksIntegrated(dedicated, shared);
+    }
+
     private bool IsIntegrated(void* adapter, string name, long luid, ulong dedicated, ulong shared)
     {
         if (_integratedByLuid.TryGetValue(luid, out var cached))
@@ -332,9 +372,8 @@ public sealed unsafe partial class DxgiAdapterProvider : IGpuAdapterProvider
             return cached;
         }
 
-        var isIntegrated = QueryUma(adapter, name) ?? NativeFormat.LooksIntegrated(dedicated, shared);
-        _integratedByLuid[luid] = isIntegrated;
-        return isIntegrated;
+        var handle = (nint)adapter;
+        return ResolveIntegrated(_integratedByLuid, luid, dedicated, shared, () => QueryUma((void*)handle, name));
     }
 
     private bool? QueryUma(void* adapter, string name)

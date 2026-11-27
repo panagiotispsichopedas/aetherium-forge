@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using AetheriumForge.Core.Gpu;
 using AetheriumForge.Native;
@@ -189,6 +190,62 @@ public sealed class NativeFormatTests
 
         // Assert
         Assert.Equal([2, 0, 1], ordered.Select(adapter => adapter.DirectMLDeviceId));
+    }
+
+    [Fact]
+    public void ResolveIntegrated_ProbeFails_UsesHeuristicWithoutCaching()
+    {
+        // Arrange: 128 MB dedicated + shared memory looks integrated to the heuristic.
+        var cache = new ConcurrentDictionary<long, bool>();
+
+        // Act
+        var integrated = DxgiAdapterProvider.ResolveIntegrated(cache, 42, 128UL << 20, 8UL << 30, () => null);
+
+        // Assert
+        Assert.Equal((true, 0), (integrated, cache.Count));
+    }
+
+    [Fact]
+    public void ResolveIntegrated_ProbeFailedEarlier_ProbesAgainOnNextCall()
+    {
+        // Arrange
+        var cache = new ConcurrentDictionary<long, bool>();
+        var calls = 0;
+        bool? Probe() => ++calls == 1 ? null : false;
+
+        // Act: a transient D3D12 failure, then success.
+        _ = DxgiAdapterProvider.ResolveIntegrated(cache, 42, 128UL << 20, 8UL << 30, Probe);
+        var second = DxgiAdapterProvider.ResolveIntegrated(cache, 42, 128UL << 20, 8UL << 30, Probe);
+
+        // Assert: the definitive answer replaces the heuristic one.
+        Assert.Equal((false, 2), (second, calls));
+    }
+
+    [Fact]
+    public void ResolveIntegrated_ProbeSucceeded_CachesAndDoesNotProbeAgain()
+    {
+        // Arrange
+        var cache = new ConcurrentDictionary<long, bool>();
+        var calls = 0;
+        bool? Probe()
+        {
+            calls++;
+            return true;
+        }
+
+        // Act
+        _ = DxgiAdapterProvider.ResolveIntegrated(cache, 42, 8UL << 30, 16UL << 30, Probe);
+        var second = DxgiAdapterProvider.ResolveIntegrated(cache, 42, 8UL << 30, 16UL << 30, Probe);
+
+        // Assert
+        Assert.Equal((true, 1, true), (second, calls, cache[42]));
+    }
+
+    [Fact]
+    public void VideoMemoryNodeIndex_Value_IsNodeZeroUsedByDirectML()
+    {
+        // Assert: QueryVideoMemory documents node-0-only semantics; changing the node must be a deliberate decision.
+        Assert.Equal(0u, DxgiAdapterProvider.VideoMemoryNodeIndex);
     }
 
     private static GpuAdapterInfo Adapter(long luid, int index) =>

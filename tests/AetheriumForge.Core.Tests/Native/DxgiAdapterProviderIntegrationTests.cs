@@ -102,6 +102,21 @@ public sealed class DxgiAdapterProviderIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void QueryVideoMemory_HardwareAdapter_BudgetIsSingleNodeLocalMemory()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DXGI is Windows only.");
+        var adapter = PrimaryHardwareAdapter();
+        Assert.SkipWhen(adapter is null, "No hardware GPU.");
+
+        // Act
+        var memory = _provider.QueryVideoMemory(adapter.Luid);
+
+        // Assert: node 0's local budget never exceeds the adapter's dedicated memory (a sum over nodes could).
+        Assert.NotNull(memory);
+        Assert.True(memory.Budget <= adapter.DedicatedVideoMemory + (adapter.DedicatedVideoMemory / 20), $"Budget {memory.Budget:N0} exceeds dedicated {adapter.DedicatedVideoMemory:N0}.");
+    }
+
+    [Fact]
     public void QueryVideoMemory_UnknownLuid_ReturnsNull()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "DXGI is Windows only.");
