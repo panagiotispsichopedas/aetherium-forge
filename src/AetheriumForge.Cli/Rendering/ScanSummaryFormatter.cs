@@ -1,6 +1,6 @@
 using System.Globalization;
-using AetheriumForge.Cli.Hosting;
 using AetheriumForge.Core.Discovery;
+using AetheriumForge.Core.Projects;
 using AetheriumForge.Core.Textures;
 
 namespace AetheriumForge.Cli.Rendering;

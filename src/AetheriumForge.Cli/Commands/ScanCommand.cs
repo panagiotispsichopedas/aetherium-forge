@@ -2,9 +2,11 @@ using System.CommandLine;
 using System.Globalization;
 using AetheriumForge.Cli.Hosting;
 using AetheriumForge.Cli.Rendering;
+using AetheriumForge.Core.Concurrency;
 using AetheriumForge.Core.Discovery;
 using AetheriumForge.Core.Game;
 using AetheriumForge.Core.Jobs;
+using AetheriumForge.Core.Projects;
 using AetheriumForge.Core.Rules;
 using AetheriumForge.Core.Textures;
 using Microsoft.Extensions.DependencyInjection;
@@ -63,8 +65,13 @@ internal sealed class ScanCommand
         (ProjectLayout Layout, string Reason)? project = known
             ? ProjectLocator.ResolveForScan(parseResult.GetValue(Project), game.GameFolder, drives, 0, File.Exists)
             : null;
+        // The project lock is taken once the folder is known to be outside the game (ResolveForScan checks that) and before the log or
+        // the store is opened, so a second scan, forge or the desktop app on the same project fails fast instead of corrupting it.
+        using var projectLock = new ProjectLockSlot();
         if (project is { } early)
         {
+            Directory.CreateDirectory(early.Layout.Root);
+            projectLock.Lock = AcquireProjectLock(early.Layout.Root);
             session.AttachLog(early.Layout, game.GameFolder);
         }
 
@@ -93,15 +100,20 @@ internal sealed class ScanCommand
         session.AttachLog(layout, game.GameFolder);
         output.WriteLine($"Project:  {layout.Root} ({reason})");
         Directory.CreateDirectory(layout.Root);
+        projectLock.Lock ??= AcquireProjectLock(layout.Root);
 
         var store = await JobStore.OpenAsync(layout.DatabasePath, ct).ConfigureAwait(false);
         await using (store.ConfigureAwait(false))
         {
-            var (upserted, nowProvided) = await ScanImporter.ImportAsync(store, result, ct).ConfigureAwait(false);
-            await store.SetProjectValueAsync(ProjectKeys.GamePath, game.GameFolder, ct).ConfigureAwait(false);
-            await store.SetProjectValueAsync(ProjectKeys.GameStore, game.Store.ToString(), ct).ConfigureAwait(false);
-            await store.SetProjectValueAsync(ProjectKeys.RulesJson, rules.ToJson(), ct).ConfigureAwait(false);
-            await store.SetProjectValueAsync(ProjectKeys.ScannedAt, DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture), ct).ConfigureAwait(false);
+            var values = new Dictionary<string, string>
+            {
+                [ProjectKeys.GamePath] = game.GameFolder,
+                [ProjectKeys.GameStore] = game.Store.ToString(),
+                [ProjectKeys.RulesJson] = rules.ToJson(),
+                [ProjectKeys.ScannedAt] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+            };
+            var review = await ScanImporter.ReviewMissingArchivesAsync(store, result, game.DataFolder, ct).ConfigureAwait(false);
+            var (upserted, nowProvided) = await ScanImporter.ImportAsync(store, result, values, ct).ConfigureAwait(false);
             var counts = await store.CountByStateAsync(ct).ConfigureAwait(false);
 
             output.WriteLine();
@@ -111,12 +123,38 @@ internal sealed class ScanCommand
             }
 
             output.WriteLine();
+            if (review.FormatWarning() is { } warning)
+            {
+                output.WriteLine($"WARNING: {warning}");
+            }
+
+            if (review.FormatNotInstalled() is { } note)
+            {
+                output.WriteLine($"Note:     {note}");
+            }
+
             output.WriteLine($"Imported {upserted:N0} rows into {layout.DatabasePath}; {nowProvided:N0} job(s) now provided by a mod.");
             output.WriteLine($"Project queue: {counts[JobState.Queued]:N0} queued, {counts[JobState.Done]:N0} done, {counts[JobState.Failed]:N0} failed, {counts[JobState.Skipped]:N0} skipped.");
             output.WriteLine($"Next: aetherium-forge forge --project \"{layout.Root}\" --limit 3");
         }
 
         return ExitCodes.Ok;
+    }
+
+    /// <summary>Takes the project lock, turning a held lock into a user-facing error.</summary>
+    /// <param name="projectRoot">The project folder (exists).</param>
+    /// <returns>The lock.</returns>
+    /// <exception cref="CliException">The project is open in another process.</exception>
+    internal static ProjectLock AcquireProjectLock(string projectRoot)
+    {
+        try
+        {
+            return ProjectLock.Acquire(projectRoot, "aetherium-forge scan");
+        }
+        catch (ProjectLockedException ex)
+        {
+            throw new CliException(ex.Message, ex);
+        }
     }
 
     private static async Task<GameInstall> FindGameAsync(GameLocator locator, string? explicitGame, TextWriter output, CancellationToken ct)
@@ -169,6 +207,14 @@ internal sealed class ScanCommand
 
         output.WriteLine("Rules:    built-in defaults");
         return ForgeRules.Default;
+    }
+
+    /// <summary>Holds the project lock once it is taken (early for a known project, else just before the import).</summary>
+    private sealed class ProjectLockSlot : IDisposable
+    {
+        public ProjectLock? Lock { get; set; }
+
+        public void Dispose() => Lock?.Dispose();
     }
 
     /// <summary>Prints scan progress on one updating line (or one line per phase when redirected).</summary>

@@ -1,4 +1,5 @@
 using System.CommandLine;
+using AetheriumForge.Core.Projects;
 using Serilog;
 
 namespace AetheriumForge.Cli.Hosting;
@@ -55,8 +56,8 @@ internal sealed record CliSession(TextWriter Out, TextWriter Error, CliLogging L
 }
 
 /// <summary>
-/// Runs a command body with logging, Ctrl+C handling and error reporting: <see cref="CliException"/> prints its message; any other
-/// error prints a one-line summary and is logged with its stack trace.
+/// Runs a command body with logging, Ctrl+C handling and error reporting: <see cref="CliException"/> and <see cref="ProjectException"/> print
+/// their message; any other error prints a one-line summary and is logged with its stack trace.
 /// </summary>
 internal static class CliRunner
 {
@@ -84,7 +85,7 @@ internal static class CliRunner
         {
             return await body(new CliSession(output, error, logging, cancellation, parseResult.GetValue(globals.Log))).ConfigureAwait(false);
         }
-        catch (CliException ex)
+        catch (Exception ex) when (ex is CliException or ProjectException)
         {
             using (logging.FileOnly())
             {

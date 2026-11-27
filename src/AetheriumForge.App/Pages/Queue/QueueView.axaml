@@ -1,0 +1,107 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:queue="using:AetheriumForge.App.Pages.Queue"
+             x:Class="AetheriumForge.App.Pages.Queue.QueueView"
+             x:DataType="queue:QueueViewModel">
+  <DockPanel>
+    <TextBlock DockPanel.Dock="Top" Text="Queue" FontSize="24" FontWeight="SemiBold" Margin="0,0,0,8" />
+
+    <!-- Filters -->
+    <WrapPanel DockPanel.Dock="Top" Orientation="Horizontal" IsEnabled="{Binding HasProject}" Margin="0,0,0,6">
+      <ItemsControl ItemsSource="{Binding StateFilters}" VerticalAlignment="Center">
+        <ItemsControl.ItemsPanel>
+          <ItemsPanelTemplate>
+            <StackPanel Orientation="Horizontal" Spacing="10" />
+          </ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="queue:StateFilterOption">
+            <CheckBox Content="{Binding Label}" IsChecked="{Binding IsSelected}" />
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+      <TextBlock Text="Group" VerticalAlignment="Center" Margin="16,0,6,0" />
+      <ComboBox ItemsSource="{Binding Groups}" SelectedItem="{Binding SelectedGroup}" MinWidth="140" VerticalAlignment="Center" />
+      <TextBlock Text="Kind" VerticalAlignment="Center" Margin="12,0,6,0" />
+      <ComboBox ItemsSource="{Binding Kinds}" SelectedItem="{Binding SelectedKind}" MinWidth="120" VerticalAlignment="Center" />
+      <TextBox Text="{Binding SearchText}" PlaceholderText="Search path…" Width="260" Margin="12,0,0,0" VerticalAlignment="Center" />
+      <Button Content="Clear filters" Command="{Binding ClearFiltersCommand}" Margin="8,0,0,0" VerticalAlignment="Center" />
+      <Button Content="Refresh" Command="{Binding RefreshCommand}" Margin="4,0,0,0" VerticalAlignment="Center" />
+    </WrapPanel>
+
+    <!-- Actions -->
+    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+      <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" Spacing="6">
+        <Button Content="Retry" Command="{Binding RetryCommand}" ToolTip.Tip="Failed → Queued" />
+        <Button Content="Skip" Command="{Binding SkipCommand}" ToolTip.Tip="Queued or Failed → Skipped" />
+        <Button Content="Re-queue…" Command="{Binding RequeueCommand}" ToolTip.Tip="Done → Queued; deletes the output file" />
+        <Button Content="Change model…" Command="{Binding ChangeModelCommand}" />
+        <TextBlock Text="{Binding LockReason}" IsVisible="{Binding IsLocked}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="8,0,0,0"
+                   Foreground="{DynamicResource SystemControlErrorTextForegroundBrush}" />
+      </StackPanel>
+      <TextBlock Text="{Binding Summary}" Opacity="0.7" VerticalAlignment="Center" HorizontalAlignment="Right" />
+    </DockPanel>
+
+    <TextBlock DockPanel.Dock="Top" Text="{Binding StatusMessage}" TextWrapping="Wrap" Margin="0,0,0,6"
+               IsVisible="{Binding StatusMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+
+    <!-- Re-queue confirmation -->
+    <Border DockPanel.Dock="Top" IsVisible="{Binding IsRequeueConfirmOpen}" Padding="10" Margin="0,0,0,6" CornerRadius="4"
+            BorderThickness="1" BorderBrush="{DynamicResource SystemControlErrorTextForegroundBrush}">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="6" Margin="10,0,0,0">
+          <Button Content="Re-queue and delete outputs" Command="{Binding ConfirmRequeueCommand}" />
+          <Button Content="Cancel" Command="{Binding CancelRequeueCommand}" />
+        </StackPanel>
+        <TextBlock Text="{Binding RequeuePrompt}" TextWrapping="Wrap" VerticalAlignment="Center" />
+      </DockPanel>
+    </Border>
+
+    <!-- Model picker -->
+    <Border DockPanel.Dock="Top" IsVisible="{Binding IsModelPickerOpen}" Padding="10" Margin="0,0,0,6" CornerRadius="4"
+            BorderThickness="1" BorderBrush="{DynamicResource SystemControlForegroundBaseMediumLowBrush}">
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <TextBlock Text="Model for the selected jobs:" VerticalAlignment="Center" />
+        <ComboBox ItemsSource="{Binding AvailableModels}" SelectedItem="{Binding SelectedModel}" MinWidth="260" />
+        <Button Content="Apply" Command="{Binding ApplyModelCommand}" />
+        <Button Content="Cancel" Command="{Binding CancelModelCommand}" />
+      </StackPanel>
+    </Border>
+
+    <Panel>
+      <DataGrid x:Name="JobsGrid"
+                ItemsSource="{Binding Rows}"
+                IsVisible="{Binding ShowGrid}"
+                IsReadOnly="True"
+                SelectionMode="Extended"
+                CanUserSortColumns="True"
+                CanUserReorderColumns="True"
+                CanUserResizeColumns="True"
+                GridLinesVisibility="Horizontal"
+                RowHeight="26">
+        <DataGrid.Columns>
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Path" Binding="{Binding Path}" SortMemberPath="Path" Width="440" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Kind" Binding="{Binding Kind}" SortMemberPath="Kind" Width="90" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Group" Binding="{Binding Group}" SortMemberPath="Group" Width="110" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Source" Binding="{Binding Source}" SortMemberPath="Source" Width="120" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Target" Binding="{Binding Target}" SortMemberPath="Target" Width="90" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Model" Binding="{Binding Model}" SortMemberPath="Model" Width="150" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="State" Binding="{Binding State}" SortMemberPath="State" Width="95" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Attempts" Binding="{Binding Attempts}" SortMemberPath="Attempts" Width="105" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Time (s)" Binding="{Binding Time}" SortMemberPath="Seconds" Width="100" />
+          <DataGridTextColumn x:DataType="queue:JobRowViewModel" Header="Error" Binding="{Binding Error}" SortMemberPath="Error" Width="320" />
+        </DataGrid.Columns>
+      </DataGrid>
+
+      <StackPanel IsVisible="{Binding ShowNoProject}" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
+        <TextBlock Text="No project is open." FontSize="16" HorizontalAlignment="Center" />
+        <Button Content="Open or scan a project on the Scan page" Command="{Binding OpenScanCommand}" HorizontalAlignment="Center" />
+      </StackPanel>
+
+      <StackPanel IsVisible="{Binding ShowNoRows}" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
+        <TextBlock Text="No jobs match the current filter." FontSize="16" HorizontalAlignment="Center" />
+        <Button Content="Clear filters" Command="{Binding ClearFiltersCommand}" HorizontalAlignment="Center" />
+      </StackPanel>
+    </Panel>
+  </DockPanel>
+</UserControl>

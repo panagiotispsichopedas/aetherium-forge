@@ -1,0 +1,21 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="using:AetheriumForge.App.Shell"
+        x:Class="AetheriumForge.App.Shell.MainWindow"
+        x:DataType="shell:MainWindowViewModel"
+        Title="Aetherium Forge"
+        Icon="avares://AetheriumForge/Assets/aetherium-forge.ico"
+        Width="1280" Height="820" MinWidth="960" MinHeight="600">
+  <DockPanel>
+    <Border DockPanel.Dock="Left" Width="190" Padding="8" Background="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="4,4,4,16">
+          <Image Source="avares://AetheriumForge/Assets/aetherium-forge-256.png" Width="28" Height="28" />
+          <TextBlock Text="Aetherium Forge" FontWeight="SemiBold" VerticalAlignment="Center" />
+        </StackPanel>
+        <ListBox ItemsSource="{Binding Pages}" SelectedItem="{Binding SelectedPage}" />
+      </DockPanel>
+    </Border>
+    <ContentControl Content="{Binding CurrentPage}" Margin="16" />
+  </DockPanel>
+</Window>
