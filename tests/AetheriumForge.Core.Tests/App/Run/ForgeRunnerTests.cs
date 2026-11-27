@@ -285,7 +285,7 @@ public sealed class ForgeRunnerTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task BuildPlanAsync_Fp16ProfileButOnlyFp32Installed_UsesFp32Variant()
+    public async Task BuildPlanAsync_Fp16ProfileButOnlyFp32Installed_UsesFp32VariantDefaultTileAndNoSeed()
     {
         // Arrange
         _backend.Profiles["realesr-general-x4v3"] = RunTestData.Profile("realesr-general-x4v3", "fp16", 256, 0.5);
@@ -295,7 +295,130 @@ public sealed class ForgeRunnerTests : IAsyncLifetime
         var plan = await runner.BuildPlanAsync(new ForgeRunRequest(ModelOverride: "realesr-general-x4v3"), Ct);
 
         // Assert
-        Assert.Equal("realesr-general-x4v3", plan.Models["realesr-general-x4v3"].Variant);
+        var model = plan.Models["realesr-general-x4v3"];
+        Assert.Equal(("realesr-general-x4v3", ForgeRunPlanning.DefaultTileSize, (double?)null), (model.Variant, model.TileSize, model.SecondsPerMegapixel));
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_ExplicitFp16OverrideWithFp32Profile_RunsFp16WithDefaultTileAndNoSeed()
+    {
+        // Arrange
+        _backend.Profiles["realesrgan-x4plus"] = RunTestData.Profile("realesrgan-x4plus", "fp32", 512, 2.0);
+        using var runner = CreateRunner();
+
+        // Act
+        var plan = await runner.BuildPlanAsync(new ForgeRunRequest(ModelOverride: "realesrgan-x4plus-fp16"), Ct);
+
+        // Assert
+        var model = plan.Models["realesrgan-x4plus-fp16"];
+        Assert.Equal(("realesrgan-x4plus-fp16", ForgeRunPlanning.DefaultTileSize, (double?)null), (model.Variant, model.TileSize, model.SecondsPerMegapixel));
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_ExplicitFp16OverrideWithFp16Profile_UsesProfileTileAndSeed()
+    {
+        // Arrange
+        _backend.Profiles["realesrgan-x4plus"] = RunTestData.Profile("realesrgan-x4plus", "fp16", 512, 0.8);
+        using var runner = CreateRunner();
+
+        // Act
+        var plan = await runner.BuildPlanAsync(new ForgeRunRequest(ModelOverride: "realesrgan-x4plus-fp16"), Ct);
+
+        // Assert
+        var model = plan.Models["realesrgan-x4plus-fp16"];
+        Assert.Equal((512, (double?)0.8), (model.TileSize, model.SecondsPerMegapixel));
+    }
+
+    [Fact]
+    public async Task StartAsync_JobsChangedSubscriberThrows_StillRaisesRunEndAndReturnsSummary()
+    {
+        // Arrange
+        _session.ThrowOnNotify = true;
+        using var runner = CreateRunner();
+        var ends = new List<PipelineRunSummary>();
+        runner.RunStateChanged += (_, summary) =>
+        {
+            if (summary is not null)
+            {
+                ends.Add(summary);
+            }
+        };
+        var expected = new PipelineRunSummary(2, 0, 0, false, TimeSpan.Zero);
+
+        // Act
+        var run = runner.StartAsync(new ForgeRunRequest());
+        await _backend.Pipeline.Started.Task.WaitAsync(Ct);
+        _backend.Pipeline.Finish(expected);
+        var summary = await run.WaitAsync(Ct);
+
+        // Assert
+        Assert.Equal((expected, expected, PipelineState.Idle), (summary, Assert.Single(ends), runner.State));
+    }
+
+    [Fact]
+    public void KillChildProcesses_TrackedProcess_KillsIt()
+    {
+        // Arrange
+        var tracker = new ChildProcessTracker();
+        using var runner = new ForgeRunner(_session, _adapters, _backend, tracker, NullLogger.Instance);
+        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ping.exe", "-n 30 127.0.0.1") { CreateNoWindow = true, UseShellExecute = false })!;
+        using var registration = tracker.Track(process);
+
+        // Act
+        var killed = runner.KillChildProcesses();
+        process.WaitForExit(10_000);
+
+        // Assert
+        Assert.Equal((1, true), (killed, process.HasExited));
+    }
+
+    [Fact]
+    public void ChooseVariant_BaseNameWithoutProfile_PrefersBaseNameWhateverTheCatalogOrder()
+    {
+        // Arrange
+        ModelInfo[] installed = [RunTestData.Model("m-x4-fp16", "fp16"), RunTestData.Model("m-x4", "fp32")];
+
+        // Act
+        var variant = ForgeRunPlanning.ChooseVariant("m-x4", null, installed);
+
+        // Assert
+        Assert.Equal(new ModelVariant("m-x4", "fp32"), variant);
+    }
+
+    [Fact]
+    public void ChooseVariant_BaseNameNotInstalledWithoutProfile_FallsBackToFirstVariantByName()
+    {
+        // Arrange
+        ModelInfo[] installed = [RunTestData.Model("m-x4-fp16", "fp16"), RunTestData.Model("m-x4-bf16", "bf16")];
+
+        // Act
+        var variant = ForgeRunPlanning.ChooseVariant("m-x4", null, installed);
+
+        // Assert
+        Assert.Equal(new ModelVariant("m-x4-fp16", "fp16"), variant);
+    }
+
+    [Fact]
+    public void ChooseVariant_ExplicitFp16NameWithFp32Profile_HonoursTheName()
+    {
+        // Arrange
+        ModelInfo[] installed = [RunTestData.Model("m-x4", "fp32"), RunTestData.Model("m-x4-fp16", "fp16")];
+
+        // Act
+        var variant = ForgeRunPlanning.ChooseVariant("m-x4-fp16", RunTestData.Profile("m-x4", "fp32", 384, 1.0), installed);
+
+        // Assert
+        Assert.Equal(new ModelVariant("m-x4-fp16", "fp16"), variant);
+    }
+
+    [Fact]
+    public void ChooseVariant_ExplicitVariantNotInstalled_ReturnsNull()
+    {
+        // Act
+        var variant = ForgeRunPlanning.ChooseVariant("m-x4-fp16", null, [RunTestData.Model("m-x4", "fp32")]);
+
+        // Assert
+        Assert.Null(variant);
     }
 
     [Fact]

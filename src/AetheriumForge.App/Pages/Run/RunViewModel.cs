@@ -45,9 +45,14 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
     private readonly IGpuAdapterProvider _adapters;
     private readonly ForgeRunnerLogSink _logSink;
     private readonly IRunUiDispatcher _dispatcher;
+    private readonly INavigationService _navigation;
     private readonly Func<IReadOnlyList<ModelInfo>> _modelCatalog;
+    private readonly TimeProvider _timeProvider;
+    private readonly TimeSpan? _gpuPollInterval;
     private readonly ILogger _logger;
-    private readonly CancellationTokenSource _disposing = new();
+    private readonly Lock _gpuGate = new();
+    private CancellationTokenSource? _gpuPolling;
+    private bool _disposed;
     private readonly Lock _logGate = new();
     private readonly List<string> _pendingLog = [];
     private PipelineProgress? _pendingProgress;
@@ -59,10 +64,18 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
     /// <param name="session">The open project.</param>
     /// <param name="adapters">GPU adapters, for the memory bar.</param>
     /// <param name="logSink">The log-tail sink.</param>
+    /// <param name="navigation">Navigation: the GPU memory bar is polled only while the Run page is shown; also the "open Scan" link.</param>
     /// <param name="timeProvider">Clock for GPU polling.</param>
     /// <param name="logger">Logger.</param>
-    public RunViewModel(IForgeRunner runner, IProjectSession session, IGpuAdapterProvider adapters, ForgeRunnerLogSink logSink, TimeProvider timeProvider, ILogger<RunViewModel> logger)
-        : this(runner, session, adapters, logSink, new AvaloniaRunUiDispatcher(), () => ModelCatalog.Discover(ModelCatalog.DefaultModelsFolder), timeProvider, GpuPollInterval, logger)
+    public RunViewModel(
+        IForgeRunner runner,
+        IProjectSession session,
+        IGpuAdapterProvider adapters,
+        ForgeRunnerLogSink logSink,
+        INavigationService navigation,
+        TimeProvider timeProvider,
+        ILogger<RunViewModel> logger)
+        : this(runner, session, adapters, logSink, new AvaloniaRunUiDispatcher(), navigation, () => ModelCatalog.Discover(ModelCatalog.DefaultModelsFolder), timeProvider, GpuPollInterval, logger)
     {
     }
 
@@ -72,6 +85,7 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
     /// <param name="adapters">GPU adapters.</param>
     /// <param name="logSink">The log-tail sink.</param>
     /// <param name="dispatcher">UI dispatcher.</param>
+    /// <param name="navigation">Navigation.</param>
     /// <param name="modelCatalog">Lists the installed models.</param>
     /// <param name="timeProvider">Clock for GPU polling.</param>
     /// <param name="gpuPollInterval">GPU polling interval, or <see langword="null"/> to disable polling.</param>
@@ -82,6 +96,7 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
         IGpuAdapterProvider adapters,
         ForgeRunnerLogSink logSink,
         IRunUiDispatcher dispatcher,
+        INavigationService navigation,
         Func<IReadOnlyList<ModelInfo>> modelCatalog,
         TimeProvider timeProvider,
         TimeSpan? gpuPollInterval,
@@ -92,6 +107,7 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
         ArgumentNullException.ThrowIfNull(adapters);
         ArgumentNullException.ThrowIfNull(logSink);
         ArgumentNullException.ThrowIfNull(dispatcher);
+        ArgumentNullException.ThrowIfNull(navigation);
         ArgumentNullException.ThrowIfNull(modelCatalog);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(logger);
@@ -101,7 +117,10 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
         _adapters = adapters;
         _logSink = logSink;
         _dispatcher = dispatcher;
+        _navigation = navigation;
         _modelCatalog = modelCatalog;
+        _timeProvider = timeProvider;
+        _gpuPollInterval = gpuPollInterval;
         _logger = logger;
 
         Lanes = [.. Enum.GetValues<PipelineStage>().Select(stage => new StageLaneViewModel(stage))];
@@ -109,11 +128,13 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
         _selectedModel = RunModelOption.JobDefault;
         _state = runner.State;
         _projectText = DescribeProject(session.Current);
+        _hasProject = session.Current is not null;
 
         runner.ProgressChanged += OnRunnerProgress;
         runner.RunStateChanged += OnRunStateChanged;
         session.Changed += OnSessionChanged;
         logSink.LinesReceived += OnLogLines;
+        navigation.Navigated += OnNavigated;
 
         if (runner.LastProgress is { } last)
         {
@@ -121,9 +142,18 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
         }
 
         RefreshModels();
-        if (gpuPollInterval is { } interval)
+        UpdateGpuPolling(navigation.Current == AppPage.Run);
+    }
+
+    /// <summary>Gets a value indicating whether the GPU memory bar is being polled (only while the Run page is shown).</summary>
+    internal bool IsGpuPolling
+    {
+        get
         {
-            _ = Task.Run(() => PollGpuMemoryAsync(timeProvider, interval, _disposing.Token));
+            lock (_gpuGate)
+            {
+                return _gpuPolling is not null;
+            }
         }
     }
 
@@ -163,6 +193,12 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(StartCommand))]
     private string _projectText;
+
+    /// <summary>Gets a value indicating whether a project is open.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowNoProject))]
+    [NotifyCanExecuteChangedFor(nameof(StartCommand))]
+    private bool _hasProject;
 
     /// <summary>Gets an error or hint, or <see langword="null"/>.</summary>
     [ObservableProperty]
@@ -223,6 +259,9 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
     /// <summary>Gets the video-memory text, for example <c>1.2 / 7.4 GiB (16 %)</c>.</summary>
     [ObservableProperty]
     private string _gpuMemoryText = "unknown";
+
+    /// <summary>Gets a value indicating whether the "open a project on the Scan page" link is shown.</summary>
+    public bool ShowNoProject => !HasProject;
 
     /// <summary>Gets the state as text.</summary>
     public string StateText => State.ToString();
@@ -316,9 +355,18 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
         _runner.RunStateChanged -= OnRunStateChanged;
         _session.Changed -= OnSessionChanged;
         _logSink.LinesReceived -= OnLogLines;
-        _disposing.Cancel();
-        _disposing.Dispose();
+        _navigation.Navigated -= OnNavigated;
+        lock (_gpuGate)
+        {
+            _disposed = true;
+        }
+
+        UpdateGpuPolling(false);
     }
+
+    /// <summary>Shows the Scan page (the "no project" link).</summary>
+    [RelayCommand]
+    private void OpenScan() => _navigation.NavigateTo(AppPage.Scan);
 
     /// <summary>Reloads the installed model families.</summary>
     [RelayCommand]
@@ -354,7 +402,7 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
         SelectedModel = ModelOptions.FirstOrDefault(o => string.Equals(o.Name, selected, StringComparison.OrdinalIgnoreCase)) ?? RunModelOption.JobDefault;
     }
 
-    private bool CanStart() => State == PipelineState.Idle && !IsStarting && _session.Current is not null;
+    private bool CanStart() => State == PipelineState.Idle && !IsStarting && HasProject;
 
     /// <summary>Starts a run with the selected options; completes when the run ends.</summary>
     [RelayCommand(CanExecute = nameof(CanStart))]
@@ -380,8 +428,9 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
             var summary = await _runner.StartAsync(new ForgeRunRequest(SelectedModel?.Name, limit));
             LastSummary = DescribeSummary(summary);
         }
-        catch (Exception ex) when (ex is InvalidOperationException or FileNotFoundException or IOException or ArgumentException or UnauthorizedAccessException)
+        catch (Exception ex)
         {
+            // Top of a UI command: any start or run failure is logged and shown, never left to crash the app.
             LogStartFailed(_logger, ex);
             StatusMessage = ex.Message;
         }
@@ -458,8 +507,39 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
     private void OnSessionChanged(object? sender, EventArgs e) => _dispatcher.Post(() =>
     {
         ProjectText = DescribeProject(_session.Current);
-        StartCommand.NotifyCanExecuteChanged();
+        HasProject = _session.Current is not null;
     });
+
+    private void OnNavigated(object? sender, AppPage page) => UpdateGpuPolling(page == AppPage.Run);
+
+    /// <summary>Starts or stops the 1 Hz GPU memory poll.</summary>
+    /// <param name="visible">Whether the Run page is shown.</param>
+    private void UpdateGpuPolling(bool visible)
+    {
+        CancellationTokenSource? stop = null;
+        lock (_gpuGate)
+        {
+            var run = visible && !_disposed && _gpuPollInterval is not null;
+            if (run && _gpuPolling is null)
+            {
+                var cts = new CancellationTokenSource();
+                _gpuPolling = cts;
+                var interval = _gpuPollInterval!.Value;
+                _ = Task.Run(() => PollGpuMemoryAsync(_timeProvider, interval, cts.Token));
+            }
+            else if (!run && _gpuPolling is not null)
+            {
+                stop = _gpuPolling;
+                _gpuPolling = null;
+            }
+        }
+
+        if (stop is not null)
+        {
+            stop.Cancel();
+            stop.Dispose();
+        }
+    }
 
     private void OnLogLines(object? sender, IReadOnlyList<string> lines)
     {
@@ -518,7 +598,7 @@ public sealed partial class RunViewModel : ObservableObject, IDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // The view model was disposed: polling ends.
+            // The page was hidden or the view model disposed: polling ends.
             LogGpuPollingStopped(_logger);
         }
     }

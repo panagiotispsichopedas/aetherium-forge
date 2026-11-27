@@ -2,6 +2,8 @@ using AetheriumForge.App.Pages.Run;
 using AetheriumForge.App.Services;
 using AetheriumForge.Core.Pipeline;
 using Avalonia.Controls;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AetheriumForge.App.Shell;
 
@@ -11,6 +13,7 @@ namespace AetheriumForge.App.Shell;
 public sealed partial class MainWindow : Window
 {
     private readonly IForgeRunner? _runner;
+    private readonly ILogger _logger = NullLogger.Instance;
     private bool _closeConfirmed;
 
     /// <summary>Initializes a new instance of the <see cref="MainWindow"/> class (designer).</summary>
@@ -19,12 +22,15 @@ public sealed partial class MainWindow : Window
     /// <summary>Initializes a new instance of the <see cref="MainWindow"/> class.</summary>
     /// <param name="viewModel">The view model.</param>
     /// <param name="runner">The forge runner; closing during a run asks first.</param>
-    public MainWindow(MainWindowViewModel viewModel, IForgeRunner runner)
+    /// <param name="logger">Logger.</param>
+    public MainWindow(MainWindowViewModel viewModel, IForgeRunner runner, ILogger<MainWindow> logger)
         : this()
     {
         ArgumentNullException.ThrowIfNull(runner);
+        ArgumentNullException.ThrowIfNull(logger);
         DataContext = viewModel;
         _runner = runner;
+        _logger = logger;
         Closing += OnClosing;
     }
 
@@ -36,11 +42,25 @@ public sealed partial class MainWindow : Window
         }
 
         e.Cancel = true;
-        var choice = await new RunCloseDialog(_runner).ShowDialog<RunCloseChoice>(this);
-        if (choice != RunCloseChoice.Cancel)
+        try
         {
-            _closeConfirmed = true;
-            Close();
+            var killChildren = _runner is ForgeRunner forgeRunner ? forgeRunner.KillChildProcesses : (Func<int>?)null;
+            var choice = await new RunCloseDialog(_runner, killChildren).ShowDialog<RunCloseChoice>(this);
+            if (choice == RunCloseChoice.Cancel)
+            {
+                return;
+            }
         }
+        catch (Exception ex)
+        {
+            // An async void handler must not crash the app: log and close anyway (crash recovery requeues interrupted jobs).
+            LogClosePromptFailed(_logger, ex);
+        }
+
+        _closeConfirmed = true;
+        Close();
     }
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "The close prompt failed; closing the window")]
+    private static partial void LogClosePromptFailed(ILogger logger, Exception exception);
 }

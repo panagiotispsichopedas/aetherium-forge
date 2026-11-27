@@ -177,8 +177,15 @@ public sealed partial class ForgeRunner : IForgeRunner, IDisposable
             }
 
             run.Dispose();
-            _session.NotifyJobsChanged();
-            RunStateChanged?.Invoke(this, summary ?? FallbackSummary(run, TimeProvider.System.GetElapsedTime(started)));
+            try
+            {
+                NotifyJobsChanged();
+            }
+            finally
+            {
+                // Always signal the end: the close prompt and the Run page wait for it.
+                RunStateChanged?.Invoke(this, summary ?? FallbackSummary(run, TimeProvider.System.GetElapsedTime(started)));
+            }
         }
     }
 
@@ -298,18 +305,28 @@ public sealed partial class ForgeRunner : IForgeRunner, IDisposable
                 continue;
             }
 
+            var (name, precision) = variant.Value;
             ModelRunPlan plan;
-            if (profile is not null)
+            if (profile is null)
             {
-                // The profile's device index is a snapshot; resolve it again from the current adapters.
-                var device = GpuProfiler.ResolveAdapter(profile, adapters)?.DirectMLDeviceId ?? defaultDevice;
-                plan = new ModelRunPlan(model, variant, device, profile.TileSize, profile.SecondsPerMegapixel, profile);
-                LogProfileUsed(_logger, model, variant, device, profile.TileSize, profile.Precision, profile.SecondsPerMegapixel);
+                plan = new ModelRunPlan(model, name, defaultDevice, ForgeRunPlanning.DefaultTileSize, null, null);
+                LogNoProfile(_logger, model, name, precision, defaultDevice, ForgeRunPlanning.DefaultTileSize);
             }
             else
             {
-                plan = new ModelRunPlan(model, variant, defaultDevice, ForgeRunPlanning.DefaultTileSize, null, null);
-                LogNoProfile(_logger, model, variant, defaultDevice, ForgeRunPlanning.DefaultTileSize);
+                // The profile's device index is a snapshot; resolve it again from the current adapters.
+                var device = GpuProfiler.ResolveAdapter(profile, adapters)?.DirectMLDeviceId ?? defaultDevice;
+                if (string.Equals(precision, profile.Precision, StringComparison.OrdinalIgnoreCase))
+                {
+                    plan = new ModelRunPlan(model, name, device, profile.TileSize, profile.SecondsPerMegapixel, profile);
+                    LogProfileUsed(_logger, model, name, precision, device, profile.TileSize, profile.SecondsPerMegapixel);
+                }
+                else
+                {
+                    // The profile measured another precision: its tile and throughput do not apply to this variant.
+                    plan = new ModelRunPlan(model, name, device, ForgeRunPlanning.DefaultTileSize, null, profile);
+                    LogProfilePrecisionMismatch(_logger, model, name, precision, profile.Precision, device, ForgeRunPlanning.DefaultTileSize);
+                }
             }
 
             models[model] = plan;
@@ -370,13 +387,33 @@ public sealed partial class ForgeRunner : IForgeRunner, IDisposable
 
     private void OnProcessExit(object? sender, EventArgs e) => KillChildProcesses();
 
-    private void KillChildProcesses()
+    private void NotifyJobsChanged()
+    {
+        try
+        {
+            _session.NotifyJobsChanged();
+        }
+        catch (Exception ex)
+        {
+            // A failing JobsChanged subscriber must not keep RunStateChanged from firing; it is logged, not rethrown.
+            LogNotifyJobsChangedFailed(_logger, ex);
+        }
+    }
+
+    /// <summary>
+    /// Kills every tracked texconv process (and its children). Used on exit and by the close prompt's "Force close"; jobs left Running
+    /// are requeued by crash recovery on the next start.
+    /// </summary>
+    /// <returns>The number of processes a kill was sent to.</returns>
+    public int KillChildProcesses()
     {
         var killed = _processes.KillAll();
         if (killed > 0)
         {
             LogKilledChildren(_logger, killed);
         }
+
+        return killed;
     }
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Run starting for {Project}: limit {MaxJobs}, model override {ModelOverride}, {ModelCount} model(s)")]
@@ -400,11 +437,17 @@ public sealed partial class ForgeRunner : IForgeRunner, IDisposable
     [LoggerMessage(Level = LogLevel.Warning, Message = "No usable GPU adapter found; using DirectML device 0")]
     private static partial void LogNoAdapter(ILogger logger);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Model {Model}: GPU profile found, running {Variant} on device {Device}, tile {Tile} px, {Precision}, {SecondsPerMegapixel:F3} s/MP")]
-    private static partial void LogProfileUsed(ILogger logger, string model, string variant, int device, int tile, string precision, double secondsPerMegapixel);
+    [LoggerMessage(Level = LogLevel.Information, Message = "Model {Model}: GPU profile used, running {Variant} ({Precision}) on device {Device}, tile {Tile} px, ETA seed {SecondsPerMegapixel:F3} s/MP")]
+    private static partial void LogProfileUsed(ILogger logger, string model, string variant, string precision, int device, int tile, double secondsPerMegapixel);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Model {Model}: no GPU profile, running {Variant} on device {Device}, tile {Tile} px (calibrate on the Models page)")]
-    private static partial void LogNoProfile(ILogger logger, string model, string variant, int device, int tile);
+    [LoggerMessage(Level = LogLevel.Information, Message = "Model {Model}: the GPU profile is {ProfilePrecision} but {Variant} ({Precision}) runs; device {Device}, default tile {Tile} px, no ETA seed")]
+    private static partial void LogProfilePrecisionMismatch(ILogger logger, string model, string variant, string precision, string profilePrecision, int device, int tile);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Model {Model}: no GPU profile, running {Variant} ({Precision}) on device {Device}, tile {Tile} px, no ETA seed (calibrate on the Models page)")]
+    private static partial void LogNoProfile(ILogger logger, string model, string variant, string precision, int device, int tile);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "A JobsChanged subscriber failed after the run")]
+    private static partial void LogNotifyJobsChangedFailed(ILogger logger, Exception exception);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Killed {Count} texconv process(es) on exit")]
     private static partial void LogKilledChildren(ILogger logger, int count);

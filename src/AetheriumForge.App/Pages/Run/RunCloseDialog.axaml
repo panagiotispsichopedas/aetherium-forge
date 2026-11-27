@@ -17,6 +17,11 @@
     <StackPanel x:Name="StoppingPanel" Spacing="12" IsVisible="False">
       <TextBlock Text="Stopping gracefully… the app closes when the pipeline has stopped." TextWrapping="Wrap" />
       <ProgressBar IsIndeterminate="True" Height="6" />
+      <StackPanel x:Name="ForcePanel" Spacing="8" IsVisible="False">
+        <TextBlock TextWrapping="Wrap" Opacity="0.8"
+                   Text="The stop is taking long. Force close ends texconv and exits now; the interrupted textures are queued again on the next start." />
+        <Button Content="Force close" Click="OnForceClose" HorizontalAlignment="Right" />
+      </StackPanel>
     </StackPanel>
   </StackPanel>
 </Window>

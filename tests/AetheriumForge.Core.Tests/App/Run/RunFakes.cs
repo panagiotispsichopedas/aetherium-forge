@@ -19,12 +19,18 @@ internal sealed class FakeProjectSession : IProjectSession
 
     public int JobsChangedCount { get; private set; }
 
+    public bool ThrowOnNotify { get; set; }
+
     public Task OpenAsync(string projectFolder, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
     public void NotifyJobsChanged()
     {
         JobsChangedCount++;
         JobsChanged?.Invoke(this, EventArgs.Empty);
+        if (ThrowOnNotify)
+        {
+            throw new InvalidOperationException("subscriber failed");
+        }
     }
 
     public void RaiseChanged() => Changed?.Invoke(this, EventArgs.Empty);
@@ -208,4 +214,17 @@ internal static class RunTestData
                 new StageActivity(PipelineStage.Encode, null, 0, 1, 0, 0),
             ],
             1.25, TimeSpan.FromSeconds(200), TimeSpan.FromSeconds(3725), "boom");
+}
+
+internal sealed class FakeNavigation(AppPage current = AppPage.Run) : INavigationService
+{
+    public event EventHandler<AppPage>? Navigated;
+
+    public AppPage Current { get; private set; } = current;
+
+    public void NavigateTo(AppPage page)
+    {
+        Current = page;
+        Navigated?.Invoke(this, page);
+    }
 }

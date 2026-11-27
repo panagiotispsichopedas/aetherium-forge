@@ -22,9 +22,10 @@ public static class AppHost
     public static IHost Build()
     {
         var builder = Host.CreateApplicationBuilder();
-        builder.Services.AddSerilog((_, logger) => logger
+        builder.Services.AddSerilog((sp, logger) => logger
             .MinimumLevel.Information()
-            .WriteTo.File(Path.Combine(AppDataFolder, "logs", "app-.log"), formatProvider: System.Globalization.CultureInfo.InvariantCulture, rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14));
+            .WriteTo.File(Path.Combine(AppDataFolder, "logs", "app-.log"), formatProvider: System.Globalization.CultureInfo.InvariantCulture, rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14)
+            .WriteTo.Sink(sp.GetRequiredService<ForgeRunnerLogSink>()));
 
         var services = builder.Services;
         services.AddSingleton(TimeProvider.System);
@@ -37,7 +38,7 @@ public static class AppHost
         services.AddSingleton<QueuePagePlaceholder>(_ => new QueuePagePlaceholder(new PagePlaceholderViewModel("Queue")));
 
         // ── PAGE: Run (also owns IForgeRunner) ──
-        // ForgeRunner (IForgeRunner), the log-tail sink (re-registers Serilog with the same file sink plus the tail) and RunViewModel.
+        // ForgeRunner (IForgeRunner), the log-tail sink (wired into the Serilog configuration above) and RunViewModel.
         services.AddForgeRunPage();
         services.AddSingleton<RunPagePlaceholder>(sp => new RunPagePlaceholder(sp.GetRequiredService<Pages.Run.RunViewModel>()));
 

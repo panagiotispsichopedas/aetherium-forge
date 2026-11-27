@@ -233,6 +233,112 @@ public sealed class RunViewModelTests : IDisposable
         Assert.Equal((25.0, "2.00 / 8.00 GiB budget (25 %)"), (vm.GpuUsagePercent, vm.GpuMemoryText));
     }
 
-    private RunViewModel CreateViewModel() =>
-        new(_runner, _session, _adapters, _sink, new InlineDispatcher(), () => _models, TimeProvider.System, gpuPollInterval: null, NullLogger.Instance);
+    [Fact]
+    public void StartCommand_UnexpectedException_LogsAndShowsMessage()
+    {
+        // Arrange
+        using var vm = CreateViewModel();
+        _runner.Run.SetException(new NotSupportedException("unexpected"));
+
+        // Act
+        vm.StartCommand.Execute(null);
+
+        // Assert
+        Assert.Equal("unexpected", vm.StatusMessage);
+    }
+
+    [Fact]
+    public void GpuPolling_RunPageShown_Polls()
+    {
+        // Act
+        using var vm = CreateViewModel(new FakeNavigation(AppPage.Run), TimeSpan.FromHours(1));
+
+        // Assert
+        Assert.True(vm.IsGpuPolling);
+    }
+
+    [Fact]
+    public void GpuPolling_OtherPageShown_DoesNotPoll()
+    {
+        // Act
+        using var vm = CreateViewModel(new FakeNavigation(AppPage.Queue), TimeSpan.FromHours(1));
+
+        // Assert
+        Assert.False(vm.IsGpuPolling);
+    }
+
+    [Fact]
+    public void GpuPolling_NavigateAwayAndBack_StopsThenRestarts()
+    {
+        // Arrange
+        var navigation = new FakeNavigation(AppPage.Run);
+        using var vm = CreateViewModel(navigation, TimeSpan.FromHours(1));
+
+        // Act
+        navigation.NavigateTo(AppPage.Models);
+        var away = vm.IsGpuPolling;
+        navigation.NavigateTo(AppPage.Run);
+
+        // Assert
+        Assert.Equal((false, true), (away, vm.IsGpuPolling));
+    }
+
+    [Fact]
+    public void Dispose_WhilePolling_StopsPolling()
+    {
+        // Arrange
+        var vm = CreateViewModel(new FakeNavigation(AppPage.Run), TimeSpan.FromHours(1));
+
+        // Act
+        vm.Dispose();
+
+        // Assert
+        Assert.False(vm.IsGpuPolling);
+    }
+
+    [Fact]
+    public void ShowNoProject_NoProject_IsTrue()
+    {
+        // Arrange
+        _session.Current = null;
+
+        // Act
+        using var vm = CreateViewModel();
+
+        // Assert
+        Assert.True(vm.ShowNoProject);
+    }
+
+    [Fact]
+    public void SessionChanged_ProjectOpened_HidesLinkAndEnablesStart()
+    {
+        // Arrange
+        var project = _session.Current;
+        _session.Current = null;
+        using var vm = CreateViewModel();
+
+        // Act
+        _session.Current = project;
+        _session.RaiseChanged();
+
+        // Assert
+        Assert.Equal((false, true), (vm.ShowNoProject, vm.StartCommand.CanExecute(null)));
+    }
+
+    [Fact]
+    public void OpenScanCommand_Executed_NavigatesToScan()
+    {
+        // Arrange
+        var navigation = new FakeNavigation(AppPage.Run);
+        using var vm = CreateViewModel(navigation);
+
+        // Act
+        vm.OpenScanCommand.Execute(null);
+
+        // Assert
+        Assert.Equal(AppPage.Scan, navigation.Current);
+    }
+
+    private RunViewModel CreateViewModel(FakeNavigation? navigation = null, TimeSpan? gpuPollInterval = null) =>
+        new(_runner, _session, _adapters, _sink, new InlineDispatcher(), navigation ?? new FakeNavigation(), () => _models, TimeProvider.System, gpuPollInterval, NullLogger.Instance);
 }

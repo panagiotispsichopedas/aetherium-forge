@@ -30,12 +30,25 @@ internal sealed record ForgeRunPlan(
 /// How one model runs: the installed variant, the adapter, the tile size and the ETA seed from the GPU profile.
 /// </summary>
 /// <param name="Model">The model name on the job (or the override); also the ETA key.</param>
-/// <param name="Variant">The installed model that runs (the FP16 variant when the profile chose FP16 and it is installed).</param>
+/// <param name="Variant">The installed model that runs (see <see cref="ForgeRunPlanning.ChooseVariant"/>).</param>
 /// <param name="DeviceId">The DirectML device index, re-resolved from the current adapters.</param>
-/// <param name="TileSize">The upscaler tile size in source pixels.</param>
-/// <param name="SecondsPerMegapixel">The ETA seed from the GPU profile, or <see langword="null"/> without a profile.</param>
-/// <param name="Profile">The GPU profile used, or <see langword="null"/>.</param>
-internal sealed record ModelRunPlan(string Model, string Variant, int DeviceId, int TileSize, double? SecondsPerMegapixel, GpuProfile? Profile);
+/// <param name="TileSize">The upscaler tile size in source pixels: the profile's when the variant has the profile's precision, else 384.</param>
+/// <param name="SecondsPerMegapixel">The ETA seed from the profile when the variant has the profile's precision, else <see langword="null"/>.</param>
+/// <param name="Profile">The GPU profile of the model family, or <see langword="null"/>.</param>
+internal sealed record ModelRunPlan(
+    string Model,
+    string Variant,
+    int DeviceId,
+    int TileSize,
+    double? SecondsPerMegapixel,
+    GpuProfile? Profile);
+
+/// <summary>
+/// An installed model chosen to run, with its precision.
+/// </summary>
+/// <param name="Name">The installed model name.</param>
+/// <param name="Precision">Its precision (<c>fp32</c> or <c>fp16</c>).</param>
+internal readonly record struct ModelVariant(string Name, string Precision);
 
 /// <summary>
 /// The per-run services built from a <see cref="ForgeRunPlan"/>; disposing them releases the GPU sessions and archive readers.
@@ -94,33 +107,48 @@ internal static class ForgeRunPlanning
     public const int MaxRepositoryLevels = 6;
 
     /// <summary>
-    /// Picks the installed variant of <paramref name="model"/>: the profile's precision when installed, otherwise the exact name, otherwise
-    /// the FP32 variant, otherwise any variant of the family.
+    /// Picks the installed model that runs for <paramref name="model"/>.
     /// </summary>
-    /// <param name="model">The model name on the job.</param>
-    /// <param name="profile">The GPU profile, or <see langword="null"/>.</param>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item>A family base name (for example <c>realesrgan-x4plus</c>) means "use the profile's precision": the variant with
+    /// <see cref="GpuProfile.Precision"/> when it is installed. Without a profile, or when that variant is not installed, the fallback is
+    /// deterministic: the base name itself, then the FP32 variant, then the first variant by ordinal name.</item>
+    /// <item>An explicit variant name (for example <c>realesrgan-x4plus-fp16</c>) is honoured exactly; it is missing when not installed.</item>
+    /// </list>
+    /// The caller uses the profile's tile size and throughput only when the returned precision equals the profile's.
+    /// </remarks>
+    /// <param name="model">The model name on the job (or the override).</param>
+    /// <param name="profile">The GPU profile of the model family, or <see langword="null"/>.</param>
     /// <param name="installed">The installed models.</param>
-    /// <returns>The variant name, or <see langword="null"/> when no variant of the family is installed.</returns>
-    public static string? ChooseVariant(string model, GpuProfile? profile, IReadOnlyList<ModelInfo> installed)
+    /// <returns>The chosen model and its precision, or <see langword="null"/> when nothing suitable is installed.</returns>
+    public static ModelVariant? ChooseVariant(string model, GpuProfile? profile, IReadOnlyList<ModelInfo> installed)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(model);
         ArgumentNullException.ThrowIfNull(installed);
 
         var family = GpuProfiler.GetModelFamily(model);
-        var variants = installed.Where(m => string.Equals(GpuProfiler.GetModelFamily(m.Name), family, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (!string.Equals(family, model, StringComparison.OrdinalIgnoreCase))
+        {
+            return installed.FirstOrDefault(m => string.Equals(m.Name, model, StringComparison.OrdinalIgnoreCase)) is { } exact
+                ? new ModelVariant(exact.Name, exact.Precision)
+                : null;
+        }
+
+        var variants = installed
+            .Where(m => string.Equals(GpuProfiler.GetModelFamily(m.Name), family, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
         if (variants.Count == 0)
         {
             return null;
         }
 
-        if (profile is not null && variants.FirstOrDefault(m => string.Equals(m.Precision, profile.Precision, StringComparison.OrdinalIgnoreCase)) is { } preferred)
-        {
-            return preferred.Name;
-        }
-
-        return (variants.FirstOrDefault(m => string.Equals(m.Name, model, StringComparison.OrdinalIgnoreCase))
+        var chosen = (profile is null ? null : variants.FirstOrDefault(m => string.Equals(m.Precision, profile.Precision, StringComparison.OrdinalIgnoreCase)))
+            ?? variants.FirstOrDefault(m => string.Equals(m.Name, model, StringComparison.OrdinalIgnoreCase))
             ?? variants.FirstOrDefault(m => string.Equals(m.Precision, ModelCatalog.DefaultPrecision, StringComparison.OrdinalIgnoreCase))
-            ?? variants[0]).Name;
+            ?? variants[0];
+        return new ModelVariant(chosen.Name, chosen.Precision);
     }
 
     /// <summary>Lists the models the jobs need (parallax maps and jobs without a model run none).</summary>

@@ -5,7 +5,6 @@ using AetheriumForge.Native;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
-using Serilog;
 
 namespace AetheriumForge.App.Services;
 
@@ -15,8 +14,8 @@ namespace AetheriumForge.App.Services;
 public static class ForgeRunnerServiceCollectionExtensions
 {
     /// <summary>
-    /// Adds the Run page services. Re-registers Serilog with the same file sink as <see cref="AppHost"/> plus <see cref="ForgeRunnerLogSink"/>
-    /// (the last <c>AddSerilog</c> wins), so the log tail sees every log event.
+    /// Adds the Run page services. <see cref="ForgeRunnerLogSink"/> is registered here; <see cref="AppHost"/>'s single Serilog configuration
+    /// writes to it, so the log tail sees every log event.
     /// </summary>
     /// <param name="services">The services.</param>
     /// <returns><paramref name="services"/>.</returns>
@@ -25,10 +24,6 @@ public static class ForgeRunnerServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
 
         services.AddSingleton<ForgeRunnerLogSink>();
-        services.AddSerilog((sp, logger) => logger
-            .MinimumLevel.Information()
-            .WriteTo.File(Path.Combine(AppHost.AppDataFolder, "logs", "app-.log"), formatProvider: System.Globalization.CultureInfo.InvariantCulture, rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14)
-            .WriteTo.Sink(sp.GetRequiredService<ForgeRunnerLogSink>()));
 
         // Shared with the Models page; TryAdd keeps whichever registration came first.
         services.TryAddSingleton<IGpuAdapterProvider>(sp => new DxgiAdapterProvider(sp.GetRequiredService<ILogger<DxgiAdapterProvider>>()));

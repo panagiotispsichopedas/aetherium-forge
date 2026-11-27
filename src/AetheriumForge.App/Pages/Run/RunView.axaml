@@ -9,6 +9,7 @@
     <StackPanel Grid.Row="0" Spacing="2">
       <TextBlock Text="Run" FontSize="22" FontWeight="SemiBold" />
       <TextBlock Text="{Binding ProjectText}" Opacity="0.75" TextTrimming="CharacterEllipsis" />
+      <Button Content="Open or scan a project on the Scan page" Command="{Binding OpenScanCommand}" IsVisible="{Binding ShowNoProject}" Margin="0,6,0,0" />
     </StackPanel>
 
     <!-- Controls and options -->
