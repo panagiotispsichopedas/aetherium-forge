@@ -50,6 +50,62 @@ public sealed class TextureProcessorTests : IDisposable
     }
 
     [Fact]
+    public async Task ProcessAsync_Commit_MovesFromHiddenStagingFolderToOutput()
+    {
+        // Arrange
+        var (processor, _, _) = Create(Solid(8, 8, 1, 2, 3, 255));
+        var staging = Path.Combine(_root, "out", TextureProcessor.StagingFolderName);
+
+        // Act
+        var result = await processor.ProcessAsync(Job(TextureKind.Diffuse, 32, 32), null, PauseToken.None, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal(
+            (true, true, 0),
+            (File.Exists(result.OutputPath), new DirectoryInfo(staging).Attributes.HasFlag(FileAttributes.Hidden), Directory.GetFileSystemEntries(staging).Length));
+    }
+
+    [Fact]
+    public async Task ProcessAsync_NoModel_SkipsModel()
+    {
+        var (processor, _, upscaler) = Create(Solid(16, 16, 128, 128, 128, 255));
+
+        var result = await processor.ProcessAsync(Job(TextureKind.Diffuse, 64, 64) with { Model = string.Empty }, null, PauseToken.None, TestContext.Current.CancellationToken);
+
+        Assert.Equal((false, 0, 64), (result.UsedModel, upscaler.Calls, result.Width));
+    }
+
+    [Fact]
+    public async Task DecodeAsync_CodecThrows_DeletesWorkFolder()
+    {
+        // Arrange
+        var work = Path.Combine(_root, "work");
+        Directory.CreateDirectory(work);
+        var processor = new TextureProcessor(new FakeSource(), new ThrowingCodec(), _ => new FakeUpscaler(), Path.Combine(_root, "out"), work);
+
+        // Act
+        var act = () => processor.DecodeAsync(Job(TextureKind.Diffuse, 16, 16), PauseToken.None, TestContext.Current.CancellationToken);
+
+        // Assert
+        await Assert.ThrowsAsync<InvalidDataException>(act);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(work));
+    }
+
+    [Fact]
+    public async Task DecodedTexture_DisposedAfterDecode_DeletesWorkFolder()
+    {
+        // Arrange
+        var (processor, _, _) = Create(Solid(8, 8, 1, 2, 3, 255));
+        var texture = await processor.DecodeAsync(Job(TextureKind.Diffuse, 16, 16), PauseToken.None, TestContext.Current.CancellationToken);
+
+        // Act
+        texture.Dispose();
+
+        // Assert
+        Assert.False(Directory.Exists(texture.WorkFolder));
+    }
+
+    [Fact]
     public async Task ProcessAsync_TranslucentAlpha_KeepsAlphaOutOfModel()
     {
         // Arrange
@@ -121,6 +177,8 @@ public sealed class TextureProcessorTests : IDisposable
     [InlineData(@"\evil.dds")]
     [InlineData("C:evil.dds")]
     [InlineData(@"\\server\share\evil.dds")]
+    [InlineData(@".aetherium-tmp\evil.dds")]
+    [InlineData(@".AETHERIUM-TMP/evil.dds")]
     [InlineData("")]
     public void GetOutputPath_EscapingPath_ThrowsArgumentException(string canonicalPath)
     {
@@ -199,12 +257,21 @@ public sealed class TextureProcessorTests : IDisposable
 
         public Task<RgbaImage> DecodeAsync(string ddsPath, string workFolder, CancellationToken ct = default) => Task.FromResult(decoded);
 
-        public Task EncodeBc7Async(RgbaImage image, string outputDdsPath, string workFolder, bool srgb, CancellationToken ct = default)
+        public async Task EncodeBc7Async(RgbaImage image, string outputDdsPath, string workFolder, bool srgb, CancellationToken ct = default)
         {
             Encoded = image;
             EncodedSrgb = srgb;
-            return Task.CompletedTask;
+            Directory.CreateDirectory(Path.GetDirectoryName(outputDdsPath)!);
+            await File.WriteAllBytesAsync(outputDdsPath, [0x44, 0x44, 0x53, 0x20], ct);
         }
+    }
+
+    private sealed class ThrowingCodec : ITextureCodec
+    {
+        public Task<RgbaImage> DecodeAsync(string ddsPath, string workFolder, CancellationToken ct = default) =>
+            Task.FromException<RgbaImage>(new InvalidDataException("bad dds"));
+
+        public Task EncodeBc7Async(RgbaImage image, string outputDdsPath, string workFolder, bool srgb, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     /// <summary>Nearest-neighbour ×4 stand-in for the AI model.</summary>

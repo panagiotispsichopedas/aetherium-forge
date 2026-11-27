@@ -3,7 +3,8 @@
 AI texture forge for Skyrim Special Edition / Anniversary Edition.
 It finds every texture the game still loads from the original game archives, upscales it with an ONNX model on the GPU, and packages the result as a self-contained mod that any mod manager can install. It fills gaps only, so it never overrides textures from installed mods.
 
-Status: M1 (core scan) and M2 (imaging) implemented. M2 check: the 5 textures the prototype finished, reprocessed with `realesrgan-x4plus` (FP32, DirectML, GTX 1080), match the prototype's output at 42.2–45.5 dB PSNR, with a mean difference of 0.8–1.1 of 255 levels and a mean normal angle difference of 0.7–0.9°. Upscaling a 2048² texture to 4096² takes about 38 s on that GPU.
+Status: M1 (core scan), M2 (imaging), M2b (GPU auto profile, model downloads) and M3 (staged pipeline, CLI host) implemented. M3 check: a 30-minute real run (realesrgan-x4plus, GTX 1080) interrupted by a graceful Ctrl+C, a forced double Ctrl+C and a hard kill, then resumed, ended with 143 Done jobs, exactly 143 complete BC7 outputs (correct size and full mip chain), no orphans or partial files, nothing Running or Failed, empty work and staging folders, and no texconv left running.
+M1 (core scan) and M2 (imaging) detail: M2 check: the 5 textures the prototype finished, reprocessed with `realesrgan-x4plus` (FP32, DirectML, GTX 1080), match the prototype's output at 42.2–45.5 dB PSNR, with a mean difference of 0.8–1.1 of 255 levels and a mean normal angle difference of 0.7–0.9°. Upscaling a 2048² texture to 4096² takes about 38 s on that GPU.
 M1 detail: On the reference install it queues the same 3,433 vanilla textures as the prototype, with identical targets, plus Creation Club and `_ResourcePack.bsa` textures (base tier, §5 item 3).
 Proven prototype: `TextureGapUpscale`, an unpublished local tool (Python + texconv + Real-ESRGAN ncnn). Its scan, classification, post-processing and resume logic are the reference for this guide.
 

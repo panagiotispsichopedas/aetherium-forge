@@ -367,6 +367,7 @@ public sealed partial class Texconv : ITextureCodec
             throw new TexconvException($"Could not start texconv at '{_options.ExecutablePath}': {ex.Message}", ex);
         }
 
+        using var tracked = _options.ProcessTracker?.Track(process);
         Task<string> stdout = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
         Task<string> stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
 

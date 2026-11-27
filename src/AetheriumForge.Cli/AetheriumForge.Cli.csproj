@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Command-line host: scan, forge (Pause/Resume/Stop from the keyboard) and status. First runnable entry point, before the
+       Avalonia UI (M4). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AetheriumForge.Cli</RootNamespace>
+    <AssemblyName>aetherium-forge</AssemblyName>
+    <ApplicationIcon>..\..\assets\icon\aetherium-forge.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Serilog" />
+    <PackageReference Include="Serilog.Extensions.Hosting" />
+    <PackageReference Include="Serilog.Settings.Configuration" />
+    <PackageReference Include="Serilog.Sinks.Console" />
+    <PackageReference Include="Serilog.Sinks.File" />
+    <PackageReference Include="System.CommandLine" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AetheriumForge.Core\AetheriumForge.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AetheriumForge.Core.Tests" />
+  </ItemGroup>
+
+  <!-- Ship texconv next to the exe (tools\texconv.exe) when it has been fetched with tools\fetch-tools.ps1. It is never committed. -->
+  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)..\..\tools\texconv.exe')">
+    <None Include="$(MSBuildThisFileDirectory)..\..\tools\texconv.exe" Link="tools\texconv.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

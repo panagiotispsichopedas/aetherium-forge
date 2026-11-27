@@ -143,7 +143,9 @@ public sealed class DxgiAdapterProviderIntegrationTests : IDisposable
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "DXGI is Windows only.");
         const int Iterations = 10_000;
-        const int HandleTolerance = 64;
+        // Thread-pool and timer threads left over from the rest of the suite add a few dozen handles; one leaked object per call would
+        // add 10,000+. 512 keeps the test meaningful without flaking in a full run.
+        const int HandleTolerance = 512;
         const long PrivateBytesTolerance = 16L * 1024 * 1024;
 
         // Arrange: warm up DXGI, the D3D12 integrated-GPU cache, the JIT and the driver.
