@@ -68,7 +68,7 @@ Details: [Architecture](https://github.com/panagiotispsichopedas/aetherium-forge
 | Milestone | Scope | State |
 |---|---|---|
 | **M1** Core | Game, profile and drive discovery; `plugins.txt`, INI and `Skyrim.ccc` parsing; SSE BSA reader and TES4 hash; gap-set scan; texture classifier; editable rules; SQLite job store with rescan | **Merged** into `develop` |
-| **M2** Imaging | texconv wrapper, image operations, tiled ONNX Runtime + DirectML upscaler, post-processing, model conversion script | **In progress** |
+| **M2** Imaging | texconv wrapper, image operations, tiled ONNX Runtime + DirectML upscaler, post-processing, model conversion script; converted models published as `models-v1` | **In progress** |
 | **M2b** GPU auto profile | DXGI adapter and video-memory budget, FP16/FP32 benchmark, tile calibration, default model tier; in-app model downloads | Next |
 | M3 – M7 | Pipeline (Pause/Resume/Stop), Avalonia UI, rules editor and compare view, packaging, prototype import and polish | Planned |
 
@@ -135,8 +135,8 @@ Tests run on Microsoft.Testing.Platform (xUnit v3). Integration tests that need 
 
 Aetherium Forge never bundles AI models in the repository or the app download.
 
-- Converted ONNX models (FP32 and FP16) are published as assets of a **`models-vN`** GitHub release of this repository (for example `models-v1`), together with a `models.json` manifest that lists each model's size, SHA-256, scale, precision, licence and recommended GPU tier.
-- The app finds the newest `models-v*` release through the GitHub Releases API and offers the downloads in **Settings → Models** and on first run. Every download shows its size and licence first, needs your confirmation, and is hash-checked.
+- Converted ONNX models (FP32 and FP16) are published as assets of a **`models-vN`** GitHub release of this repository, together with a `models.json` manifest that lists each model's size, SHA-256, scale, precision, licence and recommended GPU tier. The current one is **[`models-v1`](https://github.com/panagiotispsichopedas/aetherium-forge/releases/tag/models-v1)**. Published assets are never replaced; new models go in a new release.
+- The app finds the highest-numbered `models-vN` release through the GitHub Releases API and offers the downloads in **Settings → Models** and on first run. Every download shows its size and licence first, needs your confirmation, and is hash-checked.
 - Only models whose licence allows redistribution are hosted. The defaults are **Real-ESRGAN x4plus** and **realesr-general-x4v3** (BSD-3-Clause).
 - You can add your own `.onnx` model with a small JSON sidecar.
 
