@@ -76,7 +76,7 @@ public sealed class ProgressFormatterTests
     {
         var lines = ProgressFormatter.FormatLive(Snapshot(eta: TimeSpan.FromMinutes(192)), 120);
 
-        Assert.Equal("1.23 MP/s · elapsed 1:02:05 · ETA 3h 12m", lines[6]);
+        Assert.Equal("1.23 MP/s · elapsed 1:02:05 · ETA ~3 h 12 min", lines[6]);
     }
 
     [Fact]
@@ -85,21 +85,8 @@ public sealed class ProgressFormatterTests
         var line = ProgressFormatter.FormatPlain(Snapshot());
 
         Assert.Equal(
-            @"[Running] 26/100 (done 25, failed 1, remaining 74) 1.23 MP/s, elapsed 1:02:05, ETA -- | Decode: textures\clutter\bucket01.dds | Upscale: textures\architecture\whiterun\wrwoodplank01.dds (12/36 tiles)",
+            @"[Running] 26/100 (done 25, failed 1, remaining 74) 1.23 MP/s, elapsed 1:02:05, ETA unknown | Decode: textures\clutter\bucket01.dds | Upscale: textures\architecture\whiterun\wrwoodplank01.dds (12/36 tiles)",
             line);
-    }
-
-    [Theory]
-    [InlineData(null, "--")]
-    [InlineData(12.0, "12s")]
-    [InlineData(245.0, "4m 05s")]
-    [InlineData(11520.0, "3h 12m")]
-    [InlineData(93600.0, "1d 2h")]
-    public void FormatEta_Durations_AreCompact(double? seconds, string expected)
-    {
-        var text = ProgressFormatter.FormatEta(seconds is { } s ? TimeSpan.FromSeconds(s) : null);
-
-        Assert.Equal(expected, text);
     }
 
     [Theory]

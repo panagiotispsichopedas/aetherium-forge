@@ -14,7 +14,8 @@ internal sealed class ForgeConsoleView : IProgress<PipelineProgress>
     private static readonly TimeSpan PlainHeartbeat = TimeSpan.FromSeconds(15);
 
     private readonly TextWriter _out;
-    private readonly bool _readKeys;
+    private readonly IKeySource _keys;
+    private bool _readKeys;
     private bool _interactive;
     private PipelineProgress? _latest;
     private int _top = -1;
@@ -26,13 +27,28 @@ internal sealed class ForgeConsoleView : IProgress<PipelineProgress>
     /// <param name="interactive">Redraw in place (a real console); otherwise print plain lines.</param>
     /// <param name="readKeys">Read P/R/S from the keyboard (input is not redirected).</param>
     public ForgeConsoleView(TextWriter output, bool interactive, bool readKeys)
+        : this(output, interactive, readKeys, ConsoleKeySource.Instance)
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="ForgeConsoleView"/> class with an explicit key source (tests).</summary>
+    /// <param name="output">The console output.</param>
+    /// <param name="interactive">Redraw in place (a real console); otherwise print plain lines.</param>
+    /// <param name="readKeys">Read P/R/S from <paramref name="keys"/>.</param>
+    /// <param name="keys">Where keys come from.</param>
+    internal ForgeConsoleView(TextWriter output, bool interactive, bool readKeys, IKeySource keys)
     {
         ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(keys);
 
         _out = output;
         _interactive = interactive;
         _readKeys = readKeys;
+        _keys = keys;
     }
+
+    /// <summary>Gets a value indicating whether keys are still being read (false after the key source failed).</summary>
+    internal bool ReadsKeys => _readKeys;
 
     /// <inheritdoc />
     public void Report(PipelineProgress value) => Volatile.Write(ref _latest, value);
@@ -57,7 +73,7 @@ internal sealed class ForgeConsoleView : IProgress<PipelineProgress>
             {
                 if (_readKeys)
                 {
-                    HandleKeys(pipeline, stop);
+                    TryHandleKeys(pipeline, stop);
                 }
 
                 Draw(final: false);
@@ -70,7 +86,7 @@ internal sealed class ForgeConsoleView : IProgress<PipelineProgress>
         {
             if (cursorWasVisible)
             {
-                Console.CursorVisible = true;
+                ConsoleRestore.ShowCursor();
             }
         }
     }
@@ -79,8 +95,8 @@ internal sealed class ForgeConsoleView : IProgress<PipelineProgress>
     {
         try
         {
-            var visible = OperatingSystem.IsWindows() && Console.CursorVisible;
-            Console.CursorVisible = false;
+            var visible = Console.CursorVisible;
+            ConsoleRestore.HideCursor();
             return visible;
         }
         catch (IOException)
@@ -89,24 +105,33 @@ internal sealed class ForgeConsoleView : IProgress<PipelineProgress>
         }
     }
 
-    private static void HandleKeys(IForgePipeline pipeline, ConsoleCancellation stop)
+    private void TryHandleKeys(IForgePipeline pipeline, ConsoleCancellation stop)
     {
-        while (Console.KeyAvailable)
+        try
         {
-            switch (char.ToUpperInvariant(Console.ReadKey(intercept: true).KeyChar))
+            while (_keys.TryRead() is { } key)
             {
-                case 'P':
-                    pipeline.Pause();
-                    break;
-                case 'R':
-                    pipeline.Unpause();
-                    break;
-                case 'S':
-                    stop.Cancel();
-                    break;
-                default:
-                    break;
+                switch (char.ToUpperInvariant(key))
+                {
+                    case 'P':
+                        pipeline.Pause();
+                        break;
+                    case 'R':
+                        pipeline.Unpause();
+                        break;
+                    case 'S':
+                        stop.Cancel();
+                        break;
+                    default:
+                        break;
+                }
             }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException)
+        {
+            // The console stopped delivering keys (input closed or redirected mid-run): keep rendering; Ctrl+C still stops.
+            _readKeys = false;
+            _out.WriteLine($"(keyboard unavailable: {ex.Message}; use Ctrl+C to stop)");
         }
     }
 
@@ -179,4 +204,24 @@ internal sealed class ForgeConsoleView : IProgress<PipelineProgress>
         _out.WriteLine(ProgressFormatter.FormatPlain(progress));
         _out.Flush();
     }
+}
+
+/// <summary>A source of key presses for the live view.</summary>
+internal interface IKeySource
+{
+    /// <summary>Returns the next pending key without blocking, or <see langword="null"/> when none is pending.</summary>
+    /// <returns>The key character, or <see langword="null"/>.</returns>
+    /// <exception cref="InvalidOperationException">Input is redirected.</exception>
+    /// <exception cref="IOException">The console input failed.</exception>
+    char? TryRead();
+}
+
+/// <summary>Reads keys from <see cref="Console"/>.</summary>
+internal sealed class ConsoleKeySource : IKeySource
+{
+    /// <summary>Gets the shared instance.</summary>
+    public static ConsoleKeySource Instance { get; } = new();
+
+    /// <inheritdoc />
+    public char? TryRead() => Console.KeyAvailable ? Console.ReadKey(intercept: true).KeyChar : null;
 }

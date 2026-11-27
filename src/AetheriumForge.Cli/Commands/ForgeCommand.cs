@@ -28,6 +28,8 @@ internal sealed class ForgeCommand
     /// <summary>The largest accepted tile size.</summary>
     public const int MaxTileSize = 2048;
 
+    private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(100);
+
     private readonly GlobalOptions _globals;
 
     /// <summary>Initializes a new instance of the <see cref="ForgeCommand"/> class.</summary>
@@ -100,20 +102,22 @@ internal sealed class ForgeCommand
         var log = session.Logging.Logger.ForContext<ForgeCommand>();
 
         var project = await ResolveProjectAsync(parseResult.GetValue(Project), session, ct).ConfigureAwait(false);
-        session.AttachProjectLog(project);
+
+        // Containment first: nothing (log, database, work files) is written until the project is known to be outside the game.
+        var gamePath = await ProjectDatabaseReader.ReadProjectValueAsync(project.DatabasePath, ProjectKeys.GamePath, ct).ConfigureAwait(false)
+            ?? throw new CliException($"The project {project.Root} has no game path. Run 'aetherium-forge scan --project \"{project.Root}\"' again.");
+        ProjectLocator.EnsureOutsideGame(project, gamePath);
+        session.AttachLog(project, gamePath);
 
         var store = await JobStore.OpenAsync(project.DatabasePath, ct).ConfigureAwait(false);
         await using (store.ConfigureAwait(false))
         {
-            var gamePath = await store.GetProjectValueAsync(ProjectKeys.GamePath, ct).ConfigureAwait(false)
-                ?? throw new CliException($"The project {project.Root} has no game path. Run 'aetherium-forge scan --project \"{project.Root}\"' again.");
             var dataFolder = Path.Combine(gamePath, GameProfileLoader.DataFolderName);
             if (!Directory.Exists(dataFolder))
             {
                 throw new CliException($"The game's Data folder {dataFolder} does not exist. Was the game moved? Run 'scan --game <dir>' again.");
             }
 
-            ProjectLocator.EnsureOutsideGame(project, gamePath);
             var rulesJson = await store.GetProjectValueAsync(ProjectKeys.RulesJson, ct).ConfigureAwait(false);
             var rules = rulesJson is null ? ForgeRules.Default : ForgeRules.FromJson(rulesJson);
 
@@ -140,6 +144,7 @@ internal sealed class ForgeCommand
             EnsureModelsInstalled(needed, models, modelsFolder);
 
             var texconv = ToolLocator.FindTexconv(parseResult.GetValue(Texconv), AppContext.BaseDirectory, File.Exists);
+            log.Information("Using texconv {TexconvPath}", texconv);
 
             output.WriteLine($"Project:  {project.Root}");
             output.WriteLine($"Output:   {project.OutputRoot}");
@@ -156,17 +161,20 @@ internal sealed class ForgeCommand
                 pipeline.GetType().Name, project.Root, needed, run.Device, run.TileSize, run.Limit);
 
             var interactive = !Console.IsOutputRedirected && ReferenceEquals(output, Console.Out);
-            var view = new ForgeConsoleView(output, interactive, readKeys: interactive && !Console.IsInputRedirected);
-            PipelineRunSummary summary;
+            var view = new ForgeConsoleView(output, interactive, readKeys: !Console.IsInputRedirected);
+            // SequentialPipeline applies --limit itself; the staged engine runs the whole queue, so the CLI stops it at the limit.
+            var watchedLimit = pipeline is SequentialPipeline ? null : run.Limit;
+            ForgeRunOutcome outcome;
             using (session.Logging.QuietConsole())
             {
-                var running = pipeline.RunAsync(view, session.Cancellation.Token);
-                await view.RunAsync(pipeline, running, session.Cancellation).ConfigureAwait(false);
-                summary = await running.ConfigureAwait(false);
+                outcome = await RunWithViewAsync(pipeline, view, session.Cancellation, log, watchedLimit).ConfigureAwait(false);
             }
 
+            var summary = outcome.Summary;
+            var userStopped = session.Cancellation.IsCancellationRequested;
+            var verdict = userStopped ? "Stopped" : outcome.LimitReached ? $"Finished (limit of {run.Limit:N0} reached)" : "Finished";
             output.WriteLine();
-            output.WriteLine($"{(summary.Stopped ? "Stopped" : "Finished")} in {ProgressFormatter.FormatElapsed(summary.Elapsed)}: {summary.Done:N0} done, {summary.Failed:N0} failed, {summary.Requeued:N0} returned to the queue.");
+            output.WriteLine($"{verdict} in {ProgressFormatter.FormatElapsed(summary.Elapsed)}: {summary.Done:N0} done, {summary.Failed:N0} failed, {summary.Requeued:N0} returned to the queue.");
             if (summary.Failed > 0)
             {
                 output.WriteLine("Failed jobs keep their error; see 'aetherium-forge status' and the log.");
@@ -174,7 +182,70 @@ internal sealed class ForgeCommand
 
             output.WriteLine($"Textures: {Path.Combine(project.OutputRoot, "textures")}");
 
-            return summary.Stopped ? ExitCodes.Stopped : ExitCodes.Ok;
+            return userStopped ? ExitCodes.Stopped : ExitCodes.Ok;
+        }
+    }
+
+    /// <summary>
+    /// Runs the pipeline under the live view. The pipeline task is always awaited before returning, so the host (GPU sessions, archive
+    /// readers, the job store) is never disposed under a running pipeline. If the view fails, the run is stopped first and the view's
+    /// error is rethrown after the pipeline has finished.
+    /// </summary>
+    /// <param name="pipeline">The pipeline.</param>
+    /// <param name="view">The view (also the progress sink).</param>
+    /// <param name="cancellation">The stop source.</param>
+    /// <param name="log">Logger.</param>
+    /// <param name="limit">Stop the run once this many jobs finished (done or failed), or <see langword="null"/> to run the whole queue.</param>
+    /// <returns>The run summary, and whether the run ended because the limit was reached.</returns>
+    internal static async Task<ForgeRunOutcome> RunWithViewAsync(IForgePipeline pipeline, ForgeConsoleView view, ConsoleCancellation cancellation, ILogger log, int? limit = null)
+    {
+        ArgumentNullException.ThrowIfNull(pipeline);
+        ArgumentNullException.ThrowIfNull(view);
+        ArgumentNullException.ThrowIfNull(cancellation);
+        ArgumentNullException.ThrowIfNull(log);
+
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellation.Token);
+        using var throttled = new ThrottledProgress<PipelineProgress>(view, ProgressInterval);
+        var limitReached = 0;
+        IProgress<PipelineProgress> sink = limit is not { } max
+            ? throttled
+            : new LimitProgress(throttled, max, () =>
+            {
+                if (Interlocked.Exchange(ref limitReached, 1) == 0)
+                {
+                    log.Information("Limit of {Limit} job(s) reached; stopping the run", max);
+                    stop.Cancel();
+                }
+            });
+
+        // The view stops drawing when this task completes, so the final snapshot is flushed to it first.
+        var running = RunAndFlushAsync(pipeline.RunAsync(sink, stop.Token), throttled);
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? viewFailure = null;
+        try
+        {
+            await view.RunAsync(pipeline, running, cancellation).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            log.Error(ex, "The live view failed; stopping the run");
+            viewFailure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex);
+            cancellation.Cancel();
+        }
+
+        var summary = await running.ConfigureAwait(false);
+        viewFailure?.Throw();
+        return new ForgeRunOutcome(summary, Volatile.Read(ref limitReached) == 1 && !cancellation.IsCancellationRequested);
+    }
+
+    private static async Task<PipelineRunSummary> RunAndFlushAsync(Task<PipelineRunSummary> run, ThrottledProgress<PipelineProgress> throttled)
+    {
+        try
+        {
+            return await run.ConfigureAwait(false);
+        }
+        finally
+        {
+            throttled.Flush();
         }
     }
 
@@ -252,4 +323,32 @@ internal sealed class ForgeCommand
     /// <returns>The project.</returns>
     internal static Task<ProjectLayout> ResolveExistingProjectAsync(string? explicitProject, CliSession session, CancellationToken ct) =>
         ResolveProjectAsync(explicitProject, session, ct);
+}
+
+/// <summary>
+/// The result of a forge run under the live view.
+/// </summary>
+/// <param name="Summary">The pipeline's summary.</param>
+/// <param name="LimitReached">The CLI stopped the run because <c>--limit</c> jobs had finished (not a user stop).</param>
+internal sealed record ForgeRunOutcome(PipelineRunSummary Summary, bool LimitReached);
+
+/// <summary>
+/// Forwards progress and calls <c>onLimit</c> once <see cref="PipelineProgress.Done"/> + <see cref="PipelineProgress.Failed"/> reaches the limit.
+/// </summary>
+/// <param name="inner">The next sink.</param>
+/// <param name="limit">Jobs to finish.</param>
+/// <param name="onLimit">Called when the limit is reached (possibly more than once).</param>
+internal sealed class LimitProgress(IProgress<PipelineProgress> inner, int limit, Action onLimit) : IProgress<PipelineProgress>
+{
+    /// <inheritdoc />
+    public void Report(PipelineProgress value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+
+        inner.Report(value);
+        if (value.Done + value.Failed >= limit)
+        {
+            onLimit();
+        }
+    }
 }

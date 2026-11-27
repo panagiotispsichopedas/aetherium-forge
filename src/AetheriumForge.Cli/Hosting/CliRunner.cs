@@ -1,6 +1,4 @@
 using System.CommandLine;
-using System.Text.Json;
-using AetheriumForge.Core.Imaging;
 using Serilog;
 
 namespace AetheriumForge.Cli.Hosting;
@@ -33,15 +31,26 @@ internal sealed class GlobalOptions
 /// <param name="Error">Standard error.</param>
 /// <param name="Logging">Logging; attach the project log file once the project is known.</param>
 /// <param name="Cancellation">Ctrl+C handling; its token is the stop token.</param>
-internal sealed record CliSession(TextWriter Out, TextWriter Error, CliLogging Logging, ConsoleCancellation Cancellation)
+/// <param name="LogOverride">The <c>--log</c> file, or <see langword="null"/>.</param>
+internal sealed record CliSession(TextWriter Out, TextWriter Error, CliLogging Logging, ConsoleCancellation Cancellation, string? LogOverride = null)
 {
-    /// <summary>Starts the project log (unless <c>--log</c> chose another file).</summary>
-    /// <param name="project">The project.</param>
-    public void AttachProjectLog(ProjectLayout project)
+    /// <summary>
+    /// Starts the log file: <c>--log</c> when given, else the project log, else the per-user fallback log.
+    /// </summary>
+    /// <param name="project">The project, or <see langword="null"/> for commands without one.</param>
+    /// <param name="gameFolder">The game folder, when known; the log must not be inside it.</param>
+    /// <exception cref="CliException">The log file would be inside the game folder.</exception>
+    public void AttachLog(ProjectLayout? project, string? gameFolder)
     {
-        ArgumentNullException.ThrowIfNull(project);
+        var path = Path.GetFullPath(LogOverride
+            ?? project?.DefaultLogFile(DateOnly.FromDateTime(DateTime.Now))
+            ?? Path.Combine(CliLogging.FallbackLogFolder, $"aetherium-forge-{DateTime.Now:yyyyMMdd}.log"));
+        if (gameFolder is not null && PathGuard.IsUnder(path, gameFolder))
+        {
+            throw new CliException($"The log file {path} is inside the game folder {gameFolder}. Choose a --log path outside the game.");
+        }
 
-        Logging.AttachFile(project.DefaultLogFile(DateOnly.FromDateTime(DateTime.Now)));
+        Logging.AttachFile(path);
     }
 }
 
@@ -65,14 +74,15 @@ internal static class CliRunner
 
         var output = parseResult.InvocationConfiguration.Output;
         var error = parseResult.InvocationConfiguration.Error;
-        using var logging = CliLogging.Create(parseResult.GetValue(globals.Verbose), parseResult.GetValue(globals.Log));
+        // --log is attached by CliSession.AttachLog once the game folder is known, so it can be checked against it.
+        using var logging = CliLogging.Create(parseResult.GetValue(globals.Verbose), logFile: null);
         using var cancellation = new ConsoleCancellation(error, cancellationToken);
         var log = logging.Logger.ForContext("SourceContext", "AetheriumForge.Cli");
         log.Information("aetherium-forge {Arguments}", string.Join(' ', Environment.GetCommandLineArgs().Skip(1)));
 
         try
         {
-            return await body(new CliSession(output, error, logging, cancellation)).ConfigureAwait(false);
+            return await body(new CliSession(output, error, logging, cancellation, parseResult.GetValue(globals.Log))).ConfigureAwait(false);
         }
         catch (CliException ex)
         {
@@ -90,10 +100,9 @@ internal static class CliRunner
             error.WriteLine("Cancelled.");
             return ExitCodes.Stopped;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException or TexconvException
-                                       or InvalidOperationException or KeyNotFoundException or NotSupportedException or ArgumentException
-                                       or Microsoft.Data.Sqlite.SqliteException or Microsoft.ML.OnnxRuntime.OnnxRuntimeException)
+        catch (Exception ex)
         {
+            // Last line of defence for a console app: every failure is logged with its stack trace and reported in one line.
             using (logging.FileOnly())
             {
                 log.Error(ex, "Command failed");

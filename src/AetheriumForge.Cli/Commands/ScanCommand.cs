@@ -65,7 +65,7 @@ internal sealed class ScanCommand
             : null;
         if (project is { } early)
         {
-            session.AttachProjectLog(early.Layout);
+            session.AttachLog(early.Layout, game.GameFolder);
         }
 
         // 3. Profile
@@ -90,7 +90,7 @@ internal sealed class ScanCommand
 
         // 6. Project folder (now with the size estimate) and import
         var (layout, reason) = project ?? ProjectLocator.ResolveForScan(null, game.GameFolder, drives, outputBytes + tempBytes, File.Exists);
-        session.AttachProjectLog(layout);
+        session.AttachLog(layout, game.GameFolder);
         output.WriteLine($"Project:  {layout.Root} ({reason})");
         Directory.CreateDirectory(layout.Root);
 

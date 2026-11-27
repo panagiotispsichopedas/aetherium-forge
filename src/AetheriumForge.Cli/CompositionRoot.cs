@@ -94,16 +94,20 @@ internal static class CompositionRoot
             sp.GetRequiredService<ILoggerFactory>()));
         services.AddSingleton(sp =>
         {
+            // --model is applied here, at the upscaler lookup, so it works the same for every pipeline.
             var upscalers = sp.GetRequiredService<UpscalerFactory>();
+            var modelOverride = forge.Run.ModelOverride;
             return new TextureProcessor(
                 sp.GetRequiredService<ITextureSource>(),
                 sp.GetRequiredService<ITextureCodec>(),
-                upscalers.Get,
+                model => upscalers.Get(string.IsNullOrWhiteSpace(modelOverride) ? model : modelOverride),
                 forge.Project.OutputRoot,
                 forge.Project.WorkRoot,
                 sp.GetRequiredService<ILogger<TextureProcessor>>());
         });
-        services.AddSingleton(_ => new JobMapper(forge.Rules, forge.Run.ModelOverride));
+        services.AddSingleton(sp => new JobMapper(forge.Rules, forge.Run.ModelOverride, sp.GetRequiredService<ILogger<JobMapper>>()));
+        // No GPU profile yet: the estimator starts unseeded and learns from the first finished jobs (M2b seeds it later).
+        services.AddSingleton<IEtaEstimator>(_ => new EtaEstimator());
         services.AddSingleton(CreatePipeline);
     }
 
@@ -116,10 +120,25 @@ internal static class CompositionRoot
             return CreateSequentialPipeline(services);
         }
 
-        // ── PIPELINE SWAP POINT ── Until ForgePipeline (feature/m3-pipeline) is merged, the default is the sequential fallback.
-        // After the merge, replace this one line with: return new ForgePipeline(store, processor, eta, options, logger);
-        return CreateSequentialPipeline(services);
+        // The staged engine (IMPLEMENTATION_GUIDE §11). --sequential above keeps the one-at-a-time fallback for debugging.
+        var forge = services.GetRequiredService<ForgeContext>();
+        return new ForgePipeline(
+            services.GetRequiredService<JobStore>(),
+            services.GetRequiredService<TextureProcessor>(),
+            services.GetRequiredService<IEtaEstimator>(),
+            services.GetRequiredService<PipelineOptions>(),
+            services.GetRequiredService<ILogger<ForgePipeline>>())
+        {
+            NormalStrengthForGroup = group => NormalStrengthFor(forge.Rules, group),
+        };
     }
+
+    /// <summary>Gets the normal strength of a rule group by name; 1.0 when the group no longer exists.</summary>
+    /// <param name="rules">The project's rules.</param>
+    /// <param name="group">The group name stored on the job.</param>
+    /// <returns>The strength.</returns>
+    internal static double NormalStrengthFor(ForgeRules rules, string group) =>
+        rules.Groups.FirstOrDefault(g => string.Equals(g.Name, group, StringComparison.OrdinalIgnoreCase))?.NormalStrength ?? 1.0;
 
     private static SequentialPipeline CreateSequentialPipeline(IServiceProvider services)
     {

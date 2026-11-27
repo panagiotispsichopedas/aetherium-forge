@@ -14,26 +14,58 @@ namespace AetheriumForge.Cli.Hosting;
 internal sealed record RunRecord(long Id, DateTimeOffset? Started, DateTimeOffset? Ended, int Done, int Failed);
 
 /// <summary>
-/// Reads the most recent runs for <c>status</c>.
+/// Read-only queries on a project's <c>forge.db</c> that do not open a <c>JobStore</c> (which creates the schema and switches to WAL):
+/// the latest runs for <c>status</c>, and project values needed before the store is opened (the game path, for the containment check).
 /// </summary>
 /// <remarks>
-/// <c>JobStore</c> writes runs but has no query for them yet, so this reads the table directly, read-only. Replace it with a
-/// <c>JobStore.GetRunsAsync</c> when Core gains one.
+/// <c>JobStore</c> writes runs but has no query for them yet. Replace <see cref="ReadLatestRunsAsync"/> with a <c>JobStore.GetRunsAsync</c>
+/// when Core gains one.
 /// </remarks>
-internal static class RunHistoryReader
+internal static class ProjectDatabaseReader
 {
+    /// <summary>Reads one project value.</summary>
+    /// <param name="databasePath">The project's <c>forge.db</c>.</param>
+    /// <param name="key">The key.</param>
+    /// <param name="ct">Cancels the query.</param>
+    /// <returns>The value, or <see langword="null"/> when the key (or the table) is missing.</returns>
+    public static async Task<string?> ReadProjectValueAsync(string databasePath, string key, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        ArgumentNullException.ThrowIfNull(key);
+
+        var connection = new SqliteConnection(ReadOnly(databasePath));
+        await using (connection.ConfigureAwait(false))
+        {
+            await connection.OpenAsync(ct).ConfigureAwait(false);
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                command.CommandText = "SELECT value FROM project WHERE key = $key AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project');";
+                command.Parameters.AddWithValue("$key", key);
+                try
+                {
+                    return await command.ExecuteScalarAsync(ct).ConfigureAwait(false) is string value ? value : null;
+                }
+                catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+                {
+                    // SQLITE_ERROR "no such table: project": a database that was never scanned has no values.
+                    return null;
+                }
+            }
+        }
+    }
+
     /// <summary>Reads the latest runs, newest first.</summary>
     /// <param name="databasePath">The project's <c>forge.db</c>.</param>
     /// <param name="count">How many runs to return.</param>
     /// <param name="ct">Cancels the query.</param>
     /// <returns>The runs.</returns>
-    public static async Task<IReadOnlyList<RunRecord>> ReadLatestAsync(string databasePath, int count, CancellationToken ct = default)
+    public static async Task<IReadOnlyList<RunRecord>> ReadLatestRunsAsync(string databasePath, int count, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
 
-        var connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString();
-        var connection = new SqliteConnection(connectionString);
+        var connection = new SqliteConnection(ReadOnly(databasePath));
         await using (connection.ConfigureAwait(false))
         {
             await connection.OpenAsync(ct).ConfigureAwait(false);
@@ -61,6 +93,9 @@ internal static class RunHistoryReader
             }
         }
     }
+
+    private static string ReadOnly(string databasePath) =>
+        new SqliteConnectionStringBuilder { DataSource = databasePath, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString();
 
     private static DateTimeOffset? Parse(string value) =>
         DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed) ? parsed : null;
