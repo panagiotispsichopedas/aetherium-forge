@@ -316,6 +316,13 @@ using var session = new InferenceSession(modelPath, so);
   - Converted ONNX models (FP32 and FP16) are published as assets of a `models-vN` GitHub release of this repository, each with its licence. Only models whose licence allows redistribution are hosted (Real-ESRGAN: BSD-3-Clause).
   - The UI shows installed and available models, downloads with progress, Pause/Cancel and resume (HTTP range), and verifies the SHA-256 before moving the file into `%LOCALAPPDATA%\AetheriumForge\models`. Users can delete models and add their own `.onnx` with a sidecar.
   - The download needs the user's confirmation and shows the size and licence first.
+- **Discovery contract** (published: [`models-v1`](https://github.com/panagiotispsichopedas/aetherium-forge/releases/tag/models-v1)):
+  1. `GET https://api.github.com/repos/panagiotispsichopedas/aetherium-forge/releases?per_page=100` (header `Accept: application/vnd.github+json`, a generic `User-Agent`, no token).
+  2. Keep non-draft releases whose tag matches `^models-v(\d+)$` and take the highest number. Never use `/releases/latest`: it can point at a models release or at an app release.
+  3. Download that release's `models.json` asset. Fallback when the API is rate-limited (60 requests/hour unauthenticated): `https://github.com/panagiotispsichopedas/aetherium-forge/releases/download/models-v1/models.json`. Cache the manifest with its ETag.
+  4. `models.json` has `schemaVersion` (1), `release` and `models[]`. Each model has `name`, `family`, `displayName`, `description`, `architecture`, `parametersMillions`, `fileName`, `url`, `size`, `sha256` (lowercase hex), `sidecarFileName`, `scale`, `precision` (`fp32`/`fp16`), `tier` (`standard`/`low`), `licence`, `licenceFile`, `licenceUrl`, `recommendedFor`, `source`, `input`, `output`, `opset`, `maxAbsDiffVsPyTorch`. The app ignores fields it does not know and refuses a `schemaVersion` it does not support.
+  5. Download to `<name>.onnx.partial` (resume with HTTP `Range`), check the size and SHA-256, then move it into the models folder and write the sidecar (also published as an asset).
+  - New or updated models go in a new `models-vN` release; published assets are never replaced, so a SHA-256 always identifies one file. Rebuild models with `tools/convert_model.py --validate`.
 
 ### GPU auto profile
 
