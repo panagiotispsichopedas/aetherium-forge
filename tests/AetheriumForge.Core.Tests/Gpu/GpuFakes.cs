@@ -46,6 +46,9 @@ internal sealed class SimulatedGpu : IGpuAdapterProvider
     public static readonly GpuAdapterInfo Adapter = new(Luid, 0, "Simulated GPU 8GB", 0x10DE, 0x1B80, 8UL << 30, 16UL << 30, false, false, "32.0.15.6094");
 
     private readonly Lock _gate = new();
+    private ulong _usage;
+    private int _queryCount;
+    private int _activeRuns;
 
     public ManualTimeProvider Time { get; } = new();
 
@@ -76,7 +79,32 @@ internal sealed class SimulatedGpu : IGpuAdapterProvider
     /// <summary>Gets or sets a hook called before each run with the 1-based run number.</summary>
     public Action<int>? BeforeRun { get; set; }
 
-    public ulong CurrentUsage { get; private set; }
+    /// <summary>Gets or sets the error thrown by the runner factory, by 1-based creation number; <see langword="null"/> for none.</summary>
+    public Func<int, ModelInfo, Exception?> CreateFailure { get; set; } = (_, _) => null;
+
+    /// <summary>Gets or sets a duration multiplier by 0-based runner index.</summary>
+    public Func<int, double> DurationScale { get; set; } = _ => 1;
+
+    /// <summary>
+    /// Gets or sets bytes held only during a run (freed before it returns) by input side. A run that holds transient memory waits
+    /// until the profiler samples memory, so the test proves the peak is sampled during the run.
+    /// </summary>
+    public Func<int, ulong> TransientBytes { get; set; } = _ => 0;
+
+    public ulong CurrentUsage
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _usage;
+            }
+        }
+    }
+
+    public int QueryCount => Volatile.Read(ref _queryCount);
+
+    public int MaxConcurrentRuns { get; private set; }
 
     public List<(string Model, OnnxRunnerOptions Options)> Created { get; } = [];
 
@@ -86,15 +114,26 @@ internal sealed class SimulatedGpu : IGpuAdapterProvider
 
     public IReadOnlyList<GpuAdapterInfo> GetAdapters() => [Adapter];
 
-    public VideoMemoryInfo? QueryVideoMemory(long luid) =>
-        ReportsMemory && luid == Luid ? new VideoMemoryInfo(Budget, BaseUsage + CurrentUsage, Budget, 0) : null;
+    public VideoMemoryInfo? QueryVideoMemory(long luid)
+    {
+        Interlocked.Increment(ref _queryCount);
+        lock (_gate)
+        {
+            return ReportsMemory && luid == Luid ? new VideoMemoryInfo(Budget, BaseUsage + _usage, Budget, 0) : null;
+        }
+    }
 
     public IModelRunner Create(ModelInfo model, OnnxRunnerOptions options)
     {
         lock (_gate)
         {
             Created.Add((model.Name, options));
-            var runner = new SimulatedRunner(this, model.Precision);
+            if (CreateFailure(Created.Count, model) is { } failure)
+            {
+                throw failure;
+            }
+
+            var runner = new SimulatedRunner(this, model.Precision, Runners.Count);
             Runners.Add(runner);
             Allocate(WeightBytes);
             return runner;
@@ -107,7 +146,7 @@ internal sealed class SimulatedGpu : IGpuAdapterProvider
     {
         lock (_gate)
         {
-            CurrentUsage += bytes;
+            _usage += bytes;
         }
     }
 
@@ -115,7 +154,7 @@ internal sealed class SimulatedGpu : IGpuAdapterProvider
     {
         lock (_gate)
         {
-            CurrentUsage -= bytes;
+            _usage -= bytes;
         }
     }
 
@@ -124,7 +163,17 @@ internal sealed class SimulatedGpu : IGpuAdapterProvider
         lock (_gate)
         {
             Runs.Add((precision, side));
+            _activeRuns++;
+            MaxConcurrentRuns = Math.Max(MaxConcurrentRuns, _activeRuns);
             return Runs.Count;
+        }
+    }
+
+    internal void EndRun()
+    {
+        lock (_gate)
+        {
+            _activeRuns--;
         }
     }
 
@@ -148,7 +197,7 @@ internal sealed class SimulatedGpu : IGpuAdapterProvider
 /// A fake runner on a <see cref="SimulatedGpu"/>: like the DirectML allocator it keeps its largest allocation until disposed,
 /// advances the simulated clock by the scripted duration, and throws an out-of-memory error above a scripted input size.
 /// </summary>
-internal sealed class SimulatedRunner(SimulatedGpu gpu, string precision) : IModelRunner
+internal sealed class SimulatedRunner(SimulatedGpu gpu, string precision, int index) : IModelRunner
 {
     private ulong _allocated;
 
@@ -160,26 +209,41 @@ internal sealed class SimulatedRunner(SimulatedGpu gpu, string precision) : IMod
     {
         ObjectDisposedException.ThrowIf(Disposed, this);
         var run = gpu.RecordRun(precision, tile.Width);
-        gpu.BeforeRun?.Invoke(run);
-        if (gpu.Failure(precision, tile.Width) is { } failure)
+        try
         {
-            throw failure;
-        }
+            gpu.BeforeRun?.Invoke(run);
+            if (gpu.Failure(precision, tile.Width) is { } failure)
+            {
+                throw failure;
+            }
 
-        if (tile.Width > gpu.OutOfMemoryAboveSide)
+            if (tile.Width > gpu.OutOfMemoryAboveSide)
+            {
+                throw SimulatedGpu.OutOfMemoryError();
+            }
+
+            var needed = gpu.MemoryCurve(tile.Width);
+            if (needed > _allocated)
+            {
+                gpu.Allocate(needed - _allocated);
+                _allocated = needed;
+            }
+
+            if (gpu.TransientBytes(tile.Width) is var transient and > 0)
+            {
+                gpu.Allocate(transient);
+                var queries = gpu.QueryCount;
+                SpinWait.SpinUntil(() => gpu.QueryCount > queries, TimeSpan.FromSeconds(5));
+                gpu.Free(transient);
+            }
+
+            gpu.Time.Advance(gpu.Duration(precision, tile.Width) * gpu.DurationScale(index));
+            return new PlanarImage(tile.Channels, 1, 1);
+        }
+        finally
         {
-            throw SimulatedGpu.OutOfMemoryError();
+            gpu.EndRun();
         }
-
-        var needed = gpu.MemoryCurve(tile.Width);
-        if (needed > _allocated)
-        {
-            gpu.Allocate(needed - _allocated);
-            _allocated = needed;
-        }
-
-        gpu.Time.Advance(gpu.Duration(precision, tile.Width));
-        return new PlanarImage(tile.Channels, 1, 1);
     }
 
     public void Dispose()

@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using AetheriumForge.Core.Gpu;
 
 namespace AetheriumForge.Core.Tests.Gpu;
@@ -215,6 +216,192 @@ public sealed class GpuProfileStoreTests : IDisposable
 
         // Assert
         Assert.Empty(profiles);
+    }
+
+    [Fact]
+    public async Task FindAsync_NullProfilesArray_ReturnsNull()
+    {
+        // Arrange
+        Directory.CreateDirectory(Path.GetDirectoryName(StorePath)!);
+        await File.WriteAllTextAsync(StorePath, """{ "schemaVersion": 1, "profiles": null }""", Ct);
+        using var store = new GpuProfileStore(StorePath);
+
+        // Act
+        var found = await store.FindAsync(_adapter, "realesrgan-x4plus", Ct);
+
+        // Assert
+        Assert.Null(found);
+    }
+
+    [Fact]
+    public async Task ListAsync_NullAndInvalidEntries_KeepsOnlyValidProfile()
+    {
+        // Arrange
+        using var store = new GpuProfileStore(StorePath);
+        await store.SaveAsync(Profile(_adapter), Ct);
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(StorePath, Ct))!;
+        var profiles = document["profiles"]!.AsArray();
+        var valid = profiles[0]!;
+        profiles.Add(null);
+        profiles.Add(WithValue(valid, "tileSize", 0));
+        profiles.Add(WithValue(valid, "secondsPerMegapixel", -1.0));
+        profiles.Add(WithValue(valid, "precision", "int8"));
+        profiles.Add(WithValue(valid, "model", ""));
+        await File.WriteAllTextAsync(StorePath, document.ToJsonString(), Ct);
+
+        // Act
+        var listed = await store.ListAsync(Ct);
+
+        // Assert
+        Assert.Equal([Profile(_adapter)], listed);
+    }
+
+    [Fact]
+    public async Task SaveAsync_FileWithNullEntry_ReplacesItWithoutThrowing()
+    {
+        // Arrange
+        Directory.CreateDirectory(Path.GetDirectoryName(StorePath)!);
+        await File.WriteAllTextAsync(StorePath, """{ "schemaVersion": 1, "profiles": [ null ] }""", Ct);
+        using var store = new GpuProfileStore(StorePath);
+
+        // Act
+        var saved = await store.SaveAsync(Profile(_adapter), Ct);
+
+        // Assert
+        Assert.Equal((true, 1), (saved, (await store.ListAsync(Ct)).Count));
+    }
+
+    [Fact]
+    public async Task ListAsync_FileOpenByWriterSharingAccess_ReadsProfiles()
+    {
+        // Arrange
+        using var store = new GpuProfileStore(StorePath);
+        await store.SaveAsync(Profile(_adapter), Ct);
+        using var other = new FileStream(StorePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+
+        // Act
+        var listed = await store.ListAsync(Ct);
+
+        // Assert
+        Assert.Single(listed);
+    }
+
+    [Fact]
+    public async Task ListAsync_FileLockedExclusively_ReturnsEmpty()
+    {
+        // Arrange
+        using var store = new GpuProfileStore(StorePath);
+        await store.SaveAsync(Profile(_adapter), Ct);
+        using var other = new FileStream(StorePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+        // Act
+        var listed = await store.ListAsync(Ct);
+
+        // Assert
+        Assert.Empty(listed);
+    }
+
+    [Fact]
+    public async Task SaveAsync_TargetBrieflyLocked_RetriesMove()
+    {
+        // Arrange
+        using var store = new GpuProfileStore(StorePath);
+        await store.SaveAsync(Profile(_adapter), Ct);
+        var other = new FileStream(StorePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var release = Task.Run(
+            async () =>
+            {
+                await Task.Delay(150, Ct);
+                await other.DisposeAsync();
+            },
+            Ct);
+
+        // Act
+        var saved = await store.SaveAsync(Profile(_adapter, "realesr-general-x4v3"), Ct);
+        await release;
+
+        // Assert
+        Assert.Equal((true, 2), (saved, (await store.ListAsync(Ct)).Count));
+    }
+
+    [Fact]
+    public async Task SaveAsync_ManyWritersAcrossInstances_KeepsEveryProfile()
+    {
+        // Arrange
+        using var first = new GpuProfileStore(StorePath);
+        using var second = new GpuProfileStore(StorePath);
+        var models = Enumerable.Range(0, 16).Select(index => $"model-{index}").ToList();
+
+        // Act
+        await Task.WhenAll(models.Select((model, index) => (index % 2 == 0 ? first : second).SaveAsync(Profile(_adapter, model), Ct)));
+
+        // Assert
+        Assert.Equal(models.Order(StringComparer.Ordinal), (await first.ListAsync(Ct)).Select(profile => profile.Model).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task SaveAsync_NewerSchemaVersion_RefusesAndKeepsFile()
+    {
+        // Arrange
+        Directory.CreateDirectory(Path.GetDirectoryName(StorePath)!);
+        const string Newer = """{ "schemaVersion": 2, "profiles": [], "future": true }""";
+        await File.WriteAllTextAsync(StorePath, Newer, Ct);
+        using var store = new GpuProfileStore(StorePath);
+
+        // Act
+        var saved = await store.SaveAsync(Profile(_adapter), Ct);
+
+        // Assert
+        Assert.Equal((false, Newer), (saved, await File.ReadAllTextAsync(StorePath, Ct)));
+    }
+
+    [Fact]
+    public async Task RemoveAsync_NewerSchemaVersion_RefusesAndKeepsFile()
+    {
+        // Arrange
+        Directory.CreateDirectory(Path.GetDirectoryName(StorePath)!);
+        const string Newer = """{ "schemaVersion": 2, "profiles": [] }""";
+        await File.WriteAllTextAsync(StorePath, Newer, Ct);
+        using var store = new GpuProfileStore(StorePath);
+
+        // Act
+        var removed = await store.RemoveAsync(_adapter, "realesrgan-x4plus", Ct);
+
+        // Assert
+        Assert.Equal((false, Newer), (removed, await File.ReadAllTextAsync(StorePath, Ct)));
+    }
+
+    [Fact]
+    public async Task SaveAsync_ProvisionalProfile_IsNotPersisted()
+    {
+        // Arrange
+        using var store = new GpuProfileStore(StorePath);
+
+        // Act
+        var saved = await store.SaveAsync(Profile(_adapter) with { IsProvisional = true }, Ct);
+
+        // Assert
+        Assert.Equal((false, false), (saved, File.Exists(StorePath)));
+    }
+
+    [Fact]
+    public async Task SaveAsync_InvalidProfile_IsNotPersisted()
+    {
+        // Arrange
+        using var store = new GpuProfileStore(StorePath);
+
+        // Act
+        var saved = await store.SaveAsync(Profile(_adapter) with { SecondsPerMegapixel = double.NaN }, Ct);
+
+        // Assert
+        Assert.Equal((false, false), (saved, File.Exists(StorePath)));
+    }
+
+    private static JsonNode WithValue(JsonNode source, string property, JsonNode? value)
+    {
+        var copy = source.DeepClone();
+        copy[property] = value;
+        return copy;
     }
 
     [Fact]

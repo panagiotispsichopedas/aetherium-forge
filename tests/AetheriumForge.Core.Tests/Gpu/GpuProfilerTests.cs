@@ -19,6 +19,22 @@ public sealed class GpuProfilerTests
     private static GpuAdapterInfo Adapter(string name, ulong dedicated, bool integrated = false, bool software = false, int deviceId = 0) =>
         new(deviceId + 100, deviceId, name, 0x10DE, 0x1B80, dedicated, 8 * GiB, integrated, software, "1.0");
 
+    /// <summary>
+    /// The tile the memory rule should choose: each probe runner is warmed up at the smallest tile, the baseline is read, and the peak
+    /// above that baseline must stay within 80 % of the available memory at that baseline.
+    /// </summary>
+    private static int ExpectedMemoryTile(SimulatedGpu gpu, ulong extraBaseUsage = 0)
+    {
+        var warmup = gpu.MemoryCurve(64 + (2 * Overlap));
+        var available = gpu.Budget - (gpu.BaseUsage + extraBaseUsage + gpu.WeightBytes + warmup);
+        var allowance = (ulong)(available * 0.8);
+        return LargestFittingTile(tile =>
+        {
+            var needed = gpu.MemoryCurve(tile + (2 * Overlap));
+            return needed <= warmup || needed - warmup <= allowance;
+        });
+    }
+
     /// <summary>Largest multiple of 64 in [64, 1024] that satisfies <paramref name="fits"/>.</summary>
     private static int LargestFittingTile(Func<int, bool> fits) =>
         Enumerable.Range(1, 16).Select(step => step * 64).Where(fits).DefaultIfEmpty(0).Max();
@@ -244,13 +260,13 @@ public sealed class GpuProfilerTests
     }
 
     [Fact]
-    public async Task CalibrateAsync_Fp16FailsWithoutOutOfMemory_KeepsFp32()
+    public async Task CalibrateAsync_Fp16FailsToLoad_KeepsFp32AsProvisional()
     {
         // Arrange
         var gpu = new SimulatedGpu
         {
             Duration = (precision, side) => TimeSpan.FromTicks((precision == "fp16" ? 1L : 4L) * side * side),
-            Failure = (precision, _) => precision == "fp16" ? SimulatedGpu.CreateOnnxRuntimeException("[ErrorCode:NotImplemented] Could not find an implementation for Conv(11) node") : null,
+            CreateFailure = (_, model) => model.Precision == "fp16" ? SimulatedGpu.CreateOnnxRuntimeException("[ErrorCode:NotImplemented] Could not find an implementation for Conv(11) node") : null,
         };
         var profiler = gpu.CreateProfiler();
 
@@ -258,16 +274,228 @@ public sealed class GpuProfilerTests
         var profile = await profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32, _fp16], Options(), null, Ct);
 
         // Assert
-        Assert.Equal("fp32", profile.Precision);
+        Assert.Equal(("fp32", true), (profile.Precision, profile.IsProvisional));
     }
+
+    [Fact]
+    public async Task CalibrateAsync_Fp16RunFails_Propagates()
+    {
+        // Arrange
+        var gpu = new SimulatedGpu
+        {
+            Failure = (precision, _) => precision == "fp16" ? SimulatedGpu.CreateOnnxRuntimeException("[ErrorCode:Fail] Non-zero status code returned while running Conv node") : null,
+        };
+        var profiler = gpu.CreateProfiler();
+
+        // Act
+        var exception = await Record.ExceptionAsync(() => profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32, _fp16], Options(), null, Ct));
+
+        // Assert
+        Assert.IsType<OnnxRuntimeException>(exception);
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_Fp16LoadReportsDeviceRemoved_Propagates()
+    {
+        // Arrange
+        var gpu = new SimulatedGpu
+        {
+            CreateFailure = (_, model) => model.Precision == "fp16" ? SimulatedGpu.CreateOnnxRuntimeException("[ErrorCode:Fail] 887A0005 The GPU device instance has been suspended") : null,
+        };
+        var profiler = gpu.CreateProfiler();
+
+        // Act
+        var exception = await Record.ExceptionAsync(() => profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32, _fp16], Options(), null, Ct));
+
+        // Assert
+        Assert.IsType<OnnxRuntimeException>(exception);
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_BothVariantsLoad_ProfileIsNotProvisional()
+    {
+        // Arrange
+        var profiler = new SimulatedGpu().CreateProfiler();
+
+        // Act
+        var profile = await profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32, _fp16], Options(), null, Ct);
+
+        // Assert
+        Assert.False(profile.IsProvisional);
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_RunnerFactoryOutOfMemory_TreatsTileAsFailedProbe()
+    {
+        // Arrange: creation 1 is the reference runner; creation 2 is the first probe runner (tile 512), which fails to load.
+        var gpu = new SimulatedGpu { CreateFailure = (creation, _) => creation == 2 ? SimulatedGpu.OutOfMemoryError() : null };
+        var profiler = gpu.CreateProfiler();
+
+        // Act
+        var profile = await profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32], Options(), null, Ct);
+
+        // Assert
+        Assert.Equal(448, profile.TileSize);
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_FreshProbeRunner_WarmsUpAtMinimumTileFirst()
+    {
+        // Arrange
+        var gpu = new SimulatedGpu();
+        var profiler = gpu.CreateProfiler();
+
+        // Act
+        await profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32], Options(), null, Ct);
+
+        // Assert (runs 1-5: reference at 304; run 6: warm-up at 64 + 2 x 24; run 7: the first probe at 512 + 2 x 24)
+        Assert.Equal((112, 560), (gpu.Runs[5].Side, gpu.Runs[6].Side));
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_SlowerBelowReferenceTile_KeepsSmallTile()
+    {
+        // Arrange: memory limits the tile to 128 (input 176), where runs are 3 times slower per pixel than the 256 reference.
+        var gpu = new SimulatedGpu
+        {
+            MemoryCurve = side => (ulong)side * (ulong)side * 131072,
+            Duration = (_, side) => TimeSpan.FromTicks((side < 250 ? 3L : 1L) * side * side),
+        };
+        var profiler = gpu.CreateProfiler();
+
+        // Act
+        var profile = await profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32], Options(), null, Ct);
+
+        // Assert
+        Assert.Equal((128, 128), (profile.TileSize, ExpectedMemoryTile(gpu)));
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_SlowdownRejectsMinimumTile_ExceptionSaysTooSlow()
+    {
+        // Arrange: probe runners run 10 times slower than the reference runner at the same (minimum) tile.
+        var gpu = new SimulatedGpu { DurationScale = index => index == 0 ? 1 : 10 };
+        var options = Options() with { MaxTileSize = 64, PrecisionTileSize = 64 };
+        var profiler = gpu.CreateProfiler();
+
+        // Act
+        var exception = await Record.ExceptionAsync(() => profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32], options, null, Ct));
+
+        // Assert
+        Assert.Contains("slower per pixel", (exception as VideoMemoryExhaustedException)?.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_UsageGrowsBeforeTileSearch_UsesFreshBaseline()
+    {
+        // Arrange: another process takes 2 GiB during the last reference run (run 5), before the first probe runner loads.
+        var gpu = new SimulatedGpu();
+        gpu.BeforeRun = run =>
+        {
+            if (run == 5)
+            {
+                gpu.BaseUsage += 2UL << 30;
+            }
+        };
+        var profiler = gpu.CreateProfiler();
+
+        // Act
+        var profile = await profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32], Options(), null, Ct);
+
+        // Assert (768 with the stale baseline, 640 with the fresh one)
+        Assert.Equal((640, 640), (profile.TileSize, ExpectedMemoryTile(gpu)));
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_TransientPeakDuringRun_IsSampled()
+    {
+        // Arrange: inputs above 600 briefly need 10 GiB during the run and free it before returning.
+        var gpu = new SimulatedGpu { MemoryCurve = _ => 1024, TransientBytes = side => side > 600 ? 10UL << 30 : 0 };
+        var profiler = gpu.CreateProfiler();
+
+        // Act
+        var profile = await profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32], Options(), null, Ct);
+
+        // Assert
+        Assert.Equal(512, profile.TileSize);
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_ConcurrentCallsForOneAdapter_RunOneAtATime()
+    {
+        // Arrange
+        var gpu = new SimulatedGpu { BeforeRun = _ => Thread.Sleep(1) };
+        var profiler = gpu.CreateProfiler();
+
+        // Act
+        await Task.WhenAll(
+            profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32], Options(), null, Ct),
+            profiler.CalibrateAsync(SimulatedGpu.Adapter, [_fp32, _fp16], Options(), null, Ct));
+
+        // Assert
+        Assert.Equal(1, gpu.MaxConcurrentRuns);
+    }
+
+    [Fact]
+    public void ResolveAdapter_SameHardwareNewLuid_ReturnsLowestDeviceIndex()
+    {
+        // Arrange
+        var profile = Profile(SimulatedGpu.Adapter with { Luid = 7, DirectMLDeviceId = 3 });
+        GpuAdapterInfo[] adapters =
+        [
+            SimulatedGpu.Adapter with { Luid = 9, DirectMLDeviceId = 2 },
+            SimulatedGpu.Adapter with { Luid = 8, DirectMLDeviceId = 1 },
+            SimulatedGpu.Adapter with { Luid = 10, DirectMLDeviceId = 0, Name = "Other GPU" },
+        ];
+
+        // Act
+        var resolved = GpuProfiler.ResolveAdapter(profile, adapters);
+
+        // Assert
+        Assert.Equal(8L, resolved?.Luid);
+    }
+
+    [Fact]
+    public void ResolveAdapter_MatchingLuid_ReturnsThatAdapter()
+    {
+        // Arrange
+        var profile = Profile(SimulatedGpu.Adapter with { Luid = 9 });
+        GpuAdapterInfo[] adapters = [SimulatedGpu.Adapter with { Luid = 8, DirectMLDeviceId = 0 }, SimulatedGpu.Adapter with { Luid = 9, DirectMLDeviceId = 1 }];
+
+        // Act
+        var resolved = GpuProfiler.ResolveAdapter(profile, adapters);
+
+        // Assert
+        Assert.Equal(1, resolved?.DirectMLDeviceId);
+    }
+
+    [Fact]
+    public void ResolveAdapter_HardwareGone_ReturnsNull()
+    {
+        // Arrange
+        var profile = Profile(SimulatedGpu.Adapter);
+
+        // Act
+        var resolved = GpuProfiler.ResolveAdapter(profile, [SimulatedGpu.Adapter with { DeviceId = 0x2786, Name = "RTX 4070" }]);
+
+        // Assert
+        Assert.Null(resolved);
+    }
+
+    private static GpuProfile Profile(GpuAdapterInfo adapter) =>
+        new(adapter.Luid, adapter.Name, adapter.DriverVersion, adapter.DirectMLDeviceId, "realesrgan-x4plus", "fp32", 512, 9, GpuTier.Standard, "realesrgan-x4plus", ManualTimeProvider.Start)
+        {
+            VendorId = adapter.VendorId,
+            DeviceId = adapter.DeviceId,
+        };
+
 
     [Fact]
     public async Task CalibrateAsync_MemoryCurve_ConvergesToLargestTileUnderBudget()
     {
         // Arrange: 8 GiB budget, 1 GiB already used, 64 MiB weights, 8 KiB per input pixel.
         var gpu = new SimulatedGpu();
-        var allowance = (ulong)((gpu.Budget - gpu.BaseUsage) * 0.8);
-        var expected = LargestFittingTile(tile => gpu.WeightBytes + gpu.MemoryCurve(tile + (2 * Overlap)) <= allowance);
+        var expected = ExpectedMemoryTile(gpu);
         var profiler = gpu.CreateProfiler();
 
         // Act
@@ -282,8 +510,7 @@ public sealed class GpuProfilerTests
     {
         // Arrange: 64 KiB per input pixel, four times the profiler's first estimate.
         var gpu = new SimulatedGpu { MemoryCurve = side => (ulong)side * (ulong)side * 65536 };
-        var allowance = (ulong)((gpu.Budget - gpu.BaseUsage) * 0.8);
-        var expected = LargestFittingTile(tile => gpu.WeightBytes + gpu.MemoryCurve(tile + (2 * Overlap)) <= allowance);
+        var expected = ExpectedMemoryTile(gpu);
         var profiler = gpu.CreateProfiler();
 
         // Act

@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using AetheriumForge.Core.Imaging;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -10,11 +12,16 @@ namespace AetheriumForge.Core.Gpu;
 /// chooses the faster precision, finds the largest tile that fits the video-memory budget and measures the throughput.
 /// </summary>
 /// <remarks>
-/// <para>Calibration runs synchronously on a thread-pool thread and never runs two models at once, so it must not share the adapter
-/// with a running pipeline (one GPU worker per adapter, §11).</para>
-/// <para>Memory is measured with <see cref="IGpuAdapterProvider.QueryVideoMemory"/> before calibration (the baseline) and after each
-/// probe run. The DirectML allocator keeps its buffers after a run, so the usage after a run approximates its peak. After a tile is
-/// rejected the runner is recreated, so the cached buffers of the rejected size do not count against the next, smaller size.</para>
+/// <para>Calibration runs synchronously on a thread-pool thread and never runs two models at once. Calls for the same adapter are
+/// serialised by this instance; calibration must still not share the adapter with a running pipeline (one GPU worker per adapter, §11).</para>
+/// <para>The precision is chosen once, at the reference tile (<see cref="CalibrationOptions.PrecisionTileSize"/>), and then used at the
+/// final tile. The FP16/FP32 ratio barely depends on the tile size, and benchmarking both precisions at every probed size would double
+/// the calibration time.</para>
+/// <para>Memory: each probe runner is created, warmed up once at the smallest tile, and then the baseline is read. During the probe run
+/// <see cref="IGpuAdapterProvider.QueryVideoMemory"/> is sampled every <see cref="CalibrationOptions.MemorySampleInterval"/>; the tile
+/// fits when the peak usage above that baseline stays within <see cref="CalibrationOptions.BudgetFraction"/> of the baseline's
+/// <see cref="VideoMemoryInfo.Available"/>. After a tile is rejected the runner is recreated (and the baseline re-read), so cached
+/// buffers of the rejected size do not count against the next, smaller size.</para>
 /// </remarks>
 public sealed partial class GpuProfiler
 {
@@ -45,18 +52,20 @@ public sealed partial class GpuProfiler
     private const int TileGranularity = 64;
 
     private static readonly string[] _precisionSuffixes = ["-fp16", "_fp16", ".fp16", "-fp32", "_fp32", ".fp32"];
+    private static readonly string[] _deviceRemovedMarkers = ["887A0005", "887A0006", "DXGI_ERROR_DEVICE_REMOVED", "DXGI_ERROR_DEVICE_HUNG"];
 
     private readonly IGpuAdapterProvider _adapterProvider;
     private readonly Func<ModelInfo, OnnxRunnerOptions, IModelRunner> _runnerFactory;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger _logger;
+    private readonly ConcurrentDictionary<long, SemaphoreSlim> _adapterGates = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="GpuProfiler"/> class.
     /// </summary>
-    /// <param name="adapterProvider">Enumerates adapters and reads their video memory.</param>
+    /// <param name="adapterProvider">Enumerates adapters and reads their video memory. <see cref="IGpuAdapterProvider.QueryVideoMemory"/> is also called from a timer thread.</param>
     /// <param name="runnerFactory">Creates a model runner; defaults to <see cref="OnnxModelRunner.Create"/>.</param>
-    /// <param name="timeProvider">Clock for benchmarks and the calibration time stamp; defaults to <see cref="TimeProvider.System"/>.</param>
+    /// <param name="timeProvider">Clock for benchmarks, memory sampling and the calibration time stamp; defaults to <see cref="TimeProvider.System"/>.</param>
     /// <param name="logger">Optional logger.</param>
     public GpuProfiler(
         IGpuAdapterProvider adapterProvider,
@@ -88,6 +97,28 @@ public sealed partial class GpuProfiler
         }
 
         return modelName;
+    }
+
+    /// <summary>
+    /// Finds the current adapter a stored profile was calibrated on. <see cref="GpuProfile.AdapterLuid"/> and
+    /// <see cref="GpuProfile.DirectMLDeviceId"/> are snapshots, so resolve the adapter from a fresh
+    /// <see cref="IGpuAdapterProvider.GetAdapters"/> list before creating a session.
+    /// </summary>
+    /// <param name="profile">The profile.</param>
+    /// <param name="adapters">The current adapters.</param>
+    /// <returns>
+    /// The hardware adapter with the profile's vendor id, device id and name; the one with the same LUID first, then the lowest DirectML
+    /// device id. <see langword="null"/> when none matches.
+    /// </returns>
+    public static GpuAdapterInfo? ResolveAdapter(GpuProfile profile, IReadOnlyList<GpuAdapterInfo> adapters)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(adapters);
+        return adapters
+            .Where(adapter => !adapter.IsSoftware && profile.MatchesHardware(adapter))
+            .OrderBy(adapter => adapter.Luid == profile.AdapterLuid ? 0 : 1)
+            .ThenBy(adapter => adapter.DirectMLDeviceId)
+            .FirstOrDefault();
     }
 
     /// <summary>
@@ -150,16 +181,20 @@ public sealed partial class GpuProfiler
     }
 
     /// <summary>
-    /// Calibrates one model family on one adapter: precision, tile size and throughput.
+    /// Calibrates one model family on one adapter: precision, tile size and throughput. Calls for the same adapter wait for each other.
     /// </summary>
     /// <param name="adapter">The adapter to calibrate.</param>
     /// <param name="modelFamilyVariants">The FP32 and optional FP16 variant of one model family (by <see cref="ModelInfo.Precision"/>).</param>
     /// <param name="options">Calibration options; defaults when <see langword="null"/>.</param>
     /// <param name="progress">Optional progress sink.</param>
     /// <param name="cancellationToken">Cancels the calibration between model runs.</param>
-    /// <returns>The profile.</returns>
+    /// <returns>
+    /// The profile. When the FP16 variant failed to load and FP32 was kept, <see cref="GpuProfile.IsProvisional"/> is
+    /// <see langword="true"/> and <see cref="GpuProfileStore"/> does not persist it.
+    /// </returns>
     /// <exception cref="ArgumentException">The variants are empty, from different families, or have no FP32/FP16 precision.</exception>
-    /// <exception cref="VideoMemoryExhaustedException">Even the smallest tile does not fit in video memory.</exception>
+    /// <exception cref="VideoMemoryExhaustedException">Even the smallest tile does not fit in video memory, or runs too slowly.</exception>
+    /// <exception cref="OnnxRuntimeException">A model run failed for another reason, for example device removal.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
     public async Task<GpuProfile> CalibrateAsync(
         GpuAdapterInfo adapter,
@@ -191,7 +226,16 @@ public sealed partial class GpuProfiler
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        return await Task.Run(() => Calibrate(adapter, family, fp32, fp16, options, progress, cancellationToken), cancellationToken).ConfigureAwait(false);
+        var gate = _adapterGates.GetOrAdd(adapter.Luid, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await Task.Run(() => Calibrate(adapter, family, fp32, fp16, options, progress, cancellationToken), cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     /// <summary>
@@ -234,6 +278,25 @@ public sealed partial class GpuProfiler
         return Math.Clamp(AlignDown(tile, options.MinTileSize), options.MinTileSize, options.MaxTileSize);
     }
 
+    /// <summary>
+    /// Returns <see langword="true"/> when an error reports that the GPU was removed or reset (<c>DXGI_ERROR_DEVICE_REMOVED</c> /
+    /// <c>DXGI_ERROR_DEVICE_HUNG</c>); the device is unusable and no fallback applies.
+    /// </summary>
+    /// <param name="exception">The exception to inspect, including inner exceptions.</param>
+    /// <returns><see langword="true"/> for device removal.</returns>
+    internal static bool IsDeviceRemoved(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (_deviceRemovedMarkers.Any(marker => current.Message.Contains(marker, StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static int AlignDown(int value, int minimum) => value >= TileGranularity ? value / TileGranularity * TileGranularity : Math.Max(value, minimum);
 
     private static PlanarImage CreateInput(int size)
@@ -250,6 +313,11 @@ public sealed partial class GpuProfiler
     private static ulong FallbackMemory(GpuAdapterInfo adapter) =>
         adapter.IsIntegrated || adapter.DedicatedVideoMemory == 0 ? Math.Max(adapter.DedicatedVideoMemory, adapter.SharedSystemMemory) : adapter.DedicatedVideoMemory;
 
+    private static bool IsLoadFailure(Exception exception) =>
+        exception is OnnxRuntimeException or InvalidDataException or FileNotFoundException
+        && !VideoMemoryErrors.IsOutOfMemory(exception)
+        && !IsDeviceRemoved(exception);
+
     private GpuProfile Calibrate(
         GpuAdapterInfo adapter,
         string family,
@@ -259,25 +327,22 @@ public sealed partial class GpuProfiler
         IProgress<CalibrationProgress>? progress,
         CancellationToken cancellationToken)
     {
-        var baseline = _adapterProvider.QueryVideoMemory(adapter.Luid);
-        var available = baseline?.Available ?? FallbackMemory(adapter);
-        var allowance = (ulong)(available * options.BudgetFraction);
+        var initial = _adapterProvider.QueryVideoMemory(adapter.Luid);
+        var available = initial?.Available ?? FallbackMemory(adapter);
         var run = new CalibrationRun(
             adapter,
             options,
             new OnnxRunnerOptions { DeviceId = adapter.DirectMLDeviceId, UseDirectML = options.UseDirectML },
             progress,
             _timeProvider.GetTimestamp(),
-            baseline?.CurrentUsage,
-            allowance,
             cancellationToken);
-        var estimate = EstimateTileSize(allowance, options);
-        LogCalibrationStarted(_logger, family, adapter.Name, available / (1024 * 1024), allowance / (1024 * 1024), estimate, baseline is not null);
+        var estimate = EstimateTileSize((ulong)(available * options.BudgetFraction), options);
+        LogCalibrationStarted(_logger, family, adapter.Name, available / (1024 * 1024), estimate, initial is not null);
 
-        var (model, referenceSecondsPerPixel) = ChoosePrecision(run, fp32, fp16, estimate);
-        var precision = string.Equals(model.Precision, Fp16, StringComparison.OrdinalIgnoreCase) ? Fp16 : Fp32;
+        var reference = ChoosePrecision(run, fp32, fp16, estimate);
+        var precision = string.Equals(reference.Model.Precision, Fp16, StringComparison.OrdinalIgnoreCase) ? Fp16 : Fp32;
 
-        var (runner, tileSize, warm) = FindTileSize(run, model, estimate, referenceSecondsPerPixel);
+        var (runner, tileSize, warm) = FindTileSize(run, reference, estimate);
         double secondsPerTile;
         using (runner)
         {
@@ -303,6 +368,7 @@ public sealed partial class GpuProfiler
         {
             VendorId = adapter.VendorId,
             DeviceId = adapter.DeviceId,
+            IsProvisional = reference.Provisional,
         };
 
         var totalSeconds = run.Elapsed(_timeProvider).TotalSeconds;
@@ -310,7 +376,7 @@ public sealed partial class GpuProfiler
         return profile;
     }
 
-    private (ModelInfo Model, double SecondsPerInputPixel) ChoosePrecision(CalibrationRun run, ModelInfo? fp32, ModelInfo? fp16, int estimate)
+    private Reference ChoosePrecision(CalibrationRun run, ModelInfo? fp32, ModelInfo? fp16, int estimate)
     {
         var options = run.Options;
         var tile = Math.Clamp(Math.Min(options.PrecisionTileSize, estimate), options.MinTileSize, options.MaxTileSize);
@@ -324,26 +390,30 @@ public sealed partial class GpuProfiler
                 if (fp32 is null || fp16 is null)
                 {
                     var only = fp32 ?? fp16!;
-                    var seconds = BenchmarkModel(run, only, input);
+                    var seconds = BenchmarkModel(run, CreateRunner(run, only), input);
                     LogReference(_logger, tile, only.Precision, seconds * 1000);
-                    return (only, seconds / pixels);
+                    return new Reference(only, tile, seconds / pixels, Provisional: false);
                 }
 
-                var fp32Seconds = BenchmarkModel(run, fp32, input);
-                double fp16Seconds;
+                var fp32Seconds = BenchmarkModel(run, CreateRunner(run, fp32), input);
+                IModelRunner fp16Runner;
                 try
                 {
-                    fp16Seconds = BenchmarkModel(run, fp16, input);
+                    fp16Runner = CreateRunner(run, fp16);
                 }
-                catch (Exception exception) when (exception is OnnxRuntimeException or InvalidDataException && !VideoMemoryErrors.IsOutOfMemory(exception))
+                catch (Exception exception) when (IsLoadFailure(exception))
                 {
+                    // Only a model that cannot be loaded falls back; run-time errors propagate. The profile is provisional and not persisted.
                     LogFp16Unusable(_logger, exception, fp16.Name);
-                    return (fp32, fp32Seconds / pixels);
+                    return new Reference(fp32, tile, fp32Seconds / pixels, Provisional: true);
                 }
 
+                var fp16Seconds = BenchmarkModel(run, fp16Runner, input);
                 var useFp16 = fp16Seconds * (1 + options.Fp16MinimumSpeedup) < fp32Seconds;
                 LogPrecisionChosen(_logger, tile, fp32Seconds * 1000, fp16Seconds * 1000, useFp16 ? Fp16 : Fp32);
-                return useFp16 ? (fp16, fp16Seconds / pixels) : (fp32, fp32Seconds / pixels);
+                return useFp16
+                    ? new Reference(fp16, tile, fp16Seconds / pixels, Provisional: false)
+                    : new Reference(fp32, tile, fp32Seconds / pixels, Provisional: false);
             }
             catch (Exception exception) when (VideoMemoryErrors.IsOutOfMemory(exception))
             {
@@ -359,11 +429,18 @@ public sealed partial class GpuProfiler
         }
     }
 
-    private double BenchmarkModel(CalibrationRun run, ModelInfo model, PlanarImage input)
+    private IModelRunner CreateRunner(CalibrationRun run, ModelInfo model)
     {
         run.CancellationToken.ThrowIfCancellationRequested();
-        using var runner = _runnerFactory(model, run.RunnerOptions);
-        return Benchmark(run, runner, input, run.Options.WarmupRuns, PrecisionStep);
+        return _runnerFactory(model, run.RunnerOptions);
+    }
+
+    private double BenchmarkModel(CalibrationRun run, IModelRunner runner, PlanarImage input)
+    {
+        using (runner)
+        {
+            return Benchmark(run, runner, input, run.Options.WarmupRuns, PrecisionStep);
+        }
     }
 
     private double Benchmark(CalibrationRun run, IModelRunner runner, PlanarImage input, int warmups, string step)
@@ -399,28 +476,34 @@ public sealed partial class GpuProfiler
         return elapsed.TotalSeconds / count;
     }
 
-    private (IModelRunner Runner, int TileSize, bool Warm) FindTileSize(CalibrationRun run, ModelInfo model, int estimate, double referenceSecondsPerPixel)
+    private (IModelRunner Runner, int TileSize, bool Warm) FindTileSize(CalibrationRun run, Reference reference, int estimate)
     {
         var options = run.Options;
         int? largestFit = null;
         int? smallestFailure = null;
+        var lastFailure = ProbeOutcome.Fits;
         var fitDuration = TimeSpan.Zero;
         var warm = false;
         var tile = estimate;
-        IModelRunner? runner = null;
+        ProbeRunner? probeRunner = null;
         try
         {
             for (var probe = 1; ; probe++)
             {
                 run.CancellationToken.ThrowIfCancellationRequested();
-                runner ??= _runnerFactory(model, run.RunnerOptions);
-                var (fits, duration) = Probe(run, runner, tile);
-                if (fits && IsTooSlow(run, tile, duration, referenceSecondsPerPixel))
+                var outcome = ProbeOutcome.OutOfMemory;
+                var duration = TimeSpan.Zero;
+                probeRunner ??= CreateProbeRunner(run, reference.Model, tile);
+                if (probeRunner is not null)
                 {
-                    fits = false;
+                    (outcome, duration) = Probe(run, probeRunner, tile);
+                    if (outcome == ProbeOutcome.Fits && IsTooSlow(run, tile, duration, reference))
+                    {
+                        outcome = ProbeOutcome.TooSlow;
+                    }
                 }
 
-                if (fits)
+                if (outcome == ProbeOutcome.Fits)
                 {
                     largestFit = tile;
                     fitDuration = duration;
@@ -429,8 +512,9 @@ public sealed partial class GpuProfiler
                 else
                 {
                     smallestFailure = tile;
-                    runner.Dispose();
-                    runner = null;
+                    lastFailure = outcome;
+                    probeRunner?.Runner.Dispose();
+                    probeRunner = null;
                     warm = false;
                 }
 
@@ -463,12 +547,16 @@ public sealed partial class GpuProfiler
 
             if (largestFit is not { } chosen)
             {
-                throw new VideoMemoryExhaustedException($"Even a {options.MinTileSize}-pixel tile does not fit in video memory on {run.Adapter.Name}.");
+                var reason = lastFailure == ProbeOutcome.TooSlow
+                    ? $"runs more than {options.MaxProbeSlowdown:0.##}× slower per pixel than the reference benchmark (video memory is probably paged to shared memory)"
+                    : "does not fit in video memory";
+                throw new VideoMemoryExhaustedException($"Even a {options.MinTileSize}-pixel tile {reason} on {run.Adapter.Name}.");
             }
 
+            var runner = probeRunner?.Runner;
             if (runner is null)
             {
-                runner = _runnerFactory(model, run.RunnerOptions);
+                runner = CreateRunner(run, reference.Model);
                 warm = false;
             }
 
@@ -477,18 +565,52 @@ public sealed partial class GpuProfiler
         }
         catch
         {
+            probeRunner?.Runner.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Creates a probe runner, warms it up once at the smallest tile and reads the memory baseline.
+    /// Returns <see langword="null"/> when the device runs out of memory while loading or warming up.
+    /// </summary>
+    private ProbeRunner? CreateProbeRunner(CalibrationRun run, ModelInfo model, int tile)
+    {
+        IModelRunner? runner = null;
+        try
+        {
+            runner = CreateRunner(run, model);
+            run.CancellationToken.ThrowIfCancellationRequested();
+            runner.Run(CreateInput(run.Options.MinTileSize + (2 * run.Options.Overlap)));
+            var baseline = _adapterProvider.QueryVideoMemory(run.Adapter.Luid);
+            return new ProbeRunner(runner, baseline);
+        }
+        catch (Exception exception) when (VideoMemoryErrors.IsOutOfMemory(exception))
+        {
+            runner?.Dispose();
+            LogProbeOutOfMemory(_logger, tile, exception.Message);
+            return null;
+        }
+        catch
+        {
             runner?.Dispose();
             throw;
         }
     }
 
-    private bool IsTooSlow(CalibrationRun run, int tile, TimeSpan duration, double referenceSecondsPerPixel)
+    private bool IsTooSlow(CalibrationRun run, int tile, TimeSpan duration, Reference reference)
     {
         // Without a memory reading (or when the driver pages video memory out to shared memory instead of failing), a tile that is too
-        // big shows up as a run that is several times slower per pixel than the small reference benchmark.
+        // big shows up as a run that is several times slower per pixel than the reference benchmark. Smaller tiles than the reference are
+        // naturally less efficient, so the rule only applies at or above the reference size.
+        if (tile < reference.TileSize || reference.SecondsPerInputPixel <= 0)
+        {
+            return false;
+        }
+
         var side = tile + (2.0 * run.Options.Overlap);
-        var slowdown = duration.TotalSeconds / (side * side) / referenceSecondsPerPixel;
-        if (referenceSecondsPerPixel <= 0 || double.IsNaN(slowdown) || slowdown <= run.Options.MaxProbeSlowdown)
+        var slowdown = duration.TotalSeconds / (side * side) / reference.SecondsPerInputPixel;
+        if (double.IsNaN(slowdown) || slowdown <= run.Options.MaxProbeSlowdown)
         {
             return false;
         }
@@ -497,34 +619,39 @@ public sealed partial class GpuProfiler
         return true;
     }
 
-    private (bool Fits, TimeSpan Duration) Probe(CalibrationRun run, IModelRunner runner, int tile)
+    private (ProbeOutcome Outcome, TimeSpan Duration) Probe(CalibrationRun run, ProbeRunner probeRunner, int tile)
     {
         var input = CreateInput(tile + (2 * run.Options.Overlap));
-        var before = _adapterProvider.QueryVideoMemory(run.Adapter.Luid);
-        var started = _timeProvider.GetTimestamp();
-        try
+        ulong? peak;
+        TimeSpan duration;
+        using (var sampler = new MemorySampler(_adapterProvider, run.Adapter.Luid, _timeProvider, run.Options.MemorySampleInterval))
         {
-            runner.Run(input);
-        }
-        catch (Exception exception) when (VideoMemoryErrors.IsOutOfMemory(exception))
-        {
-            LogProbeOutOfMemory(_logger, tile, exception.Message);
-            return (false, _timeProvider.GetElapsedTime(started));
+            var started = _timeProvider.GetTimestamp();
+            try
+            {
+                probeRunner.Runner.Run(input);
+            }
+            catch (Exception exception) when (VideoMemoryErrors.IsOutOfMemory(exception))
+            {
+                LogProbeOutOfMemory(_logger, tile, exception.Message);
+                return (ProbeOutcome.OutOfMemory, _timeProvider.GetElapsedTime(started));
+            }
+
+            duration = _timeProvider.GetElapsedTime(started);
+            peak = sampler.Stop();
         }
 
-        var duration = _timeProvider.GetElapsedTime(started);
-        var after = _adapterProvider.QueryVideoMemory(run.Adapter.Luid);
-        if (after is null || run.BaselineUsage is not { } baseline)
+        if (peak is not { } peakUsage || probeRunner.Baseline is not { } baseline)
         {
             LogProbeUnmeasured(_logger, tile, duration.TotalMilliseconds);
-            return (true, duration);
+            return (ProbeOutcome.Fits, duration);
         }
 
-        var used = after.CurrentUsage > baseline ? after.CurrentUsage - baseline : 0;
-        var delta = before is not null && after.CurrentUsage > before.CurrentUsage ? after.CurrentUsage - before.CurrentUsage : 0;
-        var fits = used <= run.AllowanceBytes;
-        LogProbe(_logger, tile, used / (1024 * 1024), delta / (1024 * 1024), run.AllowanceBytes / (1024 * 1024), duration.TotalMilliseconds, fits);
-        return (fits, duration);
+        var used = peakUsage > baseline.CurrentUsage ? peakUsage - baseline.CurrentUsage : 0;
+        var allowance = (ulong)(baseline.Available * run.Options.BudgetFraction);
+        var fits = used <= allowance;
+        LogProbe(_logger, tile, used / (1024 * 1024), allowance / (1024 * 1024), duration.TotalMilliseconds, fits);
+        return (fits ? ProbeOutcome.Fits : ProbeOutcome.OverBudget, duration);
     }
 
     [LoggerMessage(EventId = 1, Level = LogLevel.Warning, Message = "No usable GPU adapter among {Count} reported adapters")]
@@ -539,25 +666,25 @@ public sealed partial class GpuProfiler
     [LoggerMessage(EventId = 4, Level = LogLevel.Debug, Message = "Tier {Tier} recommends model family {Family}")]
     private static partial void LogRecommendation(ILogger logger, GpuTier tier, string family);
 
-    [LoggerMessage(EventId = 5, Level = LogLevel.Information, Message = "Calibrating {Family} on {Adapter}: {AvailableMiB} MiB available, {AllowanceMiB} MiB allowed, first tile {Tile}, memory measured {Measured}")]
-    private static partial void LogCalibrationStarted(ILogger logger, string family, string adapter, ulong availableMiB, ulong allowanceMiB, int tile, bool measured);
+    [LoggerMessage(EventId = 5, Level = LogLevel.Information, Message = "Calibrating {Family} on {Adapter}: {AvailableMiB} MiB available, first tile {Tile}, memory measured {Measured}")]
+    private static partial void LogCalibrationStarted(ILogger logger, string family, string adapter, ulong availableMiB, int tile, bool measured);
 
     [LoggerMessage(EventId = 6, Level = LogLevel.Information, Message = "Precision benchmark at tile {Tile}: fp32 {Fp32Ms:F1} ms, fp16 {Fp16Ms:F1} ms; chose {Precision}")]
     private static partial void LogPrecisionChosen(ILogger logger, int tile, double fp32Ms, double fp16Ms, string precision);
 
-    [LoggerMessage(EventId = 7, Level = LogLevel.Warning, Message = "FP16 model {Model} failed to run; keeping FP32")]
+    [LoggerMessage(EventId = 7, Level = LogLevel.Warning, Message = "FP16 model {Model} failed to load; keeping FP32 (the profile is provisional and will not be saved)")]
     private static partial void LogFp16Unusable(ILogger logger, Exception exception, string model);
 
     [LoggerMessage(EventId = 8, Level = LogLevel.Warning, Message = "Out of video memory in the precision benchmark at tile {Tile}; retrying at {Smaller}")]
     private static partial void LogPrecisionOutOfMemory(ILogger logger, int tile, int smaller);
 
-    [LoggerMessage(EventId = 9, Level = LogLevel.Debug, Message = "Tile {Tile}: {UsedMiB} MiB used above baseline (+{DeltaMiB} MiB this run), allowance {AllowanceMiB} MiB, {Ms:F0} ms, fits {Fits}")]
-    private static partial void LogProbe(ILogger logger, int tile, ulong usedMiB, ulong deltaMiB, ulong allowanceMiB, double ms, bool fits);
+    [LoggerMessage(EventId = 9, Level = LogLevel.Debug, Message = "Tile {Tile}: peak {UsedMiB} MiB above baseline, allowance {AllowanceMiB} MiB, {Ms:F0} ms, fits {Fits}")]
+    private static partial void LogProbe(ILogger logger, int tile, ulong usedMiB, ulong allowanceMiB, double ms, bool fits);
 
     [LoggerMessage(EventId = 10, Level = LogLevel.Debug, Message = "Tile {Tile}: out of video memory ({Reason})")]
     private static partial void LogProbeOutOfMemory(ILogger logger, int tile, string reason);
 
-    [LoggerMessage(EventId = 11, Level = LogLevel.Debug, Message = "Tile {Tile}: ran in {Ms:F0} ms; video memory not reported, only out-of-memory limits the tile")]
+    [LoggerMessage(EventId = 11, Level = LogLevel.Debug, Message = "Tile {Tile}: ran in {Ms:F0} ms; video memory not reported, only out-of-memory and slowdown limit the tile")]
     private static partial void LogProbeUnmeasured(ILogger logger, int tile, double ms);
 
     [LoggerMessage(EventId = 12, Level = LogLevel.Information, Message = "Tile search stops at {Tile}: trying {Next} would exceed the time budget")]
@@ -569,14 +696,22 @@ public sealed partial class GpuProfiler
     [LoggerMessage(EventId = 14, Level = LogLevel.Debug, Message = "{Step}: {Count} of {Planned} timed runs fit the time budget")]
     private static partial void LogTimedRunsCut(ILogger logger, string step, int count, int planned);
 
+    [LoggerMessage(EventId = 15, Level = LogLevel.Information, Message = "Calibrated {Family} on {Adapter}: {Precision}, tile {Tile}, {SecondsPerMegapixel:F2} s/MP in {Seconds:F1} s")]
+    private static partial void LogCalibrated(ILogger logger, string family, string adapter, string precision, int tile, double secondsPerMegapixel, double seconds);
+
     [LoggerMessage(EventId = 16, Level = LogLevel.Information, Message = "Reference benchmark at tile {Tile} ({Precision}): {Ms:F1} ms")]
     private static partial void LogReference(ILogger logger, int tile, string precision, double ms);
 
-    [LoggerMessage(EventId = 17, Level = LogLevel.Information, Message = "Tile {Tile}: first run {Slowdown:F2}× slower per pixel than the reference (limit {Limit:F2}×); treating it as too big")]
+    [LoggerMessage(EventId = 17, Level = LogLevel.Information, Message = "Tile {Tile}: run {Slowdown:F2}× slower per pixel than the reference (limit {Limit:F2}×); treating it as too big")]
     private static partial void LogProbeTooSlow(ILogger logger, int tile, double slowdown, double limit);
 
-    [LoggerMessage(EventId = 15, Level = LogLevel.Information, Message = "Calibrated {Family} on {Adapter}: {Precision}, tile {Tile}, {SecondsPerMegapixel:F2} s/MP in {Seconds:F1} s")]
-    private static partial void LogCalibrated(ILogger logger, string family, string adapter, string precision, int tile, double secondsPerMegapixel, double seconds);
+    private enum ProbeOutcome
+    {
+        Fits,
+        OutOfMemory,
+        OverBudget,
+        TooSlow,
+    }
 
     private sealed record CalibrationRun(
         GpuAdapterInfo Adapter,
@@ -584,12 +719,93 @@ public sealed partial class GpuProfiler
         OnnxRunnerOptions RunnerOptions,
         IProgress<CalibrationProgress>? Progress,
         long StartTimestamp,
-        ulong? BaselineUsage,
-        ulong AllowanceBytes,
         CancellationToken CancellationToken)
     {
         public TimeSpan Elapsed(TimeProvider timeProvider) => timeProvider.GetElapsedTime(StartTimestamp);
 
         public void Report(string step, int done, int total) => Progress?.Report(new CalibrationProgress(step, done, total));
+    }
+
+    /// <summary>The chosen variant and its steady time per input pixel at the reference tile.</summary>
+    private sealed record Reference(ModelInfo Model, int TileSize, double SecondsPerInputPixel, bool Provisional);
+
+    /// <summary>A warmed-up probe runner and the memory reading taken after its warm-up.</summary>
+    private sealed record ProbeRunner(IModelRunner Runner, VideoMemoryInfo? Baseline);
+
+    /// <summary>
+    /// Samples the adapter's current usage on a timer while a probe runs and keeps the peak (IMPLEMENTATION_GUIDE §9, step 4).
+    /// </summary>
+    private sealed class MemorySampler : IDisposable
+    {
+        private readonly IGpuAdapterProvider _provider;
+        private readonly long _luid;
+        private readonly ITimer _timer;
+        private readonly Lock _gate = new();
+        private ulong? _peak;
+        private bool _stopped;
+        private ExceptionDispatchInfo? _failure;
+
+        public MemorySampler(IGpuAdapterProvider provider, long luid, TimeProvider timeProvider, TimeSpan interval)
+        {
+            _provider = provider;
+            _luid = luid;
+            Sample();
+            _timer = timeProvider.CreateTimer(_ => Sample(), null, interval, interval);
+        }
+
+        /// <summary>Stops sampling, takes a last sample and returns the peak usage, or <see langword="null"/> when memory is not reported.</summary>
+        public ulong? Stop()
+        {
+            _timer.Dispose();
+            Sample();
+            lock (_gate)
+            {
+                _stopped = true;
+                _failure?.Throw();
+                return _peak;
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                _stopped = true;
+            }
+
+            _timer.Dispose();
+        }
+
+        private void Sample()
+        {
+            VideoMemoryInfo? info;
+            try
+            {
+                info = _provider.QueryVideoMemory(_luid);
+            }
+            catch (Exception exception)
+            {
+                // A timer callback must not throw; the failure is rethrown by Stop on the calibration thread.
+                lock (_gate)
+                {
+                    _failure ??= ExceptionDispatchInfo.Capture(exception);
+                }
+
+                return;
+            }
+
+            if (info is null)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                if (!_stopped && (_peak is null || info.CurrentUsage > _peak))
+                {
+                    _peak = info.CurrentUsage;
+                }
+            }
+        }
     }
 }

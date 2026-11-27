@@ -50,6 +50,9 @@ public sealed record CalibrationOptions
     /// </summary>
     public double MaxProbeSlowdown { get; init; } = 2.0;
 
+    /// <summary>Gets how often video memory is sampled during a probe run to find its peak usage. Default 5 ms.</summary>
+    public TimeSpan MemorySampleInterval { get; init; } = TimeSpan.FromMilliseconds(5);
+
     /// <summary>Gets the maximum number of tile sizes tried while searching. Default 8.</summary>
     public int MaxTileProbes { get; init; } = 8;
 
@@ -86,6 +89,7 @@ public sealed record CalibrationOptions
 
         ArgumentOutOfRangeException.ThrowIfLessThan(EstimatedBytesPerInputPixel, 1, nameof(EstimatedBytesPerInputPixel));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxTileProbes, 1, nameof(MaxTileProbes));
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(MemorySampleInterval, TimeSpan.Zero, nameof(MemorySampleInterval));
     }
 }
 

@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace AetheriumForge.Core.Gpu;
 
 /// <summary>
@@ -7,9 +9,13 @@ namespace AetheriumForge.Core.Gpu;
 /// <param name="AdapterLuid">The adapter LUID at calibration time. It changes on every reboot, so it is not part of the store key.</param>
 /// <param name="AdapterName">The adapter description, for example <c>NVIDIA GeForce GTX 1080</c>.</param>
 /// <param name="DriverVersion">The driver version at calibration time; a different driver triggers recalibration.</param>
-/// <param name="DirectMLDeviceId">The DXGI adapter index passed to the DirectML execution provider.</param>
+/// <param name="DirectMLDeviceId">
+/// The DXGI adapter index at calibration time. It is a snapshot: adapter order can change between boots, so consumers must re-resolve the
+/// adapter from a fresh <see cref="IGpuAdapterProvider.GetAdapters"/> list by hardware identity (<see cref="GpuProfiler.ResolveAdapter"/>)
+/// before creating a session.
+/// </param>
 /// <param name="Model">The model family, for example <c>realesrgan-x4plus</c> (see <see cref="GpuProfiler.GetModelFamily"/>).</param>
-/// <param name="Precision">The faster precision on this adapter: <c>fp32</c> or <c>fp16</c>.</param>
+/// <param name="Precision">The faster precision on this adapter, <c>fp32</c> or <c>fp16</c>, measured at the reference tile and applied at <paramref name="TileSize"/>.</param>
 /// <param name="TileSize">The tile size in source pixels, excluding overlap (<c>TilingOptions.TileSize</c>).</param>
 /// <param name="SecondsPerMegapixel">Measured seconds per source megapixel at <paramref name="TileSize"/>; seeds the ETA (§11).</param>
 /// <param name="Tier">The adapter tier.</param>
@@ -33,6 +39,13 @@ public sealed record GpuProfile(
 
     /// <summary>Gets the PCI device id of the adapter; part of the LUID-independent store key.</summary>
     public int DeviceId { get; init; }
+
+    /// <summary>
+    /// Gets a value indicating whether the profile came from an error fallback (the FP16 variant failed to load and FP32 was kept).
+    /// <see cref="GpuProfileStore"/> refuses to persist provisional profiles, so the next start calibrates again.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsProvisional { get; init; }
 
     /// <summary>
     /// Returns <see langword="true"/> when this profile was calibrated on the same kind of adapter (vendor, device and name),

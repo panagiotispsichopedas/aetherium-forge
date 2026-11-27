@@ -12,7 +12,7 @@ internal sealed class GpuProfileDocument
     public int SchemaVersion { get; set; }
 
     /// <summary>Gets or sets the profiles.</summary>
-    public List<GpuProfile> Profiles { get; set; } = [];
+    public List<GpuProfile?>? Profiles { get; set; } = [];
 }
 
 /// <summary>
