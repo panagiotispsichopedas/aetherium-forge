@@ -18,7 +18,9 @@ public sealed class ModelDownloaderTests : IDisposable
 
     private string PartialPath(string name = "m") => Path.Combine(_folder.ModelsFolder, $"{name}.onnx{ModelDownloader.PartialSuffix}");
 
-    private ModelDownloader Downloader(FakeHttpHandler handler) => new(new HttpClient(handler), _folder.ModelsFolder);
+    private ModelDownloader Downloader(FakeHttpHandler handler) => new(new HttpClient(handler), _folder.ModelsFolder, ModelTestData.Options(_folder.ModelsFolder));
+
+    private static bool IsModelRequest(HttpRequestMessage request) => request.RequestUri!.AbsolutePath.EndsWith(".onnx", StringComparison.Ordinal);
 
     private FakeHttpHandler Server(bool honourRange = true, Action<ChunkedStream>? onStream = null) =>
         new(ModelTestData.WithLicence(request => ModelTestData.Serve(request, _data, honourRange, ChunkSize, onStream)));
@@ -162,13 +164,11 @@ public sealed class ModelDownloaderTests : IDisposable
         Assert.Equal((typeof(ModelHashMismatchException), false, false), (exception?.GetType(), File.Exists(PartialPath()), File.Exists(Path.Combine(_folder.ModelsFolder, "m.onnx"))));
     }
 
-    [Theory]
-    [InlineData(-1)]
-    [InlineData(+1)]
-    public async Task DownloadAsync_SizeMismatch_ThrowsAndDeletesPartial(int delta)
+    [Fact]
+    public async Task DownloadAsync_ServerSendsMoreThanManifestSize_ThrowsSizeMismatchAndDeletesPartial()
     {
-        // Arrange: the manifest promises one byte more or less than the server sends.
-        var model = ModelTestData.Model("m", _data, size: _data.Length + delta);
+        // Arrange: the manifest promises one byte less than the server sends.
+        var model = ModelTestData.Model("m", _data, size: _data.Length - 1);
         var downloader = Downloader(Server());
 
         // Act
@@ -176,6 +176,20 @@ public sealed class ModelDownloaderTests : IDisposable
 
         // Assert
         Assert.Equal((typeof(ModelSizeMismatchException), false), (exception?.GetType(), File.Exists(PartialPath())));
+    }
+
+    [Fact]
+    public async Task DownloadAsync_CleanButShortTransfer_ThrowsIOExceptionAndKeepsPartial()
+    {
+        // Arrange: the manifest promises one byte more than the server sends.
+        var model = ModelTestData.Model("m", _data, size: _data.Length + 1);
+        var downloader = Downloader(Server());
+
+        // Act
+        var exception = await Record.ExceptionAsync(() => downloader.DownloadAsync(model, null, PauseToken.None, Ct));
+
+        // Assert
+        Assert.Equal((typeof(IOException), (long)_data.Length), (exception?.GetType(), new FileInfo(PartialPath()).Length));
     }
 
     [Fact]
@@ -193,7 +207,8 @@ public sealed class ModelDownloaderTests : IDisposable
                 paused.SetResult();
             }
         });
-        var downloader = Downloader(Server(onStream: stream => body = stream));
+        var handler = Server(onStream: stream => body ??= stream);
+        var downloader = Downloader(handler);
 
         // Act
         var download = downloader.DownloadAsync(ModelTestData.Model("m", _data), progress, pause.Token, Ct);
@@ -204,8 +219,11 @@ public sealed class ModelDownloaderTests : IDisposable
         pause.Resume();
         await download.WaitAsync(TimeSpan.FromSeconds(10), Ct);
 
-        // Assert
-        Assert.Equal((1, false, true), (readsWhilePaused, completedWhilePaused, download.IsCompletedSuccessfully));
+        // Assert: the first body was abandoned after one read and the rest came from a new range request.
+        var modelRequests = handler.Requests.Where(IsModelRequest).ToList();
+        Assert.Equal(
+            (1, false, true, 2, (long?)ChunkSize),
+            (readsWhilePaused, completedWhilePaused, download.IsCompletedSuccessfully, modelRequests.Count, modelRequests[1].Headers.Range?.Ranges.Single().From));
     }
 
     [Fact]

@@ -17,7 +17,7 @@ public sealed class ModelLibraryTests : IDisposable
 
     public void Dispose() => _folder.Dispose();
 
-    private ModelLibrary Library(bool online = true)
+    private ModelLibrary Library(bool online = true, string? manifestOverride = null)
     {
         var manifest = ModelTestData.ManifestJson(
             "models-v2",
@@ -34,19 +34,19 @@ public sealed class ModelLibraryTests : IDisposable
             return request.RequestUri!.AbsolutePath switch
             {
                 ReleasesPath => ModelTestData.Json("""[{ "tag_name": "models-v2", "draft": false, "assets": [] }]"""),
-                "/o/r/releases/download/models-v2/models.json" => ModelTestData.Json(manifest),
+                "/o/r/releases/download/models-v2/models.json" or "/o/r/releases/download/models-v1/models.json" => ModelTestData.Json(manifestOverride ?? manifest),
                 _ => ModelTestData.Status(HttpStatusCode.NotFound),
             };
         });
         var options = new ModelSourceOptions { Owner = "o", Repo = "r", ModelsFolder = _folder.ModelsFolder };
         var http = new HttpClient(handler);
-        return new ModelLibrary(_folder.ModelsFolder, new ModelManifestClient(http, options), new ModelDownloader(http, _folder.ModelsFolder));
+        return new ModelLibrary(_folder.ModelsFolder, new ModelManifestClient(http, options), new ModelDownloader(http, _folder.ModelsFolder, options));
     }
 
     private async Task InstallAsync(string name, byte[] data)
     {
         var handler = new FakeHttpHandler(ModelTestData.WithLicence(request => ModelTestData.Serve(request, data)));
-        await new ModelDownloader(new HttpClient(handler), _folder.ModelsFolder).DownloadAsync(ModelTestData.Model(name, data), null, PauseToken.None, Ct);
+        await new ModelDownloader(new HttpClient(handler), _folder.ModelsFolder, ModelTestData.Options(_folder.ModelsFolder)).DownloadAsync(ModelTestData.Model(name, data), null, PauseToken.None, Ct);
     }
 
     private static async Task<IReadOnlyDictionary<string, ModelState>> StatesAsync(ModelLibrary library) =>
@@ -196,5 +196,49 @@ public sealed class ModelLibraryTests : IDisposable
 
         // Assert
         Assert.Equal(_folder.CachePath, path);
+    }
+
+    [Fact]
+    public async Task ListAsync_UnsupportedManifestSchema_StillListsInstalledModels()
+    {
+        // Arrange
+        await InstallAsync("current", _current);
+
+        // Act
+        var states = await StatesAsync(Library(manifestOverride: """{ "schemaVersion": 9, "release": "models-v9", "models": [] }"""));
+
+        // Assert
+        Assert.Equal(new Dictionary<string, ModelState> { ["current"] = ModelState.Installed }, states);
+    }
+
+    [Fact]
+    public async Task ListAsync_FileRewrittenWithSameSize_RehashesAndReportsUpdate()
+    {
+        // Arrange: same size as the recorded file, different bytes and a new write time.
+        await InstallAsync("current", _current);
+        var path = Path.Combine(_folder.ModelsFolder, "current.onnx");
+        await File.WriteAllBytesAsync(path, _older, Ct);
+        File.SetLastWriteTimeUtc(path, File.GetLastWriteTimeUtc(path).AddMinutes(5));
+
+        // Act
+        var states = await StatesAsync(Library());
+
+        // Assert
+        Assert.Equal(ModelState.UpdateAvailable, states["current"]);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_InterruptedDownload_RemovesPartialAndMeta()
+    {
+        // Arrange
+        var partial = Path.Combine(_folder.ModelsFolder, "missing.onnx" + ModelDownloader.PartialSuffix);
+        await File.WriteAllBytesAsync(partial, [1], Ct);
+        await File.WriteAllTextAsync(Path.Combine(_folder.ModelsFolder, "missing.onnx" + ModelDownloader.PartialMetaSuffix), "{}", Ct);
+
+        // Act
+        await Library().DeleteAsync("missing", Ct);
+
+        // Assert
+        Assert.Empty(Directory.GetFiles(_folder.ModelsFolder));
     }
 }

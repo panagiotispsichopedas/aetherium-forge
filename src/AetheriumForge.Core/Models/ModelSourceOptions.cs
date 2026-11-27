@@ -41,6 +41,70 @@ public sealed class ModelSourceOptions
     /// </summary>
     public string UserAgent { get; set; } = DefaultUserAgent();
 
+    /// <summary>
+    /// Gets the hosts a release download may be redirected to, besides the host of <see cref="WebBaseAddress"/>. Default: GitHub's
+    /// release asset hosts <c>objects.githubusercontent.com</c> and <c>release-assets.githubusercontent.com</c>.
+    /// </summary>
+    public IList<string> AllowedDownloadHosts { get; } = ["objects.githubusercontent.com", "release-assets.githubusercontent.com"];
+
+    /// <summary>Gets or sets how long a download may receive no data before it fails (the partial is kept). Default 60 seconds.</summary>
+    public TimeSpan DownloadIdleTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>Gets or sets how long a discovered release is reused without asking the GitHub API again. Default 10 minutes.</summary>
+    public TimeSpan DiscoveryCacheDuration { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>Gets or sets the most release-list pages to read while looking for a <c>models-vN</c> tag. Default 10.</summary>
+    public int MaxReleasePages { get; set; } = 10;
+
+    /// <summary>Gets or sets the clock used for cache ages. Default <see cref="TimeProvider.System"/>.</summary>
+    public TimeProvider TimeProvider { get; set; } = TimeProvider.System;
+
+    /// <summary>
+    /// Returns <see langword="true"/> when <paramref name="url"/> is <c>https://{web host}/{owner}/{repo}/releases/download/{tag}/{asset}</c>
+    /// with no user info, port, query or extra path segments.
+    /// </summary>
+    /// <param name="url">The URL to check.</param>
+    /// <returns><see langword="true"/> when the URL is a release asset of this repository.</returns>
+    public bool IsReleaseAssetUrl(Uri url)
+    {
+        ArgumentNullException.ThrowIfNull(url);
+        if (!url.IsAbsoluteUri
+            || url.Scheme != Uri.UriSchemeHttps
+            || !url.IsDefaultPort
+            || !string.IsNullOrEmpty(url.UserInfo)
+            || !string.IsNullOrEmpty(url.Query)
+            || !string.IsNullOrEmpty(url.Fragment)
+            || !string.Equals(url.Host, WebBaseAddress.Host, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var prefix = $"/{Owner}/{Repo}/releases/download/";
+        var path = url.AbsolutePath;
+        if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var rest = path[prefix.Length..].Split('/');
+        return rest.Length == 2 && rest.All(segment => segment.Length > 0 && segment is not "." and not "..");
+    }
+
+    /// <summary>
+    /// Returns <see langword="true"/> when a response that ended at <paramref name="url"/> (after redirects) is trusted: https on the
+    /// <see cref="WebBaseAddress"/> host or one of <see cref="AllowedDownloadHosts"/>.
+    /// </summary>
+    /// <param name="url">The final request URL.</param>
+    /// <returns><see langword="true"/> when trusted.</returns>
+    public bool IsTrustedDownloadUrl(Uri url)
+    {
+        ArgumentNullException.ThrowIfNull(url);
+        return url.IsAbsoluteUri
+            && url.Scheme == Uri.UriSchemeHttps
+            && (string.Equals(url.Host, WebBaseAddress.Host, StringComparison.OrdinalIgnoreCase)
+                || AllowedDownloadHosts.Any(host => string.Equals(url.Host, host, StringComparison.OrdinalIgnoreCase)));
+    }
+
     /// <summary>Gets the resolved manifest cache path.</summary>
     /// <returns>The cache file path.</returns>
     public string ResolveCachePath()

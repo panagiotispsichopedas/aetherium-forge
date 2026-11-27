@@ -8,6 +8,12 @@ namespace AetheriumForge.Core.Models;
 /// The <c>models.json</c> manifest published with each <c>models-vN</c> release (IMPLEMENTATION_GUIDE §9, discovery contract).
 /// Unknown fields are ignored; an unsupported <see cref="SchemaVersion"/> is refused.
 /// </summary>
+/// <remarks>
+/// <b>Trust boundary.</b> The manifest and the SHA-256 values it lists are published in the same GitHub release as the models, so
+/// verification proves the download matches what the release publishes; it does not prove who published it. Integrity therefore rests
+/// on write access to this repository's releases. URLs are restricted to <c>https://github.com/{owner}/{repo}/releases/download/</c>
+/// and redirects to the hosts in <see cref="ModelSourceOptions.AllowedDownloadHosts"/>. There is no separate signature.
+/// </remarks>
 /// <param name="SchemaVersion">The manifest schema version; only <see cref="SupportedSchemaVersion"/> is accepted.</param>
 /// <param name="Release">The release tag, for example <c>models-v1</c>.</param>
 /// <param name="Models">The downloadable models.</param>
@@ -21,14 +27,25 @@ public sealed partial record ModelManifest(int SchemaVersion, string Release, IR
     public ManifestOrigin Origin { get; init; } = ManifestOrigin.Network;
 
     /// <summary>
-    /// Parses and validates a manifest.
+    /// Parses and validates a manifest against the default source (this repository).
     /// </summary>
     /// <param name="utf8Json">The UTF-8 JSON text.</param>
     /// <returns>The manifest.</returns>
     /// <exception cref="UnsupportedManifestSchemaException">The <c>schemaVersion</c> is not <see cref="SupportedSchemaVersion"/>.</exception>
     /// <exception cref="ModelManifestException">The JSON is malformed or a model entry is invalid.</exception>
-    public static ModelManifest Parse(ReadOnlySpan<byte> utf8Json)
+    public static ModelManifest Parse(ReadOnlySpan<byte> utf8Json) => Parse(utf8Json, new ModelSourceOptions());
+
+    /// <summary>
+    /// Parses and validates a manifest. Model and licence URLs must be release assets of <paramref name="source"/>'s repository.
+    /// </summary>
+    /// <param name="utf8Json">The UTF-8 JSON text.</param>
+    /// <param name="source">The trusted source.</param>
+    /// <returns>The manifest.</returns>
+    /// <exception cref="UnsupportedManifestSchemaException">The <c>schemaVersion</c> is not <see cref="SupportedSchemaVersion"/>.</exception>
+    /// <exception cref="ModelManifestException">The JSON is malformed or a model entry is invalid.</exception>
+    public static ModelManifest Parse(ReadOnlySpan<byte> utf8Json, ModelSourceOptions source)
     {
+        ArgumentNullException.ThrowIfNull(source);
         ManifestHeader? header;
         try
         {
@@ -67,7 +84,7 @@ public sealed partial record ModelManifest(int SchemaVersion, string Release, IR
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var model in manifest.Models)
         {
-            Validate(model);
+            ValidateModel(model, source);
             if (!names.Add(model.Name))
             {
                 throw new ModelManifestException($"The model manifest lists '{model.Name}' twice.");
@@ -84,14 +101,38 @@ public sealed partial record ModelManifest(int SchemaVersion, string Release, IR
     /// <returns>The model, or <see langword="null"/>.</returns>
     public ManifestModel? Find(string name) => Models.FirstOrDefault(model => string.Equals(model.Name, name, StringComparison.OrdinalIgnoreCase));
 
-    internal static bool IsSafeFileName(string? fileName) =>
-        !string.IsNullOrWhiteSpace(fileName)
-        && fileName.IndexOfAny(Path.GetInvalidFileNameChars()) < 0
-        && fileName is not "." and not ".."
-        && !fileName.EndsWith('.')
-        && string.Equals(fileName.Trim(), fileName, StringComparison.Ordinal);
 
-    private static void Validate(ManifestModel? model)
+    /// <summary>
+    /// Returns <see langword="true"/> when <paramref name="fileName"/> is a plain file name that is safe to create in the models folder:
+    /// no directory parts, no invalid characters, no trailing dot or space, and no reserved Windows device name (CON, PRN, AUX, NUL,
+    /// COM1–COM9, LPT1–LPT9) as the part before the first dot.
+    /// </summary>
+    /// <param name="fileName">The candidate file name.</param>
+    /// <returns><see langword="true"/> when safe.</returns>
+    internal static bool IsSafeFileName(string? fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)
+            || fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
+            || fileName is "." or ".."
+            || fileName.EndsWith('.')
+            || !string.Equals(fileName.Trim(), fileName, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var dot = fileName.IndexOf('.', StringComparison.Ordinal);
+        var stem = (dot < 0 ? fileName : fileName[..dot]).TrimEnd();
+        return !ReservedDeviceName().IsMatch(stem);
+    }
+
+    /// <summary>
+    /// Validates a model entry: safe names, a <c>.onnx</c> file matching the name, release-asset URLs of <paramref name="source"/>,
+    /// a positive size and a 64-digit lowercase hex SHA-256.
+    /// </summary>
+    /// <param name="model">The model.</param>
+    /// <param name="source">The trusted source.</param>
+    /// <exception cref="ModelManifestException">The entry is invalid.</exception>
+    internal static void ValidateModel(ManifestModel? model, ModelSourceOptions source)
     {
         if (model is null)
         {
@@ -108,14 +149,21 @@ public sealed partial record ModelManifest(int SchemaVersion, string Release, IR
             throw new ModelManifestException($"Model '{model.Name}' has an invalid fileName '{model.FileName}'; expected a plain *.onnx file name.");
         }
 
-        if (!string.Equals(Path.GetFileNameWithoutExtension(model.FileName), model.Name, StringComparison.OrdinalIgnoreCase))
+        var stem = Path.GetFileNameWithoutExtension(model.FileName);
+        if (!string.Equals(stem, model.Name, StringComparison.OrdinalIgnoreCase))
         {
             throw new ModelManifestException($"Model '{model.Name}' has fileName '{model.FileName}', which does not match its name.");
         }
 
-        if (model.Url is null || !model.Url.IsAbsoluteUri || model.Url.Scheme != Uri.UriSchemeHttps)
+        if (model.SidecarFileName is not null
+            && (!IsSafeFileName(model.SidecarFileName) || !string.Equals(model.SidecarFileName, $"{stem}.json", StringComparison.OrdinalIgnoreCase)))
         {
-            throw new ModelManifestException($"Model '{model.Name}' has no absolute https url.");
+            throw new ModelManifestException($"Model '{model.Name}' has sidecarFileName '{model.SidecarFileName}'; expected '{stem}.json'.");
+        }
+
+        if (model.Url is null || !source.IsReleaseAssetUrl(model.Url))
+        {
+            throw new ModelManifestException($"Model '{model.Name}' url '{model.Url}' is not a release asset of {source.Owner}/{source.Repo}.");
         }
 
         if (model.Size <= 0)
@@ -133,14 +181,17 @@ public sealed partial record ModelManifest(int SchemaVersion, string Release, IR
             throw new ModelManifestException($"Model '{model.Name}' has an invalid licenceFile '{model.LicenceFile}'.");
         }
 
-        if (model.LicenceUrl is not null && (!model.LicenceUrl.IsAbsoluteUri || model.LicenceUrl.Scheme != Uri.UriSchemeHttps))
+        if (model.LicenceUrl is not null && !source.IsReleaseAssetUrl(model.LicenceUrl))
         {
-            throw new ModelManifestException($"Model '{model.Name}' has a licenceUrl that is not absolute https.");
+            throw new ModelManifestException($"Model '{model.Name}' licenceUrl '{model.LicenceUrl}' is not a release asset of {source.Owner}/{source.Repo}.");
         }
     }
 
     [GeneratedRegex("^[0-9a-f]{64}$", RegexOptions.CultureInvariant)]
     private static partial Regex Sha256Pattern();
+
+    [GeneratedRegex("^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
+    private static partial Regex ReservedDeviceName();
 }
 
 /// <summary>

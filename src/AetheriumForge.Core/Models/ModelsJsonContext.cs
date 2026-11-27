@@ -16,6 +16,7 @@ namespace AetheriumForge.Core.Models;
 [JsonSerializable(typeof(ModelManifest))]
 [JsonSerializable(typeof(InstalledModelSidecar))]
 [JsonSerializable(typeof(ManifestCacheEntry))]
+[JsonSerializable(typeof(PartialDownloadMeta))]
 internal sealed partial class ModelsJsonContext : JsonSerializerContext;
 
 /// <summary>
@@ -36,9 +37,38 @@ internal sealed record GitHubRelease(string? TagName, bool Draft, IReadOnlyList<
 /// <param name="BrowserDownloadUrl">The public download URL.</param>
 internal sealed record GitHubAsset(string? Name, Uri? BrowserDownloadUrl);
 
-/// <summary>The cached manifest with the validators needed for a conditional request.</summary>
-/// <param name="Url">The URL the manifest was downloaded from; the ETag is only valid for it.</param>
-/// <param name="ETag">The entity tag, or <see langword="null"/>.</param>
-/// <param name="FetchedAt">When it was downloaded.</param>
-/// <param name="Content">The manifest JSON text.</param>
-internal sealed record ManifestCacheEntry(Uri Url, string? ETag, DateTimeOffset FetchedAt, string Content);
+/// <summary>The cached manifest with the validators needed for conditional requests, and the last discovery result.</summary>
+internal sealed record ManifestCacheEntry
+{
+    /// <summary>Gets the URL the manifest was downloaded from; <see cref="ETag"/> is only valid for it.</summary>
+    public Uri? Url { get; init; }
+
+    /// <summary>Gets the manifest entity tag.</summary>
+    public string? ETag { get; init; }
+
+    /// <summary>Gets when the manifest was downloaded or revalidated.</summary>
+    public DateTimeOffset FetchedAt { get; init; }
+
+    /// <summary>Gets the manifest JSON text.</summary>
+    public string? Content { get; init; }
+
+    /// <summary>Gets the entity tag of the first release-list page.</summary>
+    public string? ReleasesETag { get; init; }
+
+    /// <summary>Gets the last discovered <c>models-vN</c> tag.</summary>
+    public string? DiscoveredTag { get; init; }
+
+    /// <summary>Gets the manifest URL of <see cref="DiscoveredTag"/>.</summary>
+    public Uri? DiscoveredUrl { get; init; }
+
+    /// <summary>Gets when the release list was last read or revalidated.</summary>
+    public DateTimeOffset? DiscoveredAt { get; init; }
+}
+
+/// <summary>Written next to a partial download so a resume only continues the same file.</summary>
+/// <param name="Url">The model URL.</param>
+/// <param name="Sha256">The expected SHA-256 of the complete file.</param>
+/// <param name="Size">The expected size.</param>
+/// <param name="ETag">The strong entity tag of the first response, for <c>If-Range</c>.</param>
+/// <param name="LastModified">The <c>Last-Modified</c> of the first response, for <c>If-Range</c> when there is no strong ETag.</param>
+internal sealed record PartialDownloadMeta(Uri Url, string Sha256, long Size, string? ETag, DateTimeOffset? LastModified);

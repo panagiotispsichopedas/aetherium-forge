@@ -23,9 +23,13 @@ internal sealed class FakeHttpHandler : HttpMessageHandler
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        Requests.Add(request);
+        lock (Requests)
+        {
+            Requests.Add(request);
+        }
+
         var response = _respond(request);
-        response.RequestMessage = request;
+        response.RequestMessage ??= request;
         return Task.FromResult(response);
     }
 }
@@ -109,6 +113,8 @@ internal static class ModelTestData
 
     public static readonly Uri LicenceUrl = new("https://github.com/o/r/releases/download/models-v1/LICENSE.txt");
 
+    public static ModelSourceOptions Options(string modelsFolder) => new() { Owner = "o", Repo = "r", ModelsFolder = modelsFolder };
+
     public static byte[] RandomBytes(int length, int seed = 42)
     {
         var bytes = new byte[length];
@@ -179,10 +185,12 @@ internal static class ModelTestData
     public static HttpResponseMessage Status(HttpStatusCode status) => new(status) { Content = new ByteArrayContent([]) };
 
     /// <summary>Serves <paramref name="data"/> honouring a <c>Range</c> header when <paramref name="honourRange"/> is set.</summary>
-    public static HttpResponseMessage Serve(HttpRequestMessage request, byte[] data, bool honourRange = true, int chunkSize = 4096, Action<ChunkedStream>? onStream = null)
+    public static HttpResponseMessage Serve(HttpRequestMessage request, byte[] data, bool honourRange = true, int chunkSize = 4096, Action<ChunkedStream>? onStream = null, string? etag = null, long? reportedTotal = null)
     {
         var from = request.Headers.Range?.Ranges.FirstOrDefault()?.From;
-        if (honourRange && from is > 0)
+        var ifRange = request.Headers.IfRange?.EntityTag?.Tag;
+        var rangeStillValid = ifRange is null || etag is null || ifRange == etag;
+        if (honourRange && from is > 0 && rangeStillValid)
         {
             var start = (int)from.Value;
             if (start >= data.Length)
@@ -194,13 +202,24 @@ internal static class ModelTestData
             var partial = new ChunkedStream(slice, chunkSize);
             onStream?.Invoke(partial);
             var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new StreamContent(partial) };
-            response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, data.Length - 1, data.Length);
+            response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, data.Length - 1, reportedTotal ?? data.Length);
+            if (etag is not null)
+            {
+                response.Headers.ETag = new EntityTagHeaderValue(etag);
+            }
+
             return response;
         }
 
         var stream = new ChunkedStream(data, chunkSize);
         onStream?.Invoke(stream);
-        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) };
+        var full = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) };
+        if (etag is not null)
+        {
+            full.Headers.ETag = new EntityTagHeaderValue(etag);
+        }
+
+        return full;
     }
 
     /// <summary>Answers licence requests; everything else goes to <paramref name="next"/>.</summary>
@@ -208,6 +227,63 @@ internal static class ModelTestData
         request => request.RequestUri!.AbsolutePath.EndsWith("/LICENSE.txt", StringComparison.Ordinal)
             ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(LicenceText) }
             : next(request);
+}
+
+/// <summary>
+/// A clock the test moves by hand.
+/// </summary>
+internal sealed class ManualTimeProvider : TimeProvider
+{
+    public DateTimeOffset Now { get; set; } = new(2026, 11, 27, 12, 0, 0, TimeSpan.Zero);
+
+    public override DateTimeOffset GetUtcNow() => Now;
+}
+
+/// <summary>
+/// A body that returns one chunk and then never returns until cancelled.
+/// </summary>
+internal sealed class StallingStream(byte[] firstChunk) : Stream
+{
+    private bool _sent;
+
+    public override bool CanRead => true;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        if (!_sent)
+        {
+            _sent = true;
+            firstChunk.CopyTo(buffer);
+            return firstChunk.Length;
+        }
+
+        await Task.Delay(Timeout.Infinite, cancellationToken);
+        return 0;
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    public override void Flush()
+    {
+    }
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
 
 /// <summary>

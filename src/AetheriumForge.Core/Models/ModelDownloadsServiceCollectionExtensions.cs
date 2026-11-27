@@ -49,7 +49,7 @@ public static class ModelDownloadsServiceCollectionExtensions
             });
 
         services.AddHttpClient(nameof(ModelDownloader), client => client.Timeout = Timeout.InfiniteTimeSpan)
-            .AddTypedClient((http, provider) => new ModelDownloader(http, options.ModelsFolder, provider.GetService<ILogger<ModelDownloader>>()))
+            .AddTypedClient((http, provider) => new ModelDownloader(http, options.ModelsFolder, options, provider.GetService<ILogger<ModelDownloader>>()))
             .AddStandardResilienceHandler(resilience =>
             {
                 resilience.AttemptTimeout.Timeout = DownloadAttemptTimeout;

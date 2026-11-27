@@ -92,6 +92,37 @@ public sealed class ModelSourceUnavailableException : Exception
 }
 
 /// <summary>
+/// Thrown when a download URL or the host a request was redirected to is not a trusted release source
+/// (<see cref="ModelSourceOptions.IsReleaseAssetUrl"/>, <see cref="ModelSourceOptions.IsTrustedDownloadUrl"/>). Nothing was written.
+/// </summary>
+public sealed class UntrustedModelSourceException : Exception
+{
+    /// <summary>Initializes a new instance of the <see cref="UntrustedModelSourceException"/> class.</summary>
+    public UntrustedModelSourceException()
+        : base("The download source is not trusted.")
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="UntrustedModelSourceException"/> class.</summary>
+    /// <param name="message">The error message.</param>
+    public UntrustedModelSourceException(string message)
+        : base(message)
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="UntrustedModelSourceException"/> class.</summary>
+    /// <param name="message">The error message.</param>
+    /// <param name="innerException">The underlying exception.</param>
+    public UntrustedModelSourceException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+
+    /// <summary>Gets the rejected URL, when known.</summary>
+    public Uri? Url { get; init; }
+}
+
+/// <summary>
 /// Thrown when a downloaded model does not match the manifest. The partial file has been deleted.
 /// </summary>
 public class ModelVerificationException : Exception

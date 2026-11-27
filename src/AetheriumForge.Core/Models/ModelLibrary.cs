@@ -77,7 +77,6 @@ public sealed partial class ModelLibrary
     /// </summary>
     /// <param name="cancellationToken">Cancels the listing.</param>
     /// <returns>Manifest models in manifest order, then custom models by name.</returns>
-    /// <exception cref="ModelManifestException">The manifest is invalid or uses an unsupported schema.</exception>
     public async Task<IReadOnlyList<ModelEntry>> ListAsync(CancellationToken cancellationToken)
     {
         ModelManifest? manifest;
@@ -86,8 +85,9 @@ public sealed partial class ModelLibrary
             manifest = await _client.GetLatestAsync(cancellationToken).ConfigureAwait(false);
             LastManifest = manifest;
         }
-        catch (ModelSourceUnavailableException exception)
+        catch (Exception exception) when (exception is ModelSourceUnavailableException or ModelManifestException)
         {
+            // The installed models are still useful without the manifest (offline, or a schema this build does not read).
             LogManifestUnavailable(_logger, exception);
             manifest = null;
         }
@@ -144,7 +144,7 @@ public sealed partial class ModelLibrary
         cancellationToken.ThrowIfCancellationRequested();
         var modelPath = Path.Combine(_modelsFolder, name + ".onnx");
         var deleted = false;
-        foreach (var path in new[] { modelPath, Path.ChangeExtension(modelPath, ".json"), modelPath + ModelDownloader.PartialSuffix })
+        foreach (var path in new[] { modelPath, Path.ChangeExtension(modelPath, ".json"), modelPath + ModelDownloader.PartialSuffix, modelPath + ModelDownloader.PartialMetaSuffix })
         {
             if (File.Exists(path))
             {
@@ -210,10 +210,12 @@ public sealed partial class ModelLibrary
         try
         {
             var sidecar = JsonSerializer.Deserialize(File.ReadAllBytes(sidecarPath), ModelsJsonContext.Default.InstalledModelSidecar);
-            var size = new FileInfo(modelPath).Length;
+            var file = new FileInfo(modelPath);
 
-            // The recorded hash only counts while the file still has the recorded size; otherwise it is re-hashed.
-            return sidecar?.Sha256 is { Length: 64 } sha && sidecar.Size == size ? sha.ToLowerInvariant() : null;
+            // The recorded hash only counts while the file keeps the recorded size and last write time; otherwise it is re-hashed.
+            return sidecar?.Sha256 is { Length: 64 } sha && sidecar.Size == file.Length && sidecar.LastWriteTimeUtc == file.LastWriteTimeUtc
+                ? sha.ToLowerInvariant()
+                : null;
         }
         catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException)
         {
@@ -222,7 +224,7 @@ public sealed partial class ModelLibrary
         }
     }
 
-    [LoggerMessage(EventId = 300, Level = LogLevel.Warning, Message = "Model list unavailable; showing installed models only")]
+    [LoggerMessage(EventId = 300, Level = LogLevel.Warning, Message = "Model list unavailable or unreadable; showing installed models only")]
     private static partial void LogManifestUnavailable(ILogger logger, Exception exception);
 
     [LoggerMessage(EventId = 301, Level = LogLevel.Information, Message = "Deleted model {Model}")]

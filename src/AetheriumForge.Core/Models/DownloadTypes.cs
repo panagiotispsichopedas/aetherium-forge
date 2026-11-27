@@ -34,6 +34,7 @@ public sealed record InstalledModel(string Name, string Path, string SidecarPath
 /// <param name="RecommendedFor">The texture kinds the model suits.</param>
 /// <param name="Sha256">The verified SHA-256 of the installed file, used to detect updates without re-hashing.</param>
 /// <param name="Size">The installed file size.</param>
+/// <param name="LastWriteTimeUtc">The installed file's last write time; a change means the recorded hash is stale.</param>
 /// <param name="Tier">The recommended GPU tier.</param>
 /// <param name="Family">The model family.</param>
 internal sealed record InstalledModelSidecar(
@@ -44,5 +45,6 @@ internal sealed record InstalledModelSidecar(
     IReadOnlyList<string>? RecommendedFor,
     string? Sha256,
     long? Size,
+    DateTime? LastWriteTimeUtc,
     string? Tier,
     string? Family);
