@@ -112,6 +112,47 @@ public sealed class TextureProcessorTests : IDisposable
         Assert.Equal(Path.Combine(_root, "out", "textures", "a", "b.dds"), path);
     }
 
+    [Theory]
+    [InlineData(@"..\evil.dds")]
+    [InlineData(@"textures\..\..\evil.dds")]
+    [InlineData("textures/../../evil.dds")]
+    [InlineData(@"textures\a\..")]
+    [InlineData(@"C:\Windows\evil.dds")]
+    [InlineData(@"\evil.dds")]
+    [InlineData("C:evil.dds")]
+    [InlineData(@"\\server\share\evil.dds")]
+    [InlineData("")]
+    public void GetOutputPath_EscapingPath_ThrowsArgumentException(string canonicalPath)
+    {
+        // Arrange
+        var (processor, _, _) = Create(Solid(1, 1, 0, 0, 0, 255));
+
+        // Act
+        var act = () => processor.GetOutputPath(canonicalPath);
+
+        // Assert
+        Assert.Throws<ArgumentException>(act);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_TraversalPath_ThrowsBeforeReadingSource()
+    {
+        // Arrange
+        var source = new FakeSource();
+        var codec = new FakeCodec(Solid(4, 4, 0, 0, 0, 255));
+        var work = Path.Combine(_root, "work");
+        Directory.CreateDirectory(work);
+        var processor = new TextureProcessor(source, codec, _ => new FakeUpscaler(), Path.Combine(_root, "out"), work);
+        var job = new TextureJob(@"textures\..\..\evil.dds", "Skyrim - Textures0.bsa", TextureKind.Diffuse, 16, 16, "fake", 1.0);
+
+        // Act
+        var act = () => processor.ProcessAsync(job, null, PauseToken.None, TestContext.Current.CancellationToken);
+
+        // Assert
+        await Assert.ThrowsAsync<ArgumentException>(act);
+        Assert.Equal((0, null), (source.Reads, codec.Encoded));
+    }
+
     private static TextureJob Job(TextureKind kind, int width, int height, double normalStrength = 1.0) =>
         new(@"textures\test\a.dds", "Skyrim - Textures0.bsa", kind, width, height, "fake", normalStrength);
 
@@ -141,7 +182,13 @@ public sealed class TextureProcessorTests : IDisposable
 
     private sealed class FakeSource : ITextureSource
     {
-        public Task<byte[]> ReadAsync(string path, string archiveName, CancellationToken cancellationToken = default) => Task.FromResult(new byte[] { 1, 2, 3 });
+        public int Reads { get; private set; }
+
+        public Task<byte[]> ReadAsync(string path, string archiveName, CancellationToken cancellationToken = default)
+        {
+            Reads++;
+            return Task.FromResult(new byte[] { 1, 2, 3 });
+        }
     }
 
     private sealed class FakeCodec(RgbaImage decoded) : ITextureCodec
