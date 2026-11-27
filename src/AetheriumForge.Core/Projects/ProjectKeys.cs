@@ -1,9 +1,9 @@
-namespace AetheriumForge.Cli.Hosting;
+namespace AetheriumForge.Core.Projects;
 
 /// <summary>
 /// Keys of the project key/value table written by <c>scan</c> and read by <c>forge</c> and <c>status</c>.
 /// </summary>
-internal static class ProjectKeys
+public static class ProjectKeys
 {
     /// <summary>The game folder (the one that holds <c>SkyrimSE.exe</c>).</summary>
     public const string GamePath = "gamePath";

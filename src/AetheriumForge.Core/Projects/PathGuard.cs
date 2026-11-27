@@ -1,9 +1,9 @@
-namespace AetheriumForge.Cli.Hosting;
+namespace AetheriumForge.Core.Projects;
 
 /// <summary>
 /// Path containment checks: Aetherium Forge never writes inside the game folder.
 /// </summary>
-internal static class PathGuard
+public static class PathGuard
 {
     /// <summary>
     /// Tells whether <paramref name="path"/> is <paramref name="folder"/> itself or anything below it. Works for a folder at a drive root

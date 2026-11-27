@@ -5,6 +5,7 @@ using AetheriumForge.Cli.Rendering;
 using AetheriumForge.Core.Discovery;
 using AetheriumForge.Core.Game;
 using AetheriumForge.Core.Jobs;
+using AetheriumForge.Core.Projects;
 using AetheriumForge.Core.Rules;
 using AetheriumForge.Core.Textures;
 using Microsoft.Extensions.DependencyInjection;

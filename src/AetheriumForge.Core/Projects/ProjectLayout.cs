@@ -1,10 +1,10 @@
-namespace AetheriumForge.Cli.Hosting;
+namespace AetheriumForge.Core.Projects;
 
 /// <summary>
 /// The files and folders of one project (IMPLEMENTATION_GUIDE §12): <c>forge.db</c>, <c>work\</c>, <c>output\</c> and <c>logs\</c>.
 /// </summary>
 /// <param name="Root">The project folder (full path).</param>
-internal sealed record ProjectLayout(string Root)
+public sealed record ProjectLayout(string Root)
 {
     /// <summary>The database file name inside the project folder.</summary>
     public const string DatabaseFileName = "forge.db";
