@@ -448,6 +448,42 @@ CREATE TABLE run (id INTEGER PRIMARY KEY, started TEXT, ended TEXT, done INT, fa
 
 ## 14. UI (Avalonia)
 
+### Structure (approved redesign, applied after the M4/M5 pages merge)
+
+The app follows the workflow, not the build order. The left rail is a **stepper** with each step's status, a project card on top (name, folder, queued and done counts) and a run mini-progress at the bottom that is visible from every page. A status bar shows project, GPU memory and run state.
+
+| Step | Replaces | Contents |
+|---|---|---|
+| **1 · Project** | Scan | Game detection, project folder, scan and rescan, a trimmed summary (four tiles), "Next: Style". |
+| **2 · Style** | Rules + Compare | Groups on the left (drag to reorder; first match wins), a large before/after preview in the centre with the sample strip, and a right panel with **Matching** (patterns, size range, kinds), **Output** (model, largest size, scale) and **Look** (§8 sliders and presets) tabs. Every group setting is edited here and only here, including the model and relief (normal strength). One action bar: Apply, Revert, unsaved-changes indicator, and confirmation before finished textures change. |
+| **3 · Forge** | Run + Queue | **Pre-flight checklist** (project scanned, models installed, GPU calibrated, texconv found, disk space), each failed check with a fix button. Start is disabled until the required checks pass. Below it: overall progress and ETA, stage lanes, and tabs In progress / Queued / Failed / Done / Log. Filters and bulk actions (Retry, Skip, Re-queue) live in the tabs and are locked with a visible reason while forging. |
+| **4 · Package** | Package | M6 (below). |
+| Models & GPU (tool) | Models + Settings | Downloads, calibration, adapter, advanced settings. Also reached from pre-flight fixes. |
+
+**Rules for every page**
+- The primary action sits bottom-right in an `ActionBar`. Destructive choices are never the accent or the default.
+- Errors, warnings and info use one `StatusBanner` pattern. Blocked actions always say why and offer the fix.
+- While forging, Scan, Rescan, Open project and Apply are locked, with a banner. Leaving a page with unsaved changes asks first.
+- **Theme:** follows the OS by default. The user can override it in Models & GPU → Settings (or the rail menu): **System / Light / Dark**, applied instantly through `RequestedThemeVariant`.
+  - The choice is stored in the app-level settings database `%LOCALAPPDATA%\AetheriumForge\app.db` (SQLite, table `setting(key TEXT PRIMARY KEY, value TEXT)`), not in a project.
+  - App preferences that were in `app-settings.json` (recent projects, last project, first-run dismissal) move to the same database, with a one-time import of the old file.
+- **Design system:** one `Theme/AetheriumTheme.axaml` resource dictionary (Light and Dark `ThemeDictionaries`, tuned dark-first).
+  - Semantic brushes Success, Warning, Danger and Info, kept separate from the ember accent.
+  - Type ramp 28/20/15/13/11.
+  - Spacing 4/8/12/16/24/32.
+  - One card style.
+  - Shared controls: `PageHeader`, `ActionBar`, `StatusBanner`, `EmptyState`, `StatTile`, `StageLane`, `ChecklistItem`, `ConfirmFlyout`.
+  - No hex colours in views.
+- **Accessibility:** `AutomationProperties.Name` on every icon button; state is never shown by colour alone.
+- **Keys:** `Ctrl+1…4` steps, `Ctrl+Enter` start, `Space` pause, `Ctrl+S` apply. In the preview, arrows pan, `+`/`-` zoom and `[`/`]` move the split.
+- **Wording:**
+  - "Textures to forge" (not "Gaps").
+  - "Largest size" / "Up to ×N" (not "Cap" / "Max factor").
+  - "Relief" for normal strength, "Shine" for specular scale.
+  - "Fast preview" (not "draft").
+
+### Screen contents (as built in M4/M5; the structure above regroups them)
+
 | Screen | Contents | Key interactions |
 |---|---|---|
 | **Scan** | Detected game (path, version, store), profile files, plugin count, drives with free space and the chosen project folder, plus a "Scan" button | Override paths; the scan runs async with a progress bar; summary cards by group, kind and resolution |
@@ -491,6 +527,7 @@ CREATE TABLE run (id INTEGER PRIMARY KEY, started TEXT, ended TEXT, done INT, fa
 | M3 | Pipeline: channels, Pause/Resume/Stop, ETA, crash recovery | A 30-minute run interrupted 3 ways resumes with no corruption |
 | M4 | UI: Scan, Queue, Run | Full run controllable from the UI |
 | M5 | Rules editor + Compare, including per-group **look** controls (§8) with live preview | Per-group model choice and look (AI strength, sharpen, colour grading, normal strength, specular scale) work end to end, and neutral looks reproduce the M2 output exactly |
+| M5b | UI redesign (§14 Structure), in three phases after the M4/M5 merge: **A** design system, rail stepper, run and unsaved-changes guards; **B** Style workspace (Rules + Compare) and Forge workspace (Run + Queue + pre-flight); **C** accessibility, keyboard, wording, first-run walkthrough | A first-time user goes from launch to a running forge without leaving the stepper or hitting a dead end. No hex colours in views. Every icon button has an accessible name. |
 | M6 | Packaging: BSA/ESL/FOMOD/zip | The mod installs in Vortex, the game loads it, and xEdit opens the plugins cleanly |
 | M7 | Import from prototype, rescan, settings, polish | The prototype's finished textures aren't redone |
 
