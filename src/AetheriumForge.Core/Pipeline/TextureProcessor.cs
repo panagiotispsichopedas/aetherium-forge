@@ -16,10 +16,12 @@ namespace AetheriumForge.Core.Pipeline;
 /// <item>Alpha is kept only when some pixel is below 255, and never goes through the AI model; it is resized with bicubic.</item>
 /// <item>RGB goes through the model, then Lanczos-3 to the exact target size.</item>
 /// <item>Normal maps are renormalised after resizing, with the group's normal strength.</item>
-/// <item>Parallax/height maps (<see cref="TextureKind.Parallax"/>) skip the model and use Lanczos-3 only (§8).</item>
+/// <item>Parallax/height maps (<see cref="TextureKind.Parallax"/>) and jobs without a model skip the model and use Lanczos-3 only (§8).</item>
 /// </list>
 /// <para>The output file appears only when it is complete: the encoder writes in the work folder and moves the finished
 /// file into place, so an interrupted item never leaves a partial texture.</para>
+/// <para>The work is split into stage methods (decode, upscale, post-process, encode) that the staged pipeline (§11) calls
+/// from different workers; <see cref="ProcessAsync"/> composes them for single-texture use.</para>
 /// </remarks>
 public sealed partial class TextureProcessor
 {
@@ -57,6 +59,12 @@ public sealed partial class TextureProcessor
         _logger = logger ?? NullLogger<TextureProcessor>.Instance;
     }
 
+    /// <summary>Gets the mod output folder.</summary>
+    internal string OutputRoot => _outputRoot;
+
+    /// <summary>Gets the folder for temporary files.</summary>
+    internal string WorkRoot => _workRoot;
+
     /// <summary>
     /// Gets the output path for a canonical resource path.
     /// </summary>
@@ -92,7 +100,7 @@ public sealed partial class TextureProcessor
     }
 
     /// <summary>
-    /// Processes <paramref name="job"/> and commits the result.
+    /// Processes <paramref name="job"/> and commits the result. Composes the decode, upscale, post-process and encode stages.
     /// </summary>
     /// <param name="job">The texture to process.</param>
     /// <param name="progress">Optional tile progress from the upscaler.</param>
@@ -101,63 +109,138 @@ public sealed partial class TextureProcessor
     /// <returns>The committed output and stage timings.</returns>
     public async Task<TextureResult> ProcessAsync(TextureJob job, IProgress<TileProgress>? progress, PauseToken pause, CancellationToken cancellationToken)
     {
+        using var texture = await DecodeAsync(job, pause, cancellationToken).ConfigureAwait(false);
+
+        await pause.WaitWhilePausedAsync(cancellationToken).ConfigureAwait(false);
+        await UpscaleAsync(texture, progress, pause, cancellationToken).ConfigureAwait(false);
+
+        await pause.WaitWhilePausedAsync(cancellationToken).ConfigureAwait(false);
+        await Task.Run(() => PostProcess(texture), cancellationToken).ConfigureAwait(false);
+
+        await pause.WaitWhilePausedAsync(cancellationToken).ConfigureAwait(false);
+        return await EncodeAsync(texture, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Gets whether <paramref name="job"/> runs through the AI model (not for parallax/height maps or jobs without a model).</summary>
+    /// <param name="job">The job.</param>
+    /// <returns><see langword="true"/> when the model runs.</returns>
+    internal static bool UsesModel(TextureJob job) => job.Kind != TextureKind.Parallax && !string.IsNullOrEmpty(job.Model);
+
+    /// <summary>
+    /// Stages 1–3: extracts the source into a new work folder, decodes it and splits RGB from alpha (CPU).
+    /// </summary>
+    /// <param name="job">The texture to process.</param>
+    /// <param name="pause">Pause gate, checked before extract and before decode.</param>
+    /// <param name="cancellationToken">Cancels the stage.</param>
+    /// <returns>The decoded texture. The caller owns it; disposing it deletes its work folder.</returns>
+    /// <exception cref="ArgumentException"><see cref="TextureJob.Path"/> escapes the output folder (nothing is read).</exception>
+    /// <remarks>On any failure, cancellation included, the work folder is deleted before the exception propagates.</remarks>
+    internal async Task<DecodedTexture> DecodeAsync(TextureJob job, PauseToken pause, CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(job);
         ArgumentOutOfRangeException.ThrowIfLessThan(job.TargetWidth, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(job.TargetHeight, 1);
 
         // Validate the destination before reading anything: job.Path must stay inside the output folder.
         var outputPath = GetOutputPath(job.Path);
+        cancellationToken.ThrowIfCancellationRequested();
 
         var work = Path.Combine(_workRoot, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
-        var clock = Stopwatch.StartNew();
+        var texture = new DecodedTexture(job, outputPath, work, TryDeleteWorkFolder);
         try
         {
             // 1. Extract
+            var clock = Stopwatch.StartNew();
             await pause.WaitWhilePausedAsync(cancellationToken).ConfigureAwait(false);
             var bytes = await _source.ReadAsync(job.Path, job.SourceArchive, cancellationToken).ConfigureAwait(false);
             var sourcePath = Path.Combine(work, "source.dds");
             await File.WriteAllBytesAsync(sourcePath, bytes, cancellationToken).ConfigureAwait(false);
-            var extract = Lap(clock);
+            texture.SourceDxgiFormat = job.SourceDxgiFormat ?? (DdsHeader.TryParse(bytes, out var header) ? header.DxgiFormat : null);
+            texture.Extract = Lap(clock);
 
             // 2. Decode
             await pause.WaitWhilePausedAsync(cancellationToken).ConfigureAwait(false);
             var decoded = await _codec.DecodeAsync(sourcePath, work, cancellationToken).ConfigureAwait(false);
-            var decode = Lap(clock);
 
             // 3. Split
-            var alpha = ImageOps.ExtractAlpha(decoded);
-            var rgb = ImageOps.ToPlanarRgb(decoded);
+            texture.SourceWidth = decoded.Width;
+            texture.SourceHeight = decoded.Height;
+            texture.Alpha = ImageOps.ExtractAlpha(decoded);
+            texture.HadAlpha = texture.Alpha is not null;
+            texture.Rgb = ImageOps.ToPlanarRgb(decoded);
+            texture.Decode = Lap(clock);
 
-            // 4. Upscale (not for parallax/height maps)
-            await pause.WaitWhilePausedAsync(cancellationToken).ConfigureAwait(false);
-            var useModel = job.Kind != TextureKind.Parallax;
-            if (useModel)
-            {
-                rgb = await _upscalers(job.Model).UpscaleAsync(rgb, progress, pause, cancellationToken).ConfigureAwait(false);
-            }
-
-            var upscale = Lap(clock);
-
-            // 5–7. Resize, normals, merge alpha
-            await pause.WaitWhilePausedAsync(cancellationToken).ConfigureAwait(false);
-            var output = await Task.Run(() => PostProcess(job, rgb, alpha), cancellationToken).ConfigureAwait(false);
-            var post = Lap(clock);
-
-            // 8–9. Encode and commit (the codec moves the finished file into place)
-            await pause.WaitWhilePausedAsync(cancellationToken).ConfigureAwait(false);
-            await _codec.EncodeBc7Async(output, outputPath, work, Texconv.IsSrgbFormat(job.SourceDxgiFormat), cancellationToken).ConfigureAwait(false);
-            var encode = Lap(clock);
-
-            var timings = new StageTimings(extract, decode, upscale, post, encode);
-            LogProcessed(job.Path, decoded.Width, decoded.Height, output.Width, output.Height, timings.Total.TotalSeconds);
-
-            return new TextureResult(outputPath, output.Width, output.Height, alpha is not null, useModel, timings);
+            return texture;
         }
-        finally
+        catch
         {
-            TryDeleteWorkFolder(work);
+            texture.Dispose();
+            throw;
         }
+    }
+
+    /// <summary>
+    /// Stage 4: upscales the RGB planes with the job's model (GPU). Does nothing when <see cref="UsesModel"/> is false.
+    /// </summary>
+    /// <param name="texture">The decoded texture; its RGB planes are replaced by the upscaled planes.</param>
+    /// <param name="progress">Optional tile progress.</param>
+    /// <param name="pause">Pause gate, checked by the upscaler between tiles.</param>
+    /// <param name="cancellationToken">Cancels between tiles.</param>
+    /// <returns>A task that completes when the planes are upscaled.</returns>
+    /// <exception cref="InvalidOperationException"><paramref name="texture"/> has no RGB planes (not decoded, or already post-processed).</exception>
+    internal async Task UpscaleAsync(DecodedTexture texture, IProgress<TileProgress>? progress, PauseToken pause, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(texture);
+        var rgb = texture.Rgb ?? throw new InvalidOperationException("The texture has no RGB planes to upscale.");
+        if (!UsesModel(texture.Job))
+        {
+            return;
+        }
+
+        var clock = Stopwatch.StartNew();
+        texture.Rgb = await _upscalers(texture.Job.Model).UpscaleAsync(rgb, progress, pause, cancellationToken).ConfigureAwait(false);
+        texture.UsedModel = true;
+        texture.Upscale = clock.Elapsed;
+    }
+
+    /// <summary>
+    /// Stages 5–7: resizes to the target size, renormalises normal maps and merges alpha (CPU).
+    /// </summary>
+    /// <param name="texture">The texture; its planes are released and <see cref="DecodedTexture.Output"/> is set.</param>
+    /// <exception cref="InvalidOperationException"><paramref name="texture"/> has no RGB planes.</exception>
+    internal static void PostProcess(DecodedTexture texture)
+    {
+        ArgumentNullException.ThrowIfNull(texture);
+        var rgb = texture.Rgb ?? throw new InvalidOperationException("The texture has no RGB planes to post-process.");
+
+        var clock = Stopwatch.StartNew();
+        texture.Output = PostProcess(texture.Job, rgb, texture.Alpha);
+        texture.Rgb = null;
+        texture.Alpha = null;
+        texture.PostProcess = clock.Elapsed;
+    }
+
+    /// <summary>
+    /// Stages 8–9: encodes BC7 inside the texture's work folder and atomically moves the finished file into the output folder.
+    /// </summary>
+    /// <param name="texture">The post-processed texture. The caller still owns it and disposes it afterwards.</param>
+    /// <param name="cancellationToken">Cancels the encode; nothing is committed when cancelled.</param>
+    /// <returns>The committed output and stage timings.</returns>
+    /// <exception cref="InvalidOperationException"><paramref name="texture"/> has not been post-processed.</exception>
+    internal async Task<TextureResult> EncodeAsync(DecodedTexture texture, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(texture);
+        var output = texture.Output ?? throw new InvalidOperationException("The texture has not been post-processed.");
+
+        var clock = Stopwatch.StartNew();
+        await _codec.EncodeBc7Async(output, texture.OutputPath, texture.WorkFolder, Texconv.IsSrgbFormat(texture.SourceDxgiFormat), cancellationToken).ConfigureAwait(false);
+        texture.Encode = clock.Elapsed;
+
+        var timings = new StageTimings(texture.Extract, texture.Decode, texture.Upscale, texture.PostProcess, texture.Encode);
+        LogProcessed(texture.Job.Path, texture.SourceWidth, texture.SourceHeight, output.Width, output.Height, timings.Total.TotalSeconds);
+
+        return new TextureResult(texture.OutputPath, output.Width, output.Height, texture.HadAlpha, texture.UsedModel, timings);
     }
 
     internal static RgbaImage PostProcess(TextureJob job, PlanarImage rgb, PlanarImage? alpha)
@@ -187,7 +270,10 @@ public sealed partial class TextureProcessor
     {
         try
         {
-            Directory.Delete(work, recursive: true);
+            if (Directory.Exists(work))
+            {
+                Directory.Delete(work, recursive: true);
+            }
         }
         catch (IOException ex)
         {
