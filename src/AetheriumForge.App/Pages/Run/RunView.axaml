@@ -1,0 +1,95 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:run="using:AetheriumForge.App.Pages.Run"
+             x:Class="AetheriumForge.App.Pages.Run.RunView"
+             x:DataType="run:RunViewModel">
+  <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,*" RowSpacing="12">
+
+    <!-- Header -->
+    <StackPanel Grid.Row="0" Spacing="2">
+      <TextBlock Text="Run" FontSize="22" FontWeight="SemiBold" />
+      <TextBlock Text="{Binding ProjectText}" Opacity="0.75" TextTrimming="CharacterEllipsis" />
+    </StackPanel>
+
+    <!-- Controls and options -->
+    <WrapPanel Grid.Row="1" Orientation="Horizontal" ItemSpacing="8" LineSpacing="8">
+      <Button Content="Start" Command="{Binding StartCommand}" Classes="accent" MinWidth="80" />
+      <Button Content="Pause" Command="{Binding PauseCommand}" MinWidth="80" />
+      <Button Content="Resume" Command="{Binding ResumeCommand}" MinWidth="80" />
+      <Button Content="Stop" Command="{Binding StopCommand}" MinWidth="80" />
+      <Border Width="16" />
+      <TextBlock Text="Model" VerticalAlignment="Center" />
+      <ComboBox ItemsSource="{Binding ModelOptions}" SelectedItem="{Binding SelectedModel}" MinWidth="220" IsEnabled="{Binding IsIdle}" />
+      <Button Content="↻" Command="{Binding RefreshModelsCommand}" ToolTip.Tip="Reload installed models" />
+      <CheckBox Content="Limit to" IsChecked="{Binding LimitEnabled}" VerticalAlignment="Center" />
+      <NumericUpDown Value="{Binding JobLimit}" Minimum="1" Maximum="1000000" Increment="1" FormatString="0" Width="130" IsEnabled="{Binding LimitEnabled}" />
+      <TextBlock Text="jobs" VerticalAlignment="Center" />
+      <TextBlock Text="{Binding StateText}" VerticalAlignment="Center" FontWeight="SemiBold" Margin="16,0,0,0" />
+    </WrapPanel>
+
+    <TextBlock Grid.Row="2" Text="{Binding StatusMessage}" Foreground="#E0524A" TextWrapping="Wrap" IsVisible="{Binding StatusMessage, Converter={x:Static ObjectConverters.IsNotNull}}" />
+
+    <!-- Overall progress -->
+    <StackPanel Grid.Row="3" Spacing="6">
+      <ProgressBar Value="{Binding ProgressPercent}" Minimum="0" Maximum="100" Height="14" />
+      <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="24">
+        <TextBlock Grid.Column="0" Text="{Binding CountsText}" />
+        <TextBlock Grid.Column="1" Text="{Binding EtaText, StringFormat='ETA {0}'}" />
+        <TextBlock Grid.Column="2" Text="{Binding ElapsedText, StringFormat='Elapsed {0}'}" />
+        <TextBlock Grid.Column="3" Text="{Binding ThroughputText}" />
+      </Grid>
+      <TextBlock Text="{Binding LastError, StringFormat='Last error: {0}'}" Opacity="0.8" TextTrimming="CharacterEllipsis"
+                 IsVisible="{Binding LastError, Converter={x:Static ObjectConverters.IsNotNull}}" />
+    </StackPanel>
+
+    <!-- Stage lanes -->
+    <ItemsControl Grid.Row="4" ItemsSource="{Binding Lanes}">
+      <ItemsControl.ItemsPanel>
+        <ItemsPanelTemplate>
+          <UniformGrid Rows="1" ColumnSpacing="8" />
+        </ItemsPanelTemplate>
+      </ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate>
+        <DataTemplate x:DataType="run:StageLaneViewModel">
+          <Border Padding="10" CornerRadius="6" Background="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}">
+            <StackPanel Spacing="4">
+              <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+              <TextBlock Text="{Binding CurrentItem}" ToolTip.Tip="{Binding CurrentPath}" TextTrimming="CharacterEllipsis" />
+              <TextBlock Text="{Binding CountsText}" Opacity="0.75" />
+              <ProgressBar Value="{Binding TilePercent}" Minimum="0" Maximum="100" Height="6" IsVisible="{Binding ShowsTiles}" />
+              <TextBlock Text="{Binding TilesText}" Opacity="0.75" IsVisible="{Binding ShowsTiles}" />
+            </StackPanel>
+          </Border>
+        </DataTemplate>
+      </ItemsControl.ItemTemplate>
+    </ItemsControl>
+
+    <!-- GPU memory -->
+    <Grid Grid.Row="5" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+      <TextBlock Grid.Column="0" Text="{Binding GpuAdapterText}" VerticalAlignment="Center" />
+      <ProgressBar Grid.Column="1" Value="{Binding GpuUsagePercent}" Minimum="0" Maximum="100" Height="10" VerticalAlignment="Center" />
+      <TextBlock Grid.Column="2" Text="{Binding GpuMemoryText}" VerticalAlignment="Center" />
+    </Grid>
+
+    <!-- Last run -->
+    <TextBlock Grid.Row="6" Text="{Binding LastSummary, StringFormat='Last run: {0}'}" TextWrapping="Wrap"
+               IsVisible="{Binding LastSummary, Converter={x:Static ObjectConverters.IsNotNull}}" />
+
+    <!-- Log tail -->
+    <Border Grid.Row="7" BorderThickness="1" BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}" CornerRadius="4">
+      <ListBox x:Name="LogList" ItemsSource="{Binding LogLines}" FontFamily="Cascadia Mono,Consolas,monospace" FontSize="12" Padding="0">
+        <ListBox.ItemTemplate>
+          <DataTemplate x:DataType="x:String">
+            <TextBlock Text="{Binding}" TextTrimming="CharacterEllipsis" />
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+        <ListBox.Styles>
+          <Style Selector="ListBoxItem">
+            <Setter Property="Padding" Value="6,1" />
+            <Setter Property="MinHeight" Value="0" />
+          </Style>
+        </ListBox.Styles>
+      </ListBox>
+    </Border>
+  </Grid>
+</UserControl>

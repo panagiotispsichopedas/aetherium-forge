@@ -37,7 +37,9 @@ public static class AppHost
         services.AddSingleton<QueuePagePlaceholder>(_ => new QueuePagePlaceholder(new PagePlaceholderViewModel("Queue")));
 
         // ── PAGE: Run (also owns IForgeRunner) ──
-        services.AddSingleton<RunPagePlaceholder>(_ => new RunPagePlaceholder(new PagePlaceholderViewModel("Run")));
+        // ForgeRunner (IForgeRunner), the log-tail sink (re-registers Serilog with the same file sink plus the tail) and RunViewModel.
+        services.AddForgeRunPage();
+        services.AddSingleton<RunPagePlaceholder>(sp => new RunPagePlaceholder(sp.GetRequiredService<Pages.Run.RunViewModel>()));
 
         // ── PAGE: Models ──
         services.AddSingleton<ModelsPagePlaceholder>(_ => new ModelsPagePlaceholder(new PagePlaceholderViewModel("Models")));
