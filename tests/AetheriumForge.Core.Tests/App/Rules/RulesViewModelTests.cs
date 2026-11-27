@@ -193,16 +193,176 @@ public sealed class RulesViewModelTests : IAsyncLifetime
     }
 
     [Fact]
-    public void DeleteGroup_Selected_RemovesIt()
+    public async Task DeleteGroup_Confirmed_RemovesIt()
     {
         // Arrange
         _vm.SelectedGroup = Group("Clutter");
+        _services.ConfirmAnswer = true;
 
         // Act
-        _vm.DeleteGroupCommand.Execute(null);
+        await _vm.DeleteGroupCommand.ExecuteAsync(null);
 
         // Assert
         Assert.Equal(["Large"], _vm.Groups.Select(g => g.Name));
+    }
+
+    [Fact]
+    public async Task DeleteGroup_Declined_KeepsGroup()
+    {
+        // Arrange
+        _vm.SelectedGroup = Group("Clutter");
+        _services.ConfirmAnswer = false;
+
+        // Act
+        await _vm.DeleteGroupCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal(["Clutter", "Large"], _vm.Groups.Select(g => g.Name));
+    }
+
+    [Fact]
+    public async Task Validation_AllGroupsDeleted_ShowsError()
+    {
+        // Arrange
+        _services.ConfirmAnswer = true;
+
+        // Act
+        await _vm.DeleteGroupCommand.ExecuteAsync(null);
+        await _vm.DeleteGroupCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal("At least one group is required; with none, every texture is skipped.", _vm.ValidationError);
+    }
+
+    [Fact]
+    public void Validation_DuplicateNameDifferentCase_ShowsError()
+    {
+        // Act
+        Group("Large").Name = "CLUTTER";
+
+        // Assert
+        Assert.Equal("Group names must be unique: 'Clutter' is used more than once.", _vm.ValidationError);
+    }
+
+    [Fact]
+    public async Task ApplyAsync_ManyRowsNewlySkippedAndDeclined_ChangesNothing()
+    {
+        // Arrange: excluding the landscape folder skips 1 of 2 rows (50 % > 10 %).
+        _vm.ExclusionsText += $"{Environment.NewLine}textures\\landscape\\";
+        _services.ConfirmAnswer = false;
+
+        // Act
+        await _vm.ApplyCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal((JobState.Queued, (string?)null), ((await JobAsync(RockPath)).State, await _store.GetProjectValueAsync(RulesApplier.RulesProjectKey, Ct)));
+    }
+
+    [Fact]
+    public async Task ApplyAsync_ManyRowsNewlySkipped_AsksWithCount()
+    {
+        // Arrange
+        _vm.ExclusionsText += $"{Environment.NewLine}textures\\landscape\\";
+
+        // Act
+        await _vm.ApplyCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal(["1 textures would be skipped. Apply anyway?"], _services.Questions);
+    }
+
+    [Fact]
+    public async Task ApplyAsync_RunStartsDuringConfirmation_ChangesNothing()
+    {
+        // Arrange
+        var job = await JobAsync(ClutterPath);
+        await _store.MarkDoneAsync(job.Id, 2.0, Ct);
+        _services.ConfirmAnswer = true;
+        _services.WhileConfirming = () => _runner.SetState(PipelineState.Running);
+        Group("Clutter").CapText = "1024";
+
+        // Act
+        await _vm.ApplyCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal((JobState.Done, 2048), ((await JobAsync(ClutterPath)).State, (await JobAsync(ClutterPath)).Target));
+    }
+
+    [Fact]
+    public async Task ApplyAsync_NormalStrengthChanged_AsksAboutFinishedRows()
+    {
+        // Arrange
+        var job = await JobAsync(ClutterPath);
+        await _store.MarkDoneAsync(job.Id, 2.0, Ct);
+        Group("Clutter").NormalStrengthText = "2";
+
+        // Act
+        await _vm.ApplyCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal(["1 finished textures would change. Re-queue them?"], _services.Questions);
+    }
+
+    [Fact]
+    public async Task ExportAsync_WriteFails_ShowsError()
+    {
+        // Arrange
+        _services.SaveException = new IOException("disk full");
+
+        // Act
+        await _vm.ExportCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal("Could not write the file: disk full", _vm.StatusMessage);
+    }
+
+    [Fact]
+    public async Task ImportAsync_ReadFails_ShowsError()
+    {
+        // Arrange
+        _services.OpenException = new UnauthorizedAccessException("denied");
+
+        // Act
+        await _vm.ImportCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal("Could not read the file: denied", _vm.StatusMessage);
+    }
+
+    [Fact]
+    public async Task JobsChanged_RunActive_CoalescesReloadToOncePerSecond()
+    {
+        // Arrange
+        _navigation.NavigateTo(AppPage.Rules);
+        await WaitForAsync(() => !_vm.IsBusy);
+        _runner.SetState(PipelineState.Running);
+        await _store.UpsertJobsAsync([Job(@"textures\landscape\rock02.dds", "Large", 2048)], Ct);
+
+        var recountBefore = _vm.PendingRecompute;
+
+        // Act: three changes within the coalescing window give one reload, after the window.
+        _session.NotifyJobsChanged();
+        _session.NotifyJobsChanged();
+        _session.NotifyJobsChanged();
+        _time.Advance(RulesViewModel.ReloadCoalesceDelay - TimeSpan.FromMilliseconds(1));
+        await Task.Delay(50, Ct);
+        bool reloadedEarly = !ReferenceEquals(recountBefore, _vm.PendingRecompute);
+        _time.Advance(TimeSpan.FromMilliseconds(1));
+        await WaitForAsync(() => !ReferenceEquals(recountBefore, _vm.PendingRecompute));
+        await SettleAsync();
+
+        // Assert
+        Assert.Equal((false, 3), (reloadedEarly, _vm.Preview!.TotalJobs));
+    }
+
+    private static async Task WaitForAsync(Func<bool> condition)
+    {
+        for (int i = 0; i < 200 && !condition(); i++)
+        {
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+
+        Assert.True(condition(), "Timed out waiting for the view model.");
     }
 
     [Fact]
@@ -291,6 +451,7 @@ public sealed class RulesViewModelTests : IAsyncLifetime
     {
         // Arrange
         _vm.ExclusionsText += $"{Environment.NewLine}textures\\landscape\\";
+        _services.ConfirmAnswer = true;
 
         // Act
         await _vm.ApplyCommand.ExecuteAsync(null);
@@ -435,7 +596,7 @@ public sealed class RulesViewModelTests : IAsyncLifetime
     {
         // Arrange
         _services.ConfirmAnswer = true;
-        _vm.DeleteGroupCommand.Execute(null);
+        await _vm.DeleteGroupCommand.ExecuteAsync(null);
 
         // Act
         await _vm.ResetToDefaultsCommand.ExecuteAsync(null);
@@ -448,8 +609,9 @@ public sealed class RulesViewModelTests : IAsyncLifetime
     public async Task ResetToDefaults_Declined_KeepsEdits()
     {
         // Arrange
-        _services.ConfirmAnswer = false;
-        _vm.DeleteGroupCommand.Execute(null);
+        _services.Answers.Enqueue(true);
+        _services.Answers.Enqueue(false);
+        await _vm.DeleteGroupCommand.ExecuteAsync(null);
 
         // Act
         await _vm.ResetToDefaultsCommand.ExecuteAsync(null);

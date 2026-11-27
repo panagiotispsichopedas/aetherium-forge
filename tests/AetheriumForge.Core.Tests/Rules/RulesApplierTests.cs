@@ -17,7 +17,7 @@ public sealed class RulesApplierTests
     };
 
     private static RulesPreview Preview(IEnumerable<JobRecord> jobs, ForgeRules rules, Func<string, double?>? timings = null) =>
-        RulesApplier.Preview(jobs, rules, timings, TestContext.Current.CancellationToken);
+        RulesApplier.Preview(jobs, rules, new RulesPreviewOptions { SecondsPerSourceMegapixel = timings }, TestContext.Current.CancellationToken);
 
     private static JobRecord Job(
         long id,
@@ -271,5 +271,95 @@ public sealed class RulesApplierTests
 
         // Assert
         Assert.Equal(expected, result);
+    }
+
+    [Fact]
+    public void Preview_DoneRowNormalStrengthChanged_IsListedInDoneChanges()
+    {
+        // Arrange
+        JobRecord[] jobs = [Job(1, @"textures\clutter\a.dds", state: JobState.Done, group: "Clutter", target: 2048, model: "model-a")];
+        var edited = _rules with { Groups = [_rules.Groups[0] with { NormalStrength = 2.0 }, _rules.Groups[1]] };
+        var options = new RulesPreviewOptions { DoneLookDiffers = RulesApplier.LookDiffersFrom(_rules) };
+
+        // Act
+        var preview = RulesApplier.Preview(jobs, edited, options, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Single(preview.DoneChanges);
+    }
+
+    [Fact]
+    public void Preview_DoneRowLookChanged_IsListedInDoneChanges()
+    {
+        // Arrange
+        JobRecord[] jobs = [Job(1, @"textures\clutter\a.dds", state: JobState.Done, group: "Clutter", target: 2048, model: "model-a")];
+        var edited = _rules with { Groups = [_rules.Groups[0] with { Look = new LookSettings { Saturation = 1.3 } }, _rules.Groups[1]] };
+        var options = new RulesPreviewOptions { DoneLookDiffers = RulesApplier.LookDiffersFrom(_rules) };
+
+        // Act
+        var preview = RulesApplier.Preview(jobs, edited, options, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Single(preview.DoneChanges);
+    }
+
+    [Fact]
+    public void Preview_DoneRowSameLookAndStrength_ProducesNoChange()
+    {
+        // Arrange
+        JobRecord[] jobs = [Job(1, @"textures\clutter\a.dds", state: JobState.Done, group: "Clutter", target: 2048, model: "model-a")];
+        var options = new RulesPreviewOptions { DoneLookDiffers = RulesApplier.LookDiffersFrom(_rules) };
+
+        // Act
+        var preview = RulesApplier.Preview(jobs, _rules, options, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Empty(preview.DoneChanges);
+    }
+
+    [Fact]
+    public void Preview_FailedRow_IsCountedButNotTimed()
+    {
+        // Arrange
+        JobRecord[] jobs = [Job(1, @"textures\clutter\a.dds", 1000, 1000, JobState.Failed, "Clutter", 2048, "model-a")];
+
+        // Act
+        var preview = Preview(jobs, _rules, _ => 5.0);
+
+        // Assert
+        Assert.Equal((1, 0.0), (preview.UpscaledCount, preview.EstimatedSeconds));
+    }
+
+    [Fact]
+    public void Preview_RuleSkippedRowNowQueued_IsTimed()
+    {
+        // Arrange
+        JobRecord[] jobs = [Job(1, @"textures\clutter\a.dds", 1000, 1000, JobState.Skipped, error: "NoMatchingGroup")];
+
+        // Act
+        var preview = Preview(jobs, _rules, _ => 5.0);
+
+        // Assert
+        Assert.Equal(5.0, preview.EstimatedSeconds!.Value, 6);
+    }
+
+    [Fact]
+    public void Validate_NoGroups_ReturnsMessage()
+    {
+        // Act
+        var error = RulesApplier.Validate(_rules with { Groups = [] });
+
+        // Assert
+        Assert.Equal("At least one group is required; with none, every texture is skipped.", error);
+    }
+
+    [Fact]
+    public void Validate_DuplicateNamesDifferentCase_ReturnsMessage()
+    {
+        // Act
+        var error = RulesApplier.Validate(_rules with { Groups = [_rules.Groups[0], _rules.Groups[1] with { Name = "clutter" }] });
+
+        // Assert
+        Assert.Equal("Group names must be unique: 'Clutter' is used more than once.", error);
     }
 }

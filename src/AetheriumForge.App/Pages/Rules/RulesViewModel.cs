@@ -23,6 +23,15 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
     /// <summary>The debounce between the last edit and the background recount.</summary>
     public static readonly TimeSpan RecomputeDelay = TimeSpan.FromMilliseconds(300);
 
+    /// <summary>While a run is active, job-row reloads are coalesced to at most one per this interval.</summary>
+    public static readonly TimeSpan ReloadCoalesceDelay = TimeSpan.FromSeconds(1);
+
+    /// <summary>Apply asks first when it would newly skip more than this many textures.</summary>
+    public const int MassSkipCount = 50;
+
+    /// <summary>Apply asks first when it would newly skip more than this fraction of all textures.</summary>
+    public const double MassSkipFraction = 0.10;
+
     private readonly IProjectSession _session;
     private readonly INavigationService _navigation;
     private readonly IRulesPageServices _services;
@@ -36,6 +45,8 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
     private CancellationTokenSource? _recomputeCts;
     private ProjectInfo? _loadedProject;
     private bool _rowsStale;
+    private bool _reloading;
+    private int _rowsGeneration;
     private bool _populating;
 
     /// <summary>Initialises the page.</summary>
@@ -187,8 +198,9 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
         try
         {
             var rules = await ReadStoredRulesAsync(store).ConfigureAwait(true) ?? project.Rules;
+            int generation = _rowsGeneration;
             _rows = await ReadRowsAsync(store).ConfigureAwait(true);
-            _rowsStale = false;
+            _rowsStale = generation != _rowsGeneration;
             var timings = await _services.LoadSecondsPerMegapixelAsync().ConfigureAwait(true);
             _timings = timings.Count == 0 ? null : model => timings.TryGetValue(GpuProfiler.GetModelFamily(model), out double spm) ? spm : null;
             LoadModels(rules);
@@ -280,9 +292,11 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand(CanExecute = nameof(HasSelection))]
-    private void DeleteGroup()
+    private async Task DeleteGroupAsync()
     {
-        if (SelectedGroup is not { } selected)
+        if (SelectedGroup is not { } selected
+            || !await _services.ConfirmAsync("Delete group", $"Delete the group '{selected.Name}'? Nothing is saved until you apply.").ConfigureAwait(true)
+            || !Groups.Contains(selected))
         {
             return;
         }
@@ -319,10 +333,11 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
         try
         {
             // Looks are edited on Compare; take the project's current looks so this Apply does not overwrite them.
-            rules = await MergeStoredLooksAsync(store, rules).ConfigureAwait(true);
+            var stored = await ReadStoredRulesAsync(store).ConfigureAwait(true) ?? _baseline;
+            rules = MergeLooks(stored, rules);
             var rows = await ReadRowsAsync(store).ConfigureAwait(true);
-            var timings = _timings;
-            var preview = await Task.Run(() => RulesApplier.Preview(rows, rules, timings)).ConfigureAwait(true);
+            var options = new RulesPreviewOptions { SecondsPerSourceMegapixel = _timings, DoneLookDiffers = RulesApplier.LookDiffersFrom(stored) };
+            var preview = await Task.Run(() => RulesApplier.Preview(rows, rules, options)).ConfigureAwait(true);
 
             var changes = new List<JobRuleChange>(preview.Changes);
             int done = preview.DoneChanges.Count;
@@ -334,8 +349,24 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
                 changes.AddRange(preview.DoneChanges);
             }
 
-            await store.SetProjectValueAsync(RulesApplier.RulesProjectKey, rules.ToJson()).ConfigureAwait(true);
-            int updated = await store.ApplyRuleChangesAsync(changes).ConfigureAwait(true);
+            int newlySkipped = changes.Count(c => c.NewState == JobState.Skipped && c.OldState != JobState.Skipped);
+            if ((newlySkipped > MassSkipCount || newlySkipped > preview.TotalJobs * MassSkipFraction)
+                && !await _services.ConfirmAsync(
+                    "Many textures would be skipped",
+                    $"{newlySkipped.ToString("N0", CultureInfo.CurrentCulture)} textures would be skipped. Apply anyway?").ConfigureAwait(true))
+            {
+                StatusMessage = "Apply cancelled; nothing was changed.";
+                return;
+            }
+
+            // A run may have started while a dialog was open; the store never touches Running rows, but the rules must not change mid-run.
+            if (IsRunActive)
+            {
+                StatusMessage = "A run started; apply again when it ends.";
+                return;
+            }
+
+            int updated = await store.ApplyRuleChangesAsync(changes, rules.ToJson(), CancellationToken.None).ConfigureAwait(true);
             RulesLog.Applied(_logger, updated, done, requeue);
 
             _baseline = rules;
@@ -369,7 +400,17 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private async Task ImportAsync()
     {
-        string? json = await _services.OpenJsonAsync().ConfigureAwait(true);
+        string? json;
+        try
+        {
+            json = await _services.OpenJsonAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            StatusMessage = $"Could not read the file: {ex.Message}";
+            return;
+        }
+
         if (json is null)
         {
             return;
@@ -397,9 +438,16 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
             return;
         }
 
-        if (await _services.SaveJsonAsync("forge-rules.json", rules.ToJson()).ConfigureAwait(true))
+        try
         {
-            StatusMessage = "Rules exported.";
+            if (await _services.SaveJsonAsync("forge-rules.json", rules.ToJson()).ConfigureAwait(true))
+            {
+                StatusMessage = "Rules exported.";
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            StatusMessage = $"Could not write the file: {ex.Message}";
         }
     }
 
@@ -468,14 +516,9 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
         }
     }
 
-    private async Task<ForgeRules> MergeStoredLooksAsync(JobStore store, ForgeRules rules)
+    private ForgeRules MergeLooks(ForgeRules stored, ForgeRules rules)
     {
-        if (await ReadStoredRulesAsync(store).ConfigureAwait(true) is not { } stored)
-        {
-            return rules;
-        }
-
-        var looks = stored.Groups.GroupBy(g => g.Name, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First().Look, StringComparer.Ordinal);
+        var looks = stored.Groups.GroupBy(g => g.Name, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First().Look, StringComparer.OrdinalIgnoreCase);
         var merged = rules with { Groups = [.. rules.Groups.Select(g => looks.TryGetValue(g.Name, out var look) ? g with { Look = look } : g)] };
         for (int i = 0; i < Groups.Count && i < merged.Groups.Count; i++)
         {
@@ -600,8 +643,8 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
             }
 
             var rows = _rows;
-            var timings = _timings;
-            var preview = await Task.Run(() => RulesApplier.Preview(rows, rules, timings, ct), ct).ConfigureAwait(true);
+            var options = new RulesPreviewOptions { SecondsPerSourceMegapixel = _timings, DoneLookDiffers = RulesApplier.LookDiffersFrom(_baseline) };
+            var preview = await Task.Run(() => RulesApplier.Preview(rows, rules, options, ct), ct).ConfigureAwait(true);
             ct.ThrowIfCancellationRequested();
             ShowPreview(preview);
         }
@@ -636,14 +679,37 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
 
     private async Task ReloadRowsAsync()
     {
-        if (_session.Store is not { } store)
+        if (_reloading)
         {
+            // The running reload loops until it has read the newest generation.
             return;
         }
 
+        _reloading = true;
         try
         {
-            _rows = await ReadRowsAsync(store).ConfigureAwait(true);
+            IReadOnlyList<JobRecord> rows;
+            int generation;
+            do
+            {
+                // While a run is active the pipeline changes rows constantly; read at most once per ReloadCoalesceDelay.
+                if (IsRunActive)
+                {
+                    await Task.Delay(ReloadCoalesceDelay, _timeProvider).ConfigureAwait(true);
+                }
+
+                generation = _rowsGeneration;
+                if (_session.Store is not { } store)
+                {
+                    return;
+                }
+
+                rows = await ReadRowsAsync(store).ConfigureAwait(true);
+            }
+            while (generation != _rowsGeneration);
+
+            // Rows read for an older generation (a newer change arrived meanwhile) were dropped by the loop above.
+            _rows = rows;
             _rowsStale = false;
             ScheduleRecompute();
         }
@@ -651,6 +717,10 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
         {
             RulesLog.ReloadFailed(_logger, ex);
             StatusMessage = $"Could not reload the jobs: {ex.Message}";
+        }
+        finally
+        {
+            _reloading = false;
         }
     }
 
@@ -661,7 +731,7 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
             return;
         }
 
-        var looks = stored.Groups.GroupBy(g => g.Name, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First().Look, StringComparer.Ordinal);
+        var looks = stored.Groups.GroupBy(g => g.Name, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First().Look, StringComparer.OrdinalIgnoreCase);
         foreach (var group in Groups)
         {
             if (looks.TryGetValue(group.Name.Trim(), out var look))
@@ -675,6 +745,7 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
 
     private void OnJobsChanged(object? sender, EventArgs e) => _services.PostToUi(() =>
     {
+        _rowsGeneration++;
         if (_navigation.Current == AppPage.Rules)
         {
             _ = RunSafeAsync(ReloadRowsAsync);

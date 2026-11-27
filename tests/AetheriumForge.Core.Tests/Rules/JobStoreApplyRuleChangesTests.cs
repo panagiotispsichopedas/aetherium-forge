@@ -146,4 +146,31 @@ public sealed class JobStoreApplyRuleChangesTests : IAsyncLifetime
         // Assert
         Assert.Equal(JobState.Queued, (await SingleAsync(a.Path)).State);
     }
+
+    [Fact]
+    public async Task ApplyRuleChangesAsync_WithRulesJson_StoresRules()
+    {
+        // Arrange
+        var job = await SeedAsync(@"textures\a.dds");
+
+        // Act
+        await _store.ApplyRuleChangesAsync([new JobRuleChange(job.Id, job.Path, JobState.Queued, JobState.Skipped, null, 0, null, "TooSmall")], "{\"minSource\":1}", Ct);
+
+        // Assert
+        Assert.Equal("{\"minSource\":1}", await _store.GetProjectValueAsync(RulesApplier.RulesProjectKey, Ct));
+    }
+
+    [Fact]
+    public async Task ApplyRuleChangesAsync_RowChangeFails_DoesNotStoreRules()
+    {
+        // Arrange
+        var job = await SeedAsync(@"textures\a.dds");
+        JobRuleChange[] changes = [new(job.Id, job.Path, JobState.Queued, JobState.Done, "New", 2048, "m", null)];
+
+        // Act
+        await Assert.ThrowsAsync<ArgumentException>(() => _store.ApplyRuleChangesAsync(changes, "{}", Ct));
+
+        // Assert
+        Assert.Null(await _store.GetProjectValueAsync(RulesApplier.RulesProjectKey, Ct));
+    }
 }

@@ -36,17 +36,17 @@ public static class RulesApplier
     /// </summary>
     /// <param name="jobs">The project's job rows.</param>
     /// <param name="rules">The edited rules. They must be valid (see <see cref="Validate"/>).</param>
-    /// <param name="secondsPerSourceMegapixel">
-    /// Optional lookup from a model name to measured seconds per source megapixel (from the GPU profile); returns <see langword="null"/>
-    /// for an uncalibrated model. When omitted no time is estimated.
-    /// </param>
+    /// <param name="options">Optional timings and the look comparison for finished rows.</param>
     /// <param name="ct">Cancels the evaluation (checked between rows).</param>
     /// <returns>The preview.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="jobs"/> or <paramref name="rules"/> is <see langword="null"/>.</exception>
-    public static RulesPreview Preview(IEnumerable<JobRecord> jobs, ForgeRules rules, Func<string, double?>? secondsPerSourceMegapixel = null, CancellationToken ct = default)
+    public static RulesPreview Preview(IEnumerable<JobRecord> jobs, ForgeRules rules, RulesPreviewOptions? options = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(jobs);
         ArgumentNullException.ThrowIfNull(rules);
+
+        Func<string, double?>? secondsPerSourceMegapixel = options?.SecondsPerSourceMegapixel;
+        Func<JobRecord, GroupRule, bool>? doneLookDiffers = options?.DoneLookDiffers;
 
         // Evaluate with groups renamed to their index, so counts stay per group even when two groups share a name.
         var indexed = rules with { Groups = [.. rules.Groups.Select((g, i) => g with { Name = i.ToString(CultureInfo.InvariantCulture) })] };
@@ -89,7 +89,9 @@ public static class RulesApplier
                 int index = groupIndex!.Value;
                 counts[index]++;
                 bytes[index] += (long)Math.Ceiling((double)decision.TargetWidth * decision.TargetHeight * Bc7BytesPerPixelWithMips);
-                if (job.State != JobState.Done)
+                // Time covers the rows a run would process: Queued, Running, and rule-skipped rows these rules queue. Failed and Done rows wait
+                // for an explicit retry or re-queue.
+                if (job.State is JobState.Queued or JobState.Running or JobState.Skipped)
                 {
                     if (secondsPerSourceMegapixel?.Invoke(decision.Model!) is double spm)
                     {
@@ -102,7 +104,8 @@ public static class RulesApplier
                 }
             }
 
-            if (ToChange(job, decision, groupName) is { } change)
+            GroupRule? groupRule = groupIndex is int ri ? rules.Groups[ri] : null;
+            if (ToChange(job, decision, groupName, groupRule, doneLookDiffers) is { } change)
             {
                 (job.State == JobState.Done ? doneChanges : changes).Add(change);
             }
@@ -119,7 +122,33 @@ public static class RulesApplier
     }
 
     /// <summary>
-    /// Validates <paramref name="rules"/> with the same checks as <see cref="ForgeRules.FromJson"/>.
+    /// Returns a <see cref="RulesPreviewOptions.DoneLookDiffers"/> comparison against the rules the finished rows were made with:
+    /// a finished row's look differs when the new group's normal strength or look differs from its previous group's (matched by name,
+    /// case-insensitively). A row whose previous group is unknown counts as different.
+    /// </summary>
+    /// <param name="previous">The rules stored in the project before the edit.</param>
+    /// <returns>The comparison.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="previous"/> is <see langword="null"/>.</exception>
+    public static Func<JobRecord, GroupRule, bool> LookDiffersFrom(ForgeRules previous)
+    {
+        ArgumentNullException.ThrowIfNull(previous);
+
+        var byName = new Dictionary<string, GroupRule>(StringComparer.OrdinalIgnoreCase);
+        foreach (GroupRule group in previous.Groups)
+        {
+            byName.TryAdd(group.Name, group);
+        }
+
+        return (job, group) =>
+            job.Group is null
+            || !byName.TryGetValue(job.Group, out GroupRule? old)
+            || !old.NormalStrength.Equals(group.NormalStrength)
+            || !Equals(old.Look, group.Look);
+    }
+
+    /// <summary>
+    /// Validates <paramref name="rules"/> with the same checks as <see cref="ForgeRules.FromJson"/>, plus the editor's checks: at least one
+    /// group, and unique group names (case-insensitive).
     /// </summary>
     /// <param name="rules">The rules.</param>
     /// <returns>The first problem found, or <see langword="null"/> when the rules are valid.</returns>
@@ -127,6 +156,18 @@ public static class RulesApplier
     public static string? Validate(ForgeRules rules)
     {
         ArgumentNullException.ThrowIfNull(rules);
+
+        if (rules.Groups is { Count: 0 })
+        {
+            return "At least one group is required; with none, every texture is skipped.";
+        }
+
+        if (rules.Groups?.Where(g => g is not null && !string.IsNullOrWhiteSpace(g.Name))
+                .GroupBy(g => g.Name.Trim(), StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault(g => g.Count() > 1) is { } duplicate)
+        {
+            return $"Group names must be unique: '{duplicate.Key}' is used more than once.";
+        }
 
         try
         {
@@ -145,7 +186,7 @@ public static class RulesApplier
     /// <returns><see langword="true"/> for a rule skip reason.</returns>
     public static bool IsRuleSkip(string? error) => error is not null && _ruleSkipNames.Contains(error);
 
-    private static JobRuleChange? ToChange(JobRecord job, TextureDecision decision, string? groupName)
+    private static JobRuleChange? ToChange(JobRecord job, TextureDecision decision, string? groupName, GroupRule? groupRule, Func<JobRecord, GroupRule, bool>? doneLookDiffers)
     {
         JobState newState = decision.IsSkipped ? JobState.Skipped : JobState.Queued;
         int target = Math.Max(decision.TargetWidth, decision.TargetHeight);
@@ -163,16 +204,36 @@ public static class RulesApplier
                 return same ? null : new JobRuleChange(job.Id, job.Path, job.State, newState, groupName, target, decision.Model, error);
 
             case JobState.Done:
-                // A finished texture changes only when its output would differ: the rules now skip it, or its target or model changed.
+                // A finished texture changes only when its output would differ: the rules now skip it, or its target, model, normal
+                // strength or look changed.
                 bool unchanged = !decision.IsSkipped
                     && job.Target == target
-                    && string.Equals(job.Model, decision.Model, StringComparison.Ordinal);
+                    && string.Equals(job.Model, decision.Model, StringComparison.Ordinal)
+                    && !(groupRule is not null && doneLookDiffers?.Invoke(job, groupRule) == true);
                 return unchanged ? null : new JobRuleChange(job.Id, job.Path, job.State, newState, groupName, target, decision.Model, error);
 
             default:
                 return null;
         }
     }
+}
+
+/// <summary>
+/// Options for <see cref="RulesApplier.Preview"/>.
+/// </summary>
+public sealed record RulesPreviewOptions
+{
+    /// <summary>
+    /// Gets a lookup from a model name to measured seconds per source megapixel (from the GPU profile); it returns <see langword="null"/> for
+    /// an uncalibrated model. When <see langword="null"/>, no time is estimated.
+    /// </summary>
+    public Func<string, double?>? SecondsPerSourceMegapixel { get; init; }
+
+    /// <summary>
+    /// Gets a comparison that returns <see langword="true"/> when a finished row was made with a different look or normal strength than
+    /// its new group (see <see cref="RulesApplier.LookDiffersFrom"/>). When <see langword="null"/>, only target and model are compared.
+    /// </summary>
+    public Func<JobRecord, GroupRule, bool>? DoneLookDiffers { get; init; }
 }
 
 /// <summary>
@@ -220,7 +281,7 @@ public sealed record RulesPreview(
 public sealed record GroupEstimate(int Index, string Name, int Count, long EstimatedBytes, double? EstimatedSeconds, int UntimedCount);
 
 /// <summary>
-/// One row update produced by <see cref="RulesApplier.Preview"/> and applied by <see cref="JobStore.ApplyRuleChangesAsync"/>.
+/// One row update produced by <see cref="RulesApplier.Preview"/> and applied by <see cref="JobStore.ApplyRuleChangesAsync(IEnumerable{JobRuleChange}, string?, CancellationToken)"/>.
 /// </summary>
 /// <param name="Id">The job id.</param>
 /// <param name="Path">The canonical path (for display).</param>

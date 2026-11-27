@@ -129,6 +129,13 @@ public sealed class AvaloniaRulesPageServices(ILogger<AvaloniaRulesPageServices>
             return false;
         }
 
+        if (file.TryGetLocalPath() is { } localPath)
+        {
+            await RulesFileIo.WriteAtomicAsync(localPath, json);
+            return true;
+        }
+
+        // Not a local file (a sandboxed or virtual location): only a direct write is possible.
         await using var stream = await file.OpenWriteAsync();
         if (stream.CanSeek)
         {

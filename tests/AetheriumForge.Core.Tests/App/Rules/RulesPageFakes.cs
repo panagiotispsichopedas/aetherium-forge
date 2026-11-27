@@ -123,6 +123,16 @@ internal sealed class FakeRulesPageServices : IRulesPageServices
 
     public bool ConfirmAnswer { get; set; }
 
+    /// <summary>Answers used first, in order; <see cref="ConfirmAnswer"/> after they run out.</summary>
+    public Queue<bool> Answers { get; } = new();
+
+    /// <summary>Runs while a confirmation is open (simulates something happening behind the dialog).</summary>
+    public Action? WhileConfirming { get; set; }
+
+    public Exception? OpenException { get; set; }
+
+    public Exception? SaveException { get; set; }
+
     public string? JsonToOpen { get; set; }
 
     public string? SavedJson { get; private set; }
@@ -136,13 +146,19 @@ internal sealed class FakeRulesPageServices : IRulesPageServices
     public Task<bool> ConfirmAsync(string title, string message)
     {
         Questions.Add(message);
-        return Task.FromResult(ConfirmAnswer);
+        WhileConfirming?.Invoke();
+        return Task.FromResult(Answers.Count > 0 ? Answers.Dequeue() : ConfirmAnswer);
     }
 
-    public Task<string?> OpenJsonAsync() => Task.FromResult(JsonToOpen);
+    public Task<string?> OpenJsonAsync() => OpenException is { } ex ? Task.FromException<string?>(ex) : Task.FromResult(JsonToOpen);
 
     public Task<bool> SaveJsonAsync(string suggestedFileName, string json)
     {
+        if (SaveException is { } ex)
+        {
+            return Task.FromException<bool>(ex);
+        }
+
         SavedJson = json;
         return Task.FromResult(true);
     }

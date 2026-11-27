@@ -444,7 +444,19 @@ public sealed class JobStore : IAsyncDisposable
     /// <returns>The number of rows updated.</returns>
     /// <remarks>A row leaving <see cref="JobState.Done"/> loses its processing time and finish time; its attempt count is kept.</remarks>
     /// <exception cref="ArgumentException">A change targets a state other than <see cref="JobState.Queued"/> or <see cref="JobState.Skipped"/>.</exception>
-    public async Task<int> ApplyRuleChangesAsync(IEnumerable<Rules.JobRuleChange> changes, CancellationToken ct = default)
+    public Task<int> ApplyRuleChangesAsync(IEnumerable<Rules.JobRuleChange> changes, CancellationToken ct = default) =>
+        ApplyRuleChangesAsync(changes, null, ct);
+
+    /// <summary>
+    /// Applies rule changes like <see cref="ApplyRuleChangesAsync(IEnumerable{Rules.JobRuleChange}, CancellationToken)"/> and, in the same
+    /// transaction, stores <paramref name="rulesJson"/> under <see cref="Rules.RulesApplier.RulesProjectKey"/>: either both are written or neither.
+    /// </summary>
+    /// <param name="changes">The changes.</param>
+    /// <param name="rulesJson">The rules JSON to store, or <see langword="null"/> to leave the stored rules alone.</param>
+    /// <param name="ct">Cancels the operation; nothing is written when cancelled.</param>
+    /// <returns>The number of rows updated.</returns>
+    /// <exception cref="ArgumentException">A change targets a state other than <see cref="JobState.Queued"/> or <see cref="JobState.Skipped"/>.</exception>
+    public async Task<int> ApplyRuleChangesAsync(IEnumerable<Rules.JobRuleChange> changes, string? rulesJson, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(changes);
 
@@ -493,6 +505,19 @@ public sealed class JobStore : IAsyncDisposable
                         error.Value = (object?)change.Error ?? DBNull.Value;
 
                         affected += await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    }
+
+                    if (rulesJson is not null)
+                    {
+                        var setRules = connection.CreateCommand();
+                        await using (setRules.ConfigureAwait(false))
+                        {
+                            setRules.Transaction = transaction;
+                            setRules.CommandText = "INSERT INTO project (key, value) VALUES ($key, $value) ON CONFLICT(key) DO UPDATE SET value = excluded.value;";
+                            setRules.Parameters.AddWithValue("$key", Rules.RulesApplier.RulesProjectKey);
+                            setRules.Parameters.AddWithValue("$value", rulesJson);
+                            await setRules.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        }
                     }
 
                     await transaction.CommitAsync(ct).ConfigureAwait(false);
