@@ -17,6 +17,9 @@ public sealed class JobStore : IAsyncDisposable
     /// <summary>Error recorded on jobs that a rescan removed from the gap set.</summary>
     public const string ProvidedByModError = "now provided by a mod";
 
+    /// <summary>How long a connection waits for another writer's lock before failing with <c>SQLITE_BUSY</c>, in milliseconds.</summary>
+    public const int BusyTimeoutMilliseconds = 5000;
+
     private const string SchemaSql = """
         CREATE TABLE IF NOT EXISTS project (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS job (
@@ -284,14 +287,38 @@ public sealed class JobStore : IAsyncDisposable
     }
 
     /// <summary>
-    /// Marks a job as taken by the pipeline.
+    /// Marks a <see cref="JobState.Queued"/> job as taken by the pipeline.
     /// </summary>
     /// <param name="id">The job id.</param>
     /// <param name="ct">Cancels the operation.</param>
     /// <returns>A task that completes when the state is stored.</returns>
     /// <exception cref="KeyNotFoundException">No job has this id.</exception>
-    public Task MarkRunningAsync(long id, CancellationToken ct = default) =>
-        UpdateJobAsync(id, "UPDATE job SET state = 'Running' WHERE id = $id;", [], ct);
+    /// <exception cref="InvalidOperationException">The job is not <see cref="JobState.Queued"/> (for example a rescan skipped it).</exception>
+    public async Task MarkRunningAsync(long id, CancellationToken ct = default)
+    {
+        if (await TryMarkRunningAsync(id, ct).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        var exists = await ExecuteScalarAsync("SELECT COUNT(*) FROM job WHERE id = $id;", [("$id", id)], ct).ConfigureAwait(false);
+        if (Convert.ToInt64(exists, CultureInfo.InvariantCulture) == 0)
+        {
+            throw new KeyNotFoundException($"Job {id} does not exist.");
+        }
+
+        throw new InvalidOperationException($"Job {id} is no longer queued.");
+    }
+
+    /// <summary>
+    /// Marks a job as taken by the pipeline only if it is still <see cref="JobState.Queued"/>. A job that a rescan skipped (or that
+    /// another writer changed) since it was read is left alone, so a rescan during a run wins.
+    /// </summary>
+    /// <param name="id">The job id.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns><see langword="true"/> when the job was Queued and is now Running; <see langword="false"/> when it is missing or not Queued.</returns>
+    public async Task<bool> TryMarkRunningAsync(long id, CancellationToken ct = default) =>
+        await ExecuteNonQueryAsync("UPDATE job SET state = 'Running' WHERE id = $id AND state = 'Queued';", [("$id", id)], ct).ConfigureAwait(false) == 1;
 
     /// <summary>
     /// Marks a job as finished successfully and clears its error.
@@ -316,14 +343,27 @@ public sealed class JobStore : IAsyncDisposable
     /// <param name="ct">Cancels the operation.</param>
     /// <returns>A task that completes when the state is stored.</returns>
     /// <exception cref="KeyNotFoundException">No job has this id.</exception>
-    public Task MarkFailedAsync(long id, string error, CancellationToken ct = default)
+    public Task MarkFailedAsync(long id, string error, CancellationToken ct = default) => MarkFailedAsync(id, error, 1, ct);
+
+    /// <summary>
+    /// Marks a job as failed, records the error and adds the attempts made (for example every in-run retry) to its attempt count.
+    /// </summary>
+    /// <param name="id">The job id.</param>
+    /// <param name="error">The error message.</param>
+    /// <param name="attempts">Attempts made since the last record; 0 for a job that was rejected without being attempted.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>A task that completes when the state is stored.</returns>
+    /// <exception cref="KeyNotFoundException">No job has this id.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="attempts"/> is negative.</exception>
+    public Task MarkFailedAsync(long id, string error, int attempts, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(error);
+        ArgumentOutOfRangeException.ThrowIfNegative(attempts);
 
         return UpdateJobAsync(
             id,
-            "UPDATE job SET state = 'Failed', error = $error, attempts = COALESCE(attempts, 0) + 1, finished_at = $finished_at WHERE id = $id;",
-            [("$error", error), ("$finished_at", FormatTimestamp(_timeProvider.GetUtcNow()))],
+            "UPDATE job SET state = 'Failed', error = $error, attempts = COALESCE(attempts, 0) + $attempts, finished_at = $finished_at WHERE id = $id;",
+            [("$error", error), ("$attempts", attempts), ("$finished_at", FormatTimestamp(_timeProvider.GetUtcNow()))],
             ct);
     }
 
@@ -500,6 +540,31 @@ public sealed class JobStore : IAsyncDisposable
         }
     }
 
+    /// <summary>Reads the busy timeout that every store connection uses (tests).</summary>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The <c>busy_timeout</c> pragma of a store connection, in milliseconds.</returns>
+    internal async Task<long> GetBusyTimeoutAsync(CancellationToken ct = default) =>
+        Convert.ToInt64(await ExecuteScalarAsync("PRAGMA busy_timeout;", [], ct).ConfigureAwait(false), CultureInfo.InvariantCulture);
+
+    private async Task<object?> ExecuteScalarAsync(string sql, (string Name, object Value)[] parameters, CancellationToken ct)
+    {
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                command.CommandText = sql;
+                foreach (var (name, value) in parameters)
+                {
+                    command.Parameters.AddWithValue(name, value);
+                }
+
+                return await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            }
+        }
+    }
+
     private async Task<int> ExecuteNonQueryAsync(string sql, (string Name, object Value)[] parameters, CancellationToken ct)
     {
         var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
@@ -527,6 +592,9 @@ public sealed class JobStore : IAsyncDisposable
         try
         {
             await connection.OpenAsync(ct).ConfigureAwait(false);
+
+            // Several pipeline workers write at once: wait for another writer's lock instead of failing with SQLITE_BUSY.
+            await ExecuteAsync(connection, $"PRAGMA busy_timeout = {BusyTimeoutMilliseconds};", ct).ConfigureAwait(false);
 
             return connection;
         }
