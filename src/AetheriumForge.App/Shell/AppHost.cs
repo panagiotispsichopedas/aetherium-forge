@@ -1,6 +1,10 @@
+using AetheriumForge.App.Pages.Scan;
 using AetheriumForge.App.Services;
+using AetheriumForge.Core.Discovery;
+using AetheriumForge.Core.Textures;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Serilog;
 
 namespace AetheriumForge.App.Shell;
@@ -31,7 +35,23 @@ public static class AppHost
         services.AddSingleton<INavigationService, NavigationService>();
 
         // ── PAGE: Scan (also owns IProjectSession) ──
-        services.AddSingleton<ScanPagePlaceholder>(_ => new ScanPagePlaceholder(new PagePlaceholderViewModel("Scan")));
+        services.AddSingleton(sp => new AppSettingsStore(Path.Combine(AppDataFolder, AppSettingsStore.FileName), sp.GetRequiredService<ILogger<AppSettingsStore>>()));
+        services.AddSingleton(sp => new ProjectSession(sp.GetRequiredService<AppSettingsStore>(), sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<ILogger<ProjectSession>>()));
+        services.AddSingleton<IScanProjectSession>(sp => sp.GetRequiredService<ProjectSession>());
+        services.AddSingleton<IProjectSession>(sp => sp.GetRequiredService<ProjectSession>());
+        services.AddHostedService<ProjectSessionStartup>();
+        services.AddSingleton<IScanEnvironment>(sp => new ScanEnvironment(
+            new GameLocator(new WindowsRegistryReader(), new WindowsFileSystemProbe(), GameLocator.DefaultEpicManifestsFolder, sp.GetRequiredService<ILogger<GameLocator>>()),
+            new ProfileLocator(),
+            new TextureScanner(sp.GetRequiredService<ILogger<TextureScanner>>())));
+        services.AddSingleton<IFolderPicker, StorageFolderPicker>();
+        services.AddSingleton(sp => new ScanViewModel(
+            sp.GetRequiredService<IScanEnvironment>(),
+            sp.GetRequiredService<IScanProjectSession>(),
+            sp.GetRequiredService<INavigationService>(),
+            sp.GetRequiredService<IFolderPicker>(),
+            sp.GetRequiredService<ILogger<ScanViewModel>>()));
+        services.AddSingleton<ScanPagePlaceholder>(sp => new ScanPagePlaceholder(sp.GetRequiredService<ScanViewModel>()));
 
         // ── PAGE: Queue ──
         services.AddSingleton<QueuePagePlaceholder>(_ => new QueuePagePlaceholder(new PagePlaceholderViewModel("Queue")));
