@@ -1,50 +1,30 @@
-using System.Runtime.InteropServices;
-
 namespace AetheriumForge.Core.Discovery;
 
 /// <summary>
-/// <see cref="IKnownFolderProvider"/> backed by the Windows Known Folder API (<c>SHGetKnownFolderPath</c>).
+/// <see cref="IKnownFolderProvider"/> backed by <see cref="Environment.GetFolderPath(Environment.SpecialFolder)"/>.
 /// </summary>
 /// <remarks>
 /// Users often move Documents to another drive, so the path is never built from <c>%USERPROFILE%</c> (IMPLEMENTATION_GUIDE §4.2).
+/// On Windows, .NET resolves these folders with the Known Folder API (<c>SHGetKnownFolderPath</c>), so redirected folders are
+/// honoured without any P/Invoke in this project.
 /// </remarks>
 public sealed class WindowsKnownFolderProvider : IKnownFolderProvider
 {
-    private static readonly Guid _folderIdDocuments = new("FDD39AD0-238F-46AF-ADB4-6C85480369C7");
-    private static readonly Guid _folderIdLocalAppData = new("F1B32785-6FBA-4FCF-9D55-7B8E7F157091");
+    /// <inheritdoc />
+    public string GetDocumentsPath() => GetFolderPath(Environment.SpecialFolder.MyDocuments);
 
     /// <inheritdoc />
-    public string GetDocumentsPath() => GetKnownFolderPath(_folderIdDocuments);
+    public string GetLocalApplicationDataPath() => GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
-    /// <inheritdoc />
-    public string GetLocalApplicationDataPath() => GetKnownFolderPath(_folderIdLocalAppData);
-
-    private static string GetKnownFolderPath(Guid folderId)
+    private static string GetFolderPath(Environment.SpecialFolder folder)
     {
-        var hresult = NativeMethods.SHGetKnownFolderPath(in folderId, 0, IntPtr.Zero, out var buffer);
-        try
+        var path = Environment.GetFolderPath(folder);
+        if (string.IsNullOrEmpty(path))
         {
-            Marshal.ThrowExceptionForHR(hresult);
-
-            return Marshal.PtrToStringUni(buffer)
-                ?? throw new InvalidOperationException($"SHGetKnownFolderPath returned no path for {folderId}.");
+            // GetFolderPath returns an empty string when the folder does not exist or cannot be resolved.
+            throw new DirectoryNotFoundException($"The known folder {folder} could not be resolved.");
         }
-        finally
-        {
-            // The shell allocates the buffer with CoTaskMemAlloc even when the call fails.
-            Marshal.FreeCoTaskMem(buffer);
-        }
-    }
 
-    /// <remarks>
-    /// <c>DllImport</c> rather than <c>LibraryImport</c>: the LibraryImport source generator always emits <c>unsafe</c> code
-    /// (SYSLIB1062) and the project does not enable <c>AllowUnsafeBlocks</c>. Every parameter here is blittable,
-    /// so the runtime marshaller adds no per-call cost.
-    /// </remarks>
-    private static class NativeMethods
-    {
-        [DllImport("shell32.dll", ExactSpelling = true)]
-        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-        internal static extern int SHGetKnownFolderPath(in Guid rfid, uint dwFlags, IntPtr hToken, out IntPtr ppszPath);
+        return path;
     }
 }

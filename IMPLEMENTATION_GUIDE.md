@@ -101,7 +101,7 @@ Validate each candidate: it must contain `SkyrimSE.exe` and a `Data` folder. Rea
 | `plugins.txt` (active plugins and order) | `%LOCALAPPDATA%\Skyrim Special Edition\plugins.txt` (same GOG/EPIC suffix rule) |
 | `Skyrim_Default.ini` | Game folder |
 
-Resolve **Documents** with the Known Folder API (`SHGetKnownFolderPath(FOLDERID_Documents)`), not by building `%USERPROFILE%\Documents`. Users often move Documents, often to another drive.
+Resolve **Documents** with the Known Folder API (`SHGetKnownFolderPath(FOLDERID_Documents)`), not by building `%USERPROFILE%\Documents`. `Environment.GetFolderPath(SpecialFolder.MyDocuments)` calls that API on Windows, so use it and keep P/Invoke out of Core. Future native interop (DXGI, NVML) goes in a separate `AetheriumForge.Native` project that uses `LibraryImport` with `AllowUnsafeBlocks`. Users often move Documents, often to another drive.
 
 ### 4.3 Working disk
 
