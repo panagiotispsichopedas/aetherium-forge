@@ -88,6 +88,7 @@ public static class AppHost
         services.AddSingleton<RulesPagePlaceholder>(sp => new RulesPagePlaceholder(sp.GetRequiredService<AetheriumForge.App.Pages.Rules.RulesViewModel>()));
 
         // ── PAGE: Compare (M5) ──
+        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<AetheriumForge.App.Pages.Rules.IStyleSelection, AetheriumForge.App.Pages.Rules.StyleSelection>(services);
         services.AddSingleton(sp => new Pages.Compare.ProjectPreviewBackend(sp.GetService<IProjectSession>(), sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>()));
         services.AddSingleton(sp =>
         {
@@ -105,7 +106,8 @@ public static class AppHost
             sp.GetRequiredService<Pages.Compare.ICompareProjectData>(),
             sp.GetRequiredService<Pages.Compare.ICompareDialogs>(),
             logger: sp.GetService<Microsoft.Extensions.Logging.ILogger<Pages.Compare.CompareViewModel>>(),
-            runner: sp.GetService<IForgeRunner>()));
+            runner: sp.GetService<IForgeRunner>(),
+            selection: sp.GetService<AetheriumForge.App.Pages.Rules.IStyleSelection>()));
         services.AddSingleton<ComparePagePlaceholder>(sp => new ComparePagePlaceholder(sp.GetRequiredService<Pages.Compare.CompareViewModel>()));
 
         services.AddSingleton<IReadOnlyDictionary<AppPage, object>>(sp => new Dictionary<AppPage, object>
