@@ -2,6 +2,7 @@ using System.CommandLine;
 using AetheriumForge.Cli.Hosting;
 using AetheriumForge.Cli.Pipeline;
 using AetheriumForge.Cli.Rendering;
+using AetheriumForge.Core.Concurrency;
 using AetheriumForge.Core.Discovery;
 using AetheriumForge.Core.Game;
 using AetheriumForge.Core.Imaging;
@@ -27,6 +28,11 @@ internal sealed class ForgeCommand
 
     /// <summary>The largest accepted tile size.</summary>
     public const int MaxTileSize = 2048;
+
+    /// <summary>How long <c>forge</c> waits for the GPU work lock before failing.</summary>
+    internal static readonly TimeSpan GpuLockTimeout = TimeSpan.FromSeconds(5);
+
+    private const string OwnerDescription = "aetherium-forge forge";
 
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(100);
 
@@ -107,6 +113,9 @@ internal sealed class ForgeCommand
         var gamePath = await ProjectDatabaseReader.ReadProjectValueAsync(project.DatabasePath, ProjectKeys.GamePath, ct).ConfigureAwait(false)
             ?? throw new CliException($"The project {project.Root} has no game path. Run 'aetherium-forge scan --project \"{project.Root}\"' again.");
         ProjectLocator.EnsureOutsideGame(project, gamePath);
+
+        // Lock the project before the log, the store or work files are touched: one process per project.
+        using var projectLock = AcquireProjectLock(project.Root);
         session.AttachLog(project, gamePath);
 
         var store = await JobStore.OpenAsync(project.DatabasePath, ct).ConfigureAwait(false);
@@ -153,6 +162,9 @@ internal sealed class ForgeCommand
             output.WriteLine($"Jobs:     {(run.Limit is { } limit ? $"up to {limit:N0} of the queue" : "the whole queue")}{(run.Sequential ? " (sequential)" : string.Empty)}");
             output.WriteLine($"Log:      {session.Logging.LogFile}");
             output.WriteLine();
+
+            // One GPU job per machine: wait briefly for a calibration or another run to finish, then fail naming the holder.
+            using var gpuLock = await AcquireGpuLockAsync(loggerFactory, ct).ConfigureAwait(false);
 
             var context = new ForgeContext(store, project, dataFolder, rules, models, texconv, run, session.Cancellation.Processes);
             using var host = CompositionRoot.Build(session.Logging, context);
@@ -286,6 +298,40 @@ internal sealed class ForgeCommand
             $"Model(s) not installed in {modelsFolder}: {string.Join(", ", missing)} (installed: {have}).{Environment.NewLine}"
             + $"Get them with: {ModelsCommand.DownloadHint(modelsFolder)}{Environment.NewLine}"
             + "or pick an installed one with --model <name>.");
+    }
+
+    /// <summary>Takes the project lock, turning a held lock into a user-facing error.</summary>
+    /// <param name="projectRoot">The project folder.</param>
+    /// <returns>The lock.</returns>
+    /// <exception cref="CliException">The project is open in another process.</exception>
+    internal static ProjectLock AcquireProjectLock(string projectRoot)
+    {
+        try
+        {
+            return ProjectLock.Acquire(projectRoot, OwnerDescription);
+        }
+        catch (ProjectLockedException ex)
+        {
+            throw new CliException(ex.Message, ex);
+        }
+    }
+
+    /// <summary>Takes the GPU work lock for the run, waiting up to <see cref="GpuLockTimeout"/>.</summary>
+    /// <param name="loggerFactory">Creates the lock's logger.</param>
+    /// <param name="ct">Cancels the wait.</param>
+    /// <returns>The held lock.</returns>
+    /// <exception cref="CliException">The GPU is busy with another job.</exception>
+    private static async Task<IDisposable> AcquireGpuLockAsync(Microsoft.Extensions.Logging.ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        var gpu = new GpuWorkLock(OwnerDescription, Microsoft.Extensions.Logging.LoggerFactoryExtensions.CreateLogger<GpuWorkLock>(loggerFactory));
+        try
+        {
+            return await gpu.AcquireAsync("a forge run", GpuLockTimeout, ct).ConfigureAwait(false);
+        }
+        catch (GpuBusyException ex)
+        {
+            throw new CliException(ex.Message, ex);
+        }
     }
 
     private static async Task<ProjectLayout> ResolveProjectAsync(string? explicitProject, CliSession session, CancellationToken ct)
