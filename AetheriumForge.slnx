@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AetheriumForge.Core/AetheriumForge.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AetheriumForge.Core.Tests/AetheriumForge.Core.Tests.csproj" />
+  </Folder>
+</Solution>

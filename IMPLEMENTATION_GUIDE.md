@@ -3,7 +3,7 @@
 AI texture forge for Skyrim Special Edition / Anniversary Edition.
 It finds every texture the game still loads from the original game archives, upscales it with an ONNX model on the GPU, and packages the result as a self-contained mod that any mod manager can install. It fills gaps only, so it never overrides textures from installed mods.
 
-Status: design approved, implementation not started.
+Status: M1 (core scan) implemented. On the reference install it queues the same 3,433 vanilla textures as the prototype, with identical targets, plus Creation Club and `_ResourcePack.bsa` textures (base tier, §5 item 3).
 Proven prototype: `TextureGapUpscale`, an unpublished local tool (Python + texconv + Real-ESRGAN ncnn). Its scan, classification, post-processing and resume logic are the reference for this guide.
 
 ---
@@ -49,8 +49,9 @@ Check every package version on NuGet at implementation time and pin it in `Direc
 
 ```
 Aetherium Forge/
-├─ AetheriumForge.sln
-├─ Directory.Build.props          (net10.0, nullable, LangVersion latest, TreatWarningsAsErrors)
+├─ AetheriumForge.slnx
+├─ global.json                    (SDK pin; Microsoft.Testing.Platform test runner)
+├─ Directory.Build.props          (net10.0-windows, win-x64, nullable, TreatWarningsAsErrors, MinVer)
 ├─ Directory.Packages.props       (central package versions)
 ├─ assets/                        (icon sources: SVG, ICO, PNG)
 ├─ tools/                         (texconv.exe; not committed, fetched by a script)
@@ -159,12 +160,12 @@ Path comparison is case-insensitive with backslash separators. Normalise every p
 | 12 | u32 | archive flags |
 | 16 | u32 | folder count |
 | 20 | u32 | file count |
-| 24 | u32 | total folder-name length (including the length byte and null of each name) |
+| 24 | u32 | total folder-name length: Σ(name length + 1). Counts each name's null, **not** its length byte (verified against vanilla archives) |
 | 28 | u32 | total file-name length (including nulls) |
 | 32 | u16 | content flags (textures = `0x2`) |
 | 34 | u16 | padding |
 
-**Archive flags:** `0x1` folder names included, `0x2` file names included, `0x4` compressed by default, `0x100` file names embedded in the data blocks. For textures archives use `0x1 | 0x2 | 0x4` (= 7).
+**Archive flags:** `0x1` folder names included, `0x2` file names included, `0x4` compressed by default, `0x100` file names embedded in the data blocks. For textures archives use `0x1 | 0x2 | 0x4` (= 7). Vanilla texture archives use `0x107`: each file's full path is embedded as a bstring before its data, so the reader must skip it.
 
 ### Folder records (24 bytes each, sorted by folder hash)
 
@@ -344,7 +345,7 @@ using var session = new InferenceSession(modelPath, so);
 - Use **one GPU worker per adapter**. DirectML sessions aren't designed for parallel runs on one adapter.
 - **Pause:** a `PauseTokenSource` (an async manual-reset gate) checked by the producer, by every stage before each item, and by the upscaler between tiles. Items in progress keep their state in memory and continue after Resume.
 - **Stop:** cancel the `CancellationToken`. Each stage finishes or abandons its current item. Abandoned items go back to `Queued`. Temporary files are cleaned on the next start.
-- **Crash or power loss:** on start, anything not `Done` returns to `Queued`, and the `work\` folder is wiped.
+- **Crash or power loss:** on start, interrupted jobs (`Running`) return to `Queued`, and the `work\` folder is wiped. `Done`, `Failed` and `Skipped` keep their state; failed jobs are retried only on request (Queue screen → Retry).
 - **Progress:** each stage reports `PipelineProgress` (item, stage, percent, tiles done/total, timings) through an `IProgress<T>`/`Channel` that the UI consumes on the dispatcher (throttled to about 10 Hz).
 - **ETA:** an exponential moving average of the seconds per megapixel (source) per model, multiplied by the remaining megapixels. This is far more accurate than a per-item average, because sizes vary from 128² to 2048².
 - **GPU telemetry** (optional): DXGI `QueryVideoMemoryInfo` for video memory; NVML (NVIDIA) for load if present.

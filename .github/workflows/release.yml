@@ -1,0 +1,59 @@
+name: Release
+
+# Package builds run only for version tags (vX.Y.Z) whose commit is on main.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Package release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # MinVer needs tags; the main check needs history
+
+      - name: Require tag on main
+        shell: pwsh
+        run: |
+          git fetch origin main --quiet
+          git merge-base --is-ancestor "$env:GITHUB_SHA" origin/main
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Tag $env:GITHUB_REF_NAME points at $env:GITHUB_SHA, which is not on main. Releases are built from main only."
+              exit 1
+          }
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build AetheriumForge.slnx --configuration Release
+
+      - name: Test
+        run: dotnet test --solution AetheriumForge.slnx --configuration Release --no-build
+
+      - name: Publish app
+        id: publish
+        shell: pwsh
+        run: |
+          $app = 'src/AetheriumForge.App/AetheriumForge.App.csproj'
+          if (-not (Test-Path $app)) {
+              Write-Host "::notice::No app project yet; skipping the package."
+              "packaged=false" >> $env:GITHUB_OUTPUT
+              exit 0
+          }
+          dotnet publish $app --configuration Release --no-build --output publish
+          Compress-Archive -Path publish/* -DestinationPath "AetheriumForge-$env:GITHUB_REF_NAME-win-x64.zip"
+          "packaged=true" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub release
+        if: steps.publish.outputs.packaged == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create "$env:GITHUB_REF_NAME" "AetheriumForge-$env:GITHUB_REF_NAME-win-x64.zip" --title "$env:GITHUB_REF_NAME" --generate-notes --draft

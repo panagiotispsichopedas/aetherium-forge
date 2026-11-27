@@ -1,0 +1,46 @@
+name: CI
+
+# Build and test only. No packages are produced here; see release.yml.
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build and test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # MinVer needs tags and history
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore AetheriumForge.slnx
+
+      - name: Build
+        run: dotnet build AetheriumForge.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test --solution AetheriumForge.slnx --configuration Release --no-build --coverage --coverage-output-format cobertura --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults
+          if-no-files-found: ignore

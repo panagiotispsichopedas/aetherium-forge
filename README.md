@@ -8,7 +8,7 @@
 
 ---
 
-> **Status:** design approved, implementation not started. See [IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md).
+> **Status:** early development. Milestone M1 (discovery, archive reading, gap-set scan, rules, job store) is in place; there is no UI or upscaling yet. See [IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md).
 
 Aetherium Forge finds every texture the game still loads from the original game archives, upscales it on the GPU with an ONNX model, and packages the result as a self-contained mod that any mod manager can install. It **fills gaps only**: it never overrides textures that your installed mods already provide.
 
