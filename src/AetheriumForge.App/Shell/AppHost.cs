@@ -22,25 +22,63 @@ public static class AppHost
     public static IHost Build()
     {
         var builder = Host.CreateApplicationBuilder();
-        builder.Services.AddSerilog((_, logger) => logger
+        builder.Services.AddSerilog((sp, logger) => logger
             .MinimumLevel.Information()
-            .WriteTo.File(Path.Combine(AppDataFolder, "logs", "app-.log"), formatProvider: System.Globalization.CultureInfo.InvariantCulture, rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14));
+            .WriteTo.File(Path.Combine(AppDataFolder, "logs", "app-.log"), formatProvider: System.Globalization.CultureInfo.InvariantCulture, rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14)
+            .WriteTo.Sink(sp.GetRequiredService<ForgeRunnerLogSink>()));
 
         var services = builder.Services;
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<INavigationService, NavigationService>();
 
         // ── PAGE: Scan (also owns IProjectSession) ──
-        services.AddSingleton<ScanPagePlaceholder>(_ => new ScanPagePlaceholder(new PagePlaceholderViewModel("Scan")));
+        services.AddSingleton(sp => new AppSettingsStore(Path.Combine(AppDataFolder, AppSettingsStore.FileName), sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<AppSettingsStore>>()));
+        services.AddSingleton<IAppSettingsStore>(sp => sp.GetRequiredService<AppSettingsStore>());
+        services.AddSingleton(sp => new ProjectSession(sp.GetRequiredService<IAppSettingsStore>(), sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ProjectSession>>()));
+        services.AddSingleton<IScanProjectSession>(sp => sp.GetRequiredService<ProjectSession>());
+        services.AddSingleton<IProjectSession>(sp => sp.GetRequiredService<ProjectSession>());
+        services.AddHostedService<ProjectSessionStartup>();
+        services.AddSingleton<Pages.Scan.IScanEnvironment>(sp => new Pages.Scan.ScanEnvironment(
+            new Core.Discovery.GameLocator(
+                new Core.Discovery.WindowsRegistryReader(),
+                new Core.Discovery.WindowsFileSystemProbe(),
+                Core.Discovery.GameLocator.DefaultEpicManifestsFolder,
+                sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Core.Discovery.GameLocator>>()),
+            new Core.Discovery.ProfileLocator(),
+            new Core.Textures.TextureScanner(sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Core.Textures.TextureScanner>>())));
+        services.AddSingleton<Pages.Scan.IFolderPicker, Pages.Scan.StorageFolderPicker>();
+        services.AddSingleton(sp => new Pages.Scan.ScanViewModel(
+            sp.GetRequiredService<Pages.Scan.IScanEnvironment>(),
+            sp.GetRequiredService<IScanProjectSession>(),
+            sp.GetRequiredService<INavigationService>(),
+            sp.GetRequiredService<Pages.Scan.IFolderPicker>(),
+            sp.GetService<IForgeRunner>(),
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Pages.Scan.ScanViewModel>>()));
+        services.AddSingleton<ScanPagePlaceholder>(sp => new ScanPagePlaceholder(sp.GetRequiredService<Pages.Scan.ScanViewModel>()));
 
         // ── PAGE: Queue ──
-        services.AddSingleton<QueuePagePlaceholder>(_ => new QueuePagePlaceholder(new PagePlaceholderViewModel("Queue")));
+        // IProjectSession and IForgeRunner are resolved optionally: without a session the page shows "no project", without a runner
+        // its actions are never blocked by a run.
+        services.AddSingleton<Pages.Queue.QueueViewModel>(sp => new Pages.Queue.QueueViewModel(
+            sp.GetService<IProjectSession>(),
+            sp.GetService<IForgeRunner>(),
+            sp.GetRequiredService<INavigationService>(),
+            sp.GetRequiredService<TimeProvider>(),
+            new Pages.Queue.AvaloniaUiDispatcher(),
+            () => Core.Imaging.ModelCatalog.Discover(Core.Imaging.ModelCatalog.DefaultModelsFolder),
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Pages.Queue.QueueViewModel>>()));
+        services.AddSingleton<QueuePagePlaceholder>(sp => new QueuePagePlaceholder(sp.GetRequiredService<Pages.Queue.QueueViewModel>()));
 
         // ── PAGE: Run (also owns IForgeRunner) ──
-        services.AddSingleton<RunPagePlaceholder>(_ => new RunPagePlaceholder(new PagePlaceholderViewModel("Run")));
+        // ForgeRunner (IForgeRunner), the log-tail sink (wired into the Serilog configuration above) and RunViewModel.
+        services.AddForgeRunPage();
+        services.AddSingleton<RunPagePlaceholder>(sp => new RunPagePlaceholder(sp.GetRequiredService<Pages.Run.RunViewModel>()));
 
         // ── PAGE: Models ──
-        services.AddSingleton<ModelsPagePlaceholder>(_ => new ModelsPagePlaceholder(new PagePlaceholderViewModel("Models")));
+        // AddModelsPage: AddModelDownloads, IGpuAdapterProvider (DXGI), GpuProfiler, GpuProfileStore and the GpuWorkLock singleton
+        // (TryAdd: shared with Run), the download coordinator, the dialogs, the view model and the first-run prompt.
+        services.AddModelsPage();
+        services.AddSingleton<ModelsPagePlaceholder>(sp => new ModelsPagePlaceholder(sp.GetRequiredService<Pages.Models.ModelsViewModel>()));
 
         // ── PAGE: Rules (M5) ──
         services.AddSingleton<RulesPagePlaceholder>(_ => new RulesPagePlaceholder(new PagePlaceholderViewModel("Rules")));
