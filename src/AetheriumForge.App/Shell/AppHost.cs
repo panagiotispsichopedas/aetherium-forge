@@ -75,8 +75,8 @@ public static class AppHost
         services.AddSingleton<RunPagePlaceholder>(sp => new RunPagePlaceholder(sp.GetRequiredService<Pages.Run.RunViewModel>()));
 
         // ── PAGE: Models ──
-        // AddModelsPage: AddModelDownloads, IGpuAdapterProvider (DXGI), GpuProfiler and GpuProfileStore (TryAdd: shared with Run),
-        // the download coordinator, the dialogs, the view model and the first-run prompt.
+        // AddModelsPage: AddModelDownloads, IGpuAdapterProvider (DXGI), GpuProfiler, GpuProfileStore and the GpuWorkLock singleton
+        // (TryAdd: shared with Run), the download coordinator, the dialogs, the view model and the first-run prompt.
         services.AddModelsPage();
         services.AddSingleton<ModelsPagePlaceholder>(sp => new ModelsPagePlaceholder(sp.GetRequiredService<Pages.Models.ModelsViewModel>()));
 

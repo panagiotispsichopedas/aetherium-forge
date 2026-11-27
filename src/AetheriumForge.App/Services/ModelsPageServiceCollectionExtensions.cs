@@ -1,4 +1,5 @@
 using AetheriumForge.App.Pages.Models;
+using AetheriumForge.Core.Concurrency;
 using AetheriumForge.Core.Gpu;
 using AetheriumForge.Core.Models;
 using AetheriumForge.Native;
@@ -34,6 +35,9 @@ public static class ModelsPageServiceCollectionExtensions
         services.TryAddSingleton<IModelsPageSettings>(sp => new JsonModelsPageSettings(
             Path.Combine(Shell.AppHost.AppDataFolder, "models-page.json"),
             sp.GetService<ILogger<JsonModelsPageSettings>>()));
+        // One GPU work lock per app (TryAdd: the Run page may register it too). ForgeRunner keeps its own instance today; both use the
+        // same named mutex, so a calibration and a run still exclude each other.
+        services.TryAddSingleton(sp => new GpuWorkLock("Aetherium Forge desktop app", sp.GetService<ILogger<GpuWorkLock>>()));
         services.TryAddSingleton(sp => new ModelsViewModel(
             sp.GetRequiredService<ModelLibrary>,
             sp.GetRequiredService<ModelDownloadCoordinator>(),
@@ -44,6 +48,7 @@ public static class ModelsPageServiceCollectionExtensions
             sp.GetRequiredService<IModelsPageSettings>(),
             sp.GetService<INavigationService>(),
             sp.GetService<IForgeRunner>(),
+            sp.GetRequiredService<GpuWorkLock>(),
             action => Dispatcher.UIThread.Post(action),
             sp.GetService<ILogger<ModelsViewModel>>()));
         services.AddHostedService<ModelFirstRunService>();

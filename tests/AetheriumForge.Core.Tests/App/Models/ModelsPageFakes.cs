@@ -4,6 +4,7 @@ using System.Net;
 using System.Text;
 using AetheriumForge.App.Pages.Models;
 using AetheriumForge.App.Services;
+using AetheriumForge.Core.Concurrency;
 using AetheriumForge.Core.Gpu;
 using AetheriumForge.Core.Models;
 using AetheriumForge.Core.Pipeline;
@@ -150,6 +151,8 @@ internal sealed class ModelsPageFixture : IDisposable
     public const int ChunkSize = 4096;
 
     private readonly HttpClient _http;
+    private readonly string _gpuMutexName = $@"Local\AetheriumForge.Tests.ModelsPage.{Guid.NewGuid():N}";
+    private GpuWorkLock? _gpuLock;
 
     public ModelsPageFixture(IGpuAdapterProvider? adapters = null, GpuProfiler? profiler = null)
     {
@@ -209,7 +212,13 @@ internal sealed class ModelsPageFixture : IDisposable
     public ModelRowViewModel Row(string name) => ViewModel.Models.Single(row => row.Name == name);
 
     /// <summary>Creates another page over the same folder, coordinator and settings: the app's next session.</summary>
-    public ModelsViewModel NewViewModel() => new(CreateLibrary, Downloads, Adapters, Profiler, Store, Dialogs, Settings, null, Runner, Ui.Post);
+    public ModelsViewModel NewViewModel() => new(CreateLibrary, Downloads, Adapters, Profiler, Store, Dialogs, Settings, null, Runner, GpuLock, Ui.Post);
+
+    /// <summary>Gets the page's GPU work lock: a private mutex and owner file, so tests never contend with a real app or each other.</summary>
+    public GpuWorkLock GpuLock => _gpuLock ??= NewGpuLock("Aetherium Forge desktop app");
+
+    /// <summary>Creates another holder of the same GPU lock (another process, as far as the page can tell).</summary>
+    public GpuWorkLock NewGpuLock(string ownerDescription) => new(ownerDescription, _gpuMutexName, Path.Combine(Folder.Root, "gpu-work.owner"), null);
 
     public string ModelPath(string name) => Path.Combine(Folder.ModelsFolder, name + ".onnx");
 

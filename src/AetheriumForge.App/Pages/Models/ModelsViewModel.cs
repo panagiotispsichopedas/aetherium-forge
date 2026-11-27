@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using AetheriumForge.App.Services;
+using AetheriumForge.Core.Concurrency;
 using AetheriumForge.Core.Gpu;
 using AetheriumForge.Core.Models;
 using AetheriumForge.Core.Pipeline;
@@ -24,6 +25,9 @@ public sealed partial class ModelsViewModel : ObservableObject
     /// </summary>
     public const double VramWarningFraction = 0.5;
 
+    /// <summary>The purpose recorded in the GPU lock while calibrating (read by others as "the GPU is busy with …").</summary>
+    public const string CalibrationLockPurpose = "a calibration";
+
     /// <summary>The largest scale a custom model may declare.</summary>
     public const int MaxCustomScale = 16;
 
@@ -41,6 +45,7 @@ public sealed partial class ModelsViewModel : ObservableObject
     private readonly IModelsPageSettings _settings;
     private readonly INavigationService? _navigation;
     private readonly IForgeRunner? _runner;
+    private readonly GpuWorkLock? _gpuLock;
     private readonly Action<Action> _post;
     private readonly ILogger _logger;
     private readonly HashSet<string> _offerCalibrationFor = new(StringComparer.OrdinalIgnoreCase);
@@ -150,6 +155,7 @@ public sealed partial class ModelsViewModel : ObservableObject
     /// <param name="settings">Stores page preferences (the dismissed first-run prompt).</param>
     /// <param name="navigation">Page navigation, or <see langword="null"/>.</param>
     /// <param name="runner">The pipeline runner, or <see langword="null"/> when none is registered.</param>
+    /// <param name="gpuLock">The machine-wide GPU work lock held for a whole calibration, or <see langword="null"/> to calibrate without it.</param>
     /// <param name="post">Runs an action on the UI thread; defaults to running it inline.</param>
     /// <param name="logger">Receives page events.</param>
     public ModelsViewModel(
@@ -162,6 +168,7 @@ public sealed partial class ModelsViewModel : ObservableObject
         IModelsPageSettings settings,
         INavigationService? navigation = null,
         IForgeRunner? runner = null,
+        GpuWorkLock? gpuLock = null,
         Action<Action>? post = null,
         ILogger<ModelsViewModel>? logger = null)
     {
@@ -182,6 +189,7 @@ public sealed partial class ModelsViewModel : ObservableObject
         _settings = settings;
         _navigation = navigation;
         _runner = runner;
+        _gpuLock = gpuLock;
         _post = post ?? (action => action());
         _logger = logger ?? (ILogger)NullLogger.Instance;
 
@@ -224,6 +232,9 @@ public sealed partial class ModelsViewModel : ObservableObject
 
     /// <summary>Gets the selected adapter's tier, or <see langword="null"/> before the GPU section loaded or without an adapter.</summary>
     public GpuTier? Tier => _tier;
+
+    /// <summary>Gets or sets how long a calibration waits for the GPU work lock before reporting the GPU as busy.</summary>
+    internal TimeSpan GpuLockTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>Gets background work started by events (reloads, prompts); tests await it.</summary>
     internal Task BackgroundWork { get; private set; } = Task.CompletedTask;
@@ -362,9 +373,8 @@ public sealed partial class ModelsViewModel : ObservableObject
     {
         ArgumentNullException.ThrowIfNull(row);
 
-        // TODO(GpuWorkLock): the IForgeRunner check only sees runs of this process, and the runner contract cannot stop a run from starting
-        // while a calibration runs. When the cross-process GpuWorkLock (Core/Concurrency) merges, acquire it here for the whole calibration
-        // (fail fast with a "GPU busy" status when another process holds it) and release it in the finally block below.
+        // The IForgeRunner check is a fast path for runs of this process; the GPU work lock below is what keeps any other GPU job (a run
+        // in this or another process, the CLI) off the GPU for the whole calibration.
         if (!CanCalibrate || IsRunnerBusy || _selectedAdapter is not { } adapter)
         {
             return;
@@ -377,8 +387,23 @@ public sealed partial class ModelsViewModel : ObservableObject
         CalibrationPercent = 0;
         CalibrationStatus = $"Calibrating {row.Family} on {adapter.Name}…";
         var progress = new CalibrationProgressSink(report => _post(() => ApplyCalibrationProgress(row.Family, report)));
+        IDisposable? gpu = null;
         try
         {
+            if (_gpuLock is not null)
+            {
+                try
+                {
+                    gpu = await _gpuLock.AcquireAsync(CalibrationLockPurpose, GpuLockTimeout, cancellation.Token);
+                }
+                catch (GpuBusyException busy)
+                {
+                    LogGpuBusy(_logger, row.Family, busy.Message);
+                    CalibrationStatus = $"{busy.Message} Calibrate {row.Family} after it ends.";
+                    return;
+                }
+            }
+
             await UpdateVramWarningAsync();
             if (IsRunnerBusy)
             {
@@ -408,6 +433,7 @@ public sealed partial class ModelsViewModel : ObservableObject
         }
         finally
         {
+            gpu?.Dispose();
             _calibrationCts = null;
             IsCalibrating = false;
             UpdateCanCalibrate();
@@ -1049,7 +1075,10 @@ public sealed partial class ModelsViewModel : ObservableObject
     [LoggerMessage(EventId = 416, Level = LogLevel.Error, Message = "Models page background work failed")]
     private static partial void LogBackgroundFailed(ILogger logger, Exception exception);
 
-    [LoggerMessage(EventId = 417, Level = LogLevel.Warning, Message = "Removing the leftover file {Path} failed")]
+    [LoggerMessage(EventId = 418, Level = LogLevel.Warning, Message = "Calibration of {Family} not started: {Reason}")]
+    private static partial void LogGpuBusy(ILogger logger, string family, string reason);
+
+    [LoggerMessage(EventId = 417,Level = LogLevel.Warning, Message = "Removing the leftover file {Path} failed")]
     private static partial void LogCleanupFailed(ILogger logger, Exception exception, string path);
 
     /// <summary>A synchronous progress sink (System.Progress would capture a context the calibration thread does not need).</summary>

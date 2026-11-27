@@ -1,3 +1,4 @@
+using AetheriumForge.App.Pages.Models;
 using AetheriumForge.App.Services;
 using AetheriumForge.Core.Gpu;
 using AetheriumForge.Core.Models;
@@ -607,6 +608,54 @@ public sealed class ModelsViewModelTests
 
         // Assert
         Assert.Equal((0, "A pipeline run started; calibrate after it ends.", false), (gpu.Runs.Count, fixture.ViewModel.CalibrationStatus, fixture.ViewModel.IsCalibrating));
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_GpuHeldByAnotherJob_ShowsHolderAndDoesNotCalibrate()
+    {
+        // Arrange
+        using var fixture = SimulatedModelsPage.Create(out var gpu);
+        fixture.Install(ModelsPageFixture.General);
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RefreshAsync());
+        fixture.ViewModel.GpuLockTimeout = TimeSpan.FromMilliseconds(200);
+        using var otherJob = await fixture.NewGpuLock("aetherium-forge forge").AcquireAsync("a forge run", TimeSpan.FromSeconds(5), Ct);
+
+        // Act
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.CalibrateAsync(Assert.Single(fixture.ViewModel.Families)));
+
+        // Assert
+        Assert.Equal(
+            (0, $"The GPU is busy with a forge run in aetherium-forge forge (PID {Environment.ProcessId}). Calibrate {ModelsPageFixture.General} after it ends.", false, 0),
+            (gpu.Runs.Count, fixture.ViewModel.CalibrationStatus, fixture.ViewModel.IsCalibrating, (await fixture.Store.ListAsync(Ct)).Count));
+    }
+
+    [Fact]
+    public async Task CalibrateAsync_Calibrating_HoldsGpuLockUntilDone()
+    {
+        // Arrange
+        using var fixture = SimulatedModelsPage.Create(out var gpu);
+        fixture.Install(ModelsPageFixture.General);
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RefreshAsync());
+        var probe = fixture.NewGpuLock("probe");
+        bool? freeDuringRun = null;
+        string? purposeDuringRun = null;
+        gpu.BeforeRun = run =>
+        {
+            if (run == 1)
+            {
+                freeDuringRun = probe.TryAcquire("probe", out var handle, out var holder);
+                handle?.Dispose();
+                purposeDuringRun = holder?.Purpose;
+            }
+        };
+
+        // Act
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.CalibrateAsync(Assert.Single(fixture.ViewModel.Families)));
+        var freeAfter = probe.TryAcquire("probe", out var after, out _);
+        after?.Dispose();
+
+        // Assert
+        Assert.Equal((false, ModelsViewModel.CalibrationLockPurpose, true), (freeDuringRun, purposeDuringRun, freeAfter));
     }
 
     [Fact]
