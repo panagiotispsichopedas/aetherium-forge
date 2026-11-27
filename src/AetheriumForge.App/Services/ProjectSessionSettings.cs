@@ -46,6 +46,9 @@ public sealed partial class AppSettingsStore : IAppSettingsStore, IDisposable
     /// <summary>How many recent projects are kept.</summary>
     public const int MaxRecentProjects = 10;
 
+    /// <summary>How many times the final move is tried.</summary>
+    private const int MoveAttempts = 8;
+
     private readonly ILogger<AppSettingsStore> _logger;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
@@ -172,13 +175,34 @@ public sealed partial class AppSettingsStore : IAppSettingsStore, IDisposable
                 await JsonSerializer.SerializeAsync(stream, settings, AppSettingsJsonContext.Default.AppSettings, cancellationToken).ConfigureAwait(false);
             }
 
-            File.Move(temporary, FilePath, overwrite: true);
+            await ReplaceWithRetryAsync(temporary, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             if (File.Exists(temporary))
             {
                 File.Delete(temporary);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Replaces the settings file with <paramref name="temporary"/>. Another app instance replacing the same file at the same moment makes
+    /// Windows deny the move briefly, so it is retried a few times before the error is reported.
+    /// </summary>
+    private async Task ReplaceWithRetryAsync(string temporary, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Move(temporary, FilePath, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (attempt < MoveAttempts && ex is IOException or UnauthorizedAccessException)
+            {
+                LogMoveRetried(_logger, ex, FilePath, attempt);
+                await Task.Delay(TimeSpan.FromMilliseconds(25 * attempt), cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -204,6 +228,9 @@ public sealed partial class AppSettingsStore : IAppSettingsStore, IDisposable
 
     [LoggerMessage(EventId = 1, Level = LogLevel.Warning, Message = "The app settings file {Path} is corrupt; using the defaults")]
     private static partial void LogCorrupt(ILogger logger, Exception exception, string path);
+
+    [LoggerMessage(EventId = 3, Level = LogLevel.Debug, Message = "Replacing the app settings file {Path} failed (attempt {Attempt}); retrying")]
+    private static partial void LogMoveRetried(ILogger logger, Exception exception, string path, int attempt);
 
     [LoggerMessage(EventId = 2, Level = LogLevel.Warning, Message = "The app settings file {Path} cannot be read; using the defaults")]
     private static partial void LogUnreadable(ILogger logger, Exception exception, string path);

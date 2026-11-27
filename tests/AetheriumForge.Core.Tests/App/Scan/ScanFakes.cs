@@ -128,6 +128,8 @@ internal sealed class FakeScanSession : IScanProjectSession
 
     public List<string> Recent { get; } = [];
 
+    public HashSet<string> NotInstalledArchives { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     public bool ThrowOnRecent { get; set; }
 
     public string OpenGameFolder { get; set; } = ScanTestData.GameFolder;
@@ -166,7 +168,9 @@ internal sealed class FakeScanSession : IScanProjectSession
         Current = new ProjectInfo(layout.Root, request.Game.GameFolder, request.Game.DataFolder, layout.OutputRoot, layout.WorkRoot, request.Rules);
         Changed?.Invoke(this, EventArgs.Empty);
         var counts = new Dictionary<JobState, int> { [JobState.Queued] = request.Result.Queued.Count() };
-        return Task.FromResult(new ScanImportResult(layout.DatabasePath, request.Result.Textures.Count, 0, counts, request.Result.MissingArchives));
+        return Task.FromResult(new ScanImportResult(layout.DatabasePath, request.Result.Textures.Count, 0, counts, new MissingArchiveReview(
+            [.. request.Result.MissingArchives.Where(a => !NotInstalledArchives.Contains(a))],
+            [.. request.Result.MissingArchives.Where(NotInstalledArchives.Contains)])));
     }
 
     public Task<string?> GetProjectValueAsync(string key, CancellationToken cancellationToken = default) =>

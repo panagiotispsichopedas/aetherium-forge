@@ -12,6 +12,7 @@ public sealed class ScanImportSafetyTests : IAsyncLifetime
     private const string Textures1 = "Skyrim - Textures1.bsa";
 
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"af-import-safety-{Guid.NewGuid():N}.db");
+    private readonly string _dataFolder = Directory.CreateTempSubdirectory("af-data-").FullName;
     private JobStore _store = null!;
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
@@ -25,6 +26,8 @@ public sealed class ScanImportSafetyTests : IAsyncLifetime
         {
             File.Delete(file);
         }
+
+        Directory.Delete(_dataFolder, recursive: true);
     }
 
     private static ScannedTexture Texture(string path, string archive) =>
@@ -118,5 +121,49 @@ public sealed class ScanImportSafetyTests : IAsyncLifetime
             Ct));
 
         Assert.Equal((0, (string?)null), ((await _store.CountByStateAsync(Ct)).Values.Sum(), await _store.GetProjectValueAsync(ProjectKeys.GamePath, Ct)));
+    }
+
+    [Fact]
+    public async Task ReviewMissingArchivesAsync_AbsentArchiveWithoutJobs_IsNotInstalled()
+    {
+        var review = await ScanImporter.ReviewMissingArchivesAsync(_store, Result(["Skyrim - Patch.bsa"], Texture(@"textures\a.dds", Textures0)), _dataFolder, Ct);
+
+        Assert.Equal((string.Empty, "Skyrim - Patch.bsa"), (string.Join(", ", review.Warnings), string.Join(", ", review.NotInstalled)));
+    }
+
+    [Fact]
+    public async Task ReviewMissingArchivesAsync_AbsentArchiveWithJobs_IsAWarning()
+    {
+        await ScanImporter.ImportAsync(_store, Result([], Texture(@"textures\b.dds", Textures1)), Ct);
+
+        var review = await ScanImporter.ReviewMissingArchivesAsync(_store, Result([Textures1], Texture(@"textures\a.dds", Textures0)), _dataFolder, Ct);
+
+        Assert.Equal([Textures1], review.Warnings);
+    }
+
+    [Fact]
+    public async Task ReviewMissingArchivesAsync_PresentButUnreadable_IsAWarning()
+    {
+        await File.WriteAllTextAsync(Path.Combine(_dataFolder, "Broken.bsa"), "not a bsa", Ct);
+
+        var review = await ScanImporter.ReviewMissingArchivesAsync(_store, Result(["Broken.bsa"]), _dataFolder, Ct);
+
+        Assert.Equal(["Broken.bsa"], review.Warnings);
+    }
+
+    [Fact]
+    public void FormatNotInstalled_OneArchive_SaysItIsNormal()
+    {
+        var line = new MissingArchiveReview([], ["Skyrim - Patch.bsa"]).FormatNotInstalled();
+
+        Assert.Equal("Skyrim - Patch.bsa is listed in the INI files but not installed; that's normal for SE.", line);
+    }
+
+    [Fact]
+    public void FormatWarning_NoWarnings_ReturnsNull()
+    {
+        var warning = new MissingArchiveReview([], ["Skyrim - Patch.bsa"]).FormatWarning();
+
+        Assert.Null(warning);
     }
 }

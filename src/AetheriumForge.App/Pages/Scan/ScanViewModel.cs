@@ -450,14 +450,11 @@ public sealed partial class ScanViewModel : ObservableObject
             Summary = ScanSummary.FromScan(result, $"Scan of {game.GameFolder}, {DateTime.Now.ToString("g", CultureInfo.CurrentCulture)}");
             ProgressValue = 100;
             ProgressText = "Scan complete.";
-            InfoMessage = string.Create(
+            var importText = string.Create(
                 CultureInfo.CurrentCulture,
                 $"Imported {imported.Upserted:N0} rows into {imported.DatabasePath}; {imported.NowProvidedByMod:N0} job(s) now provided by a mod.");
-            if (imported.UnreadableArchives.Count > 0)
-            {
-                WarningMessage = $"{imported.UnreadableArchives.Count} archive(s) are missing or unreadable: {string.Join(", ", imported.UnreadableArchives)}. "
-                    + "Their textures are not in this scan; existing jobs from them were left unchanged. Check the game files and rescan.";
-            }
+            InfoMessage = imported.MissingArchives.FormatNotInstalled() is { } note ? $"{importText} {note}" : importText;
+            WarningMessage = imported.MissingArchives.FormatWarning();
 
             LogScanFinished(_logger, result.Textures.Count, queuedTargets.Count, projectFolder);
         }

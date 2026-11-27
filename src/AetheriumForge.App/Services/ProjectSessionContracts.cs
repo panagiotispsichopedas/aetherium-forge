@@ -57,10 +57,10 @@ public sealed record ScanImportRequest(string ProjectFolder, GameInstall Game, F
 /// <param name="Upserted">Rows written.</param>
 /// <param name="NowProvidedByMod">Jobs newly skipped because a mod now provides them.</param>
 /// <param name="Counts">The project's jobs by state after the import.</param>
-/// <param name="UnreadableArchives">Archives the scan could not read; their textures are missing from the scan and their jobs were left unchanged.</param>
+/// <param name="MissingArchives">The scan's missing or unreadable archives, sorted into warnings and archives that are simply not installed.</param>
 public sealed record ScanImportResult(
     string DatabasePath,
     int Upserted,
     int NowProvidedByMod,
     IReadOnlyDictionary<JobState, int> Counts,
-    IReadOnlyList<string> UnreadableArchives);
+    MissingArchiveReview MissingArchives);

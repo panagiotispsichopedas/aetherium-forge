@@ -56,6 +56,45 @@ public static class ScanImporter
         return store.ImportScanAsync(ToJobRecords(result), gapPaths, unreadable, projectValues, cancellationToken);
     }
 
+    /// <summary>
+    /// Sorts the scan's missing or unreadable archives (<see cref="ScanResult.MissingArchives"/>) into the ones worth a warning and the ones
+    /// that are simply not installed. Call it before <see cref="ImportAsync(JobStore, ScanResult, CancellationToken)"/>.
+    /// </summary>
+    /// <param name="store">The project's job store (its existing jobs tell which archives provided textures before).</param>
+    /// <param name="result">The scan.</param>
+    /// <param name="dataFolder">The game's <c>Data</c> folder.</param>
+    /// <param name="cancellationToken">Cancels the query.</param>
+    /// <returns>The review.</returns>
+    public static async Task<MissingArchiveReview> ReviewMissingArchivesAsync(JobStore store, ScanResult result, string dataFolder, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(result);
+        ArgumentException.ThrowIfNullOrWhiteSpace(dataFolder);
+
+        if (result.MissingArchives.Count == 0)
+        {
+            return MissingArchiveReview.None;
+        }
+
+        var withJobs = await store.GetArchivesWithJobsAsync(result.MissingArchives, cancellationToken).ConfigureAwait(false);
+        var warnings = new List<string>();
+        var notInstalled = new List<string>();
+        foreach (var archive in result.MissingArchives)
+        {
+            // Present but unreadable is always worth a warning; absent matters only when it provided jobs before.
+            if (withJobs.Contains(archive) || File.Exists(Path.Combine(dataFolder, archive)))
+            {
+                warnings.Add(archive);
+            }
+            else
+            {
+                notInstalled.Add(archive);
+            }
+        }
+
+        return new MissingArchiveReview(warnings, notInstalled);
+    }
+
     private static JobRecord ToJobRecord(ScannedTexture texture)
     {
         var decision = texture.Decision;

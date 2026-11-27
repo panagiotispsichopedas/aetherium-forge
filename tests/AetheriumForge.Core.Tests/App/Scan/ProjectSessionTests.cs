@@ -168,13 +168,25 @@ public sealed class ProjectSessionTests : IDisposable
     // ── Review fixes ──
 
     [Fact]
-    public async Task ApplyScanAsync_UnreadableArchives_ReportsThem()
+    public async Task ApplyScanAsync_AbsentArchiveWithoutJobs_IsNotInstalledNotAWarning()
     {
         var result = await _session.ApplyScanAsync(
-            new ScanImportRequest(ProjectFolder(), _game, ForgeRules.Default, ScanTestData.Sample() with { MissingArchives = ["Skyrim - Textures3.bsa"] }),
+            new ScanImportRequest(ProjectFolder(), _game, ForgeRules.Default, ScanTestData.Sample() with { MissingArchives = ["Skyrim - Patch.bsa"] }),
             Ct);
 
-        Assert.Equal(["Skyrim - Textures3.bsa"], result.UnreadableArchives);
+        Assert.Equal((0, 1), (result.MissingArchives.Warnings.Count, result.MissingArchives.NotInstalled.Count));
+    }
+
+    [Fact]
+    public async Task ApplyScanAsync_ArchiveThatProvidedJobsNowMissing_IsAWarning()
+    {
+        await ScanIntoAsync(ProjectFolder());
+
+        var result = await _session.ApplyScanAsync(
+            new ScanImportRequest(ProjectFolder(), _game, ForgeRules.Default, ScanTestData.Result() with { MissingArchives = ["Skyrim - Textures0.bsa"] }),
+            Ct);
+
+        Assert.Equal(["Skyrim - Textures0.bsa"], result.MissingArchives.Warnings);
     }
 
     [Fact]

@@ -462,6 +462,30 @@ public sealed class ScanViewModelTests
         Assert.True(viewModel.ScanCommand.CanExecute(null));
     }
 
+    [Fact]
+    public async Task Scan_ArchiveSimplyNotInstalled_ShowsNoWarning()
+    {
+        _environment.Result = ScanTestData.Sample() with { MissingArchives = ["Skyrim - Patch.bsa"] };
+        _session.NotInstalledArchives.Add("Skyrim - Patch.bsa");
+        var viewModel = await CreateInitializedAsync();
+
+        await viewModel.ScanCommand.ExecuteAsync(null);
+
+        Assert.False(viewModel.HasWarning);
+    }
+
+    [Fact]
+    public async Task Scan_ArchiveSimplyNotInstalled_MentionsItInInfo()
+    {
+        _environment.Result = ScanTestData.Sample() with { MissingArchives = ["Skyrim - Patch.bsa"] };
+        _session.NotInstalledArchives.Add("Skyrim - Patch.bsa");
+        var viewModel = await CreateInitializedAsync();
+
+        await viewModel.ScanCommand.ExecuteAsync(null);
+
+        Assert.Contains("Skyrim - Patch.bsa is listed in the INI files but not installed", viewModel.InfoMessage, StringComparison.Ordinal);
+    }
+
     private static JobRecord Job(string path, JobState state, string? error, int target) =>
         new(0, path, "Skyrim - Textures0.bsa", 512, 512, "BC1_UNORM", "Diffuse", state == JobState.Skipped ? null : "clutter", target, null, state, 0, error, null, null);
 }

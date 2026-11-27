@@ -105,6 +105,7 @@ internal sealed class ScanCommand
                 [ProjectKeys.RulesJson] = rules.ToJson(),
                 [ProjectKeys.ScannedAt] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
             };
+            var review = await ScanImporter.ReviewMissingArchivesAsync(store, result, game.DataFolder, ct).ConfigureAwait(false);
             var (upserted, nowProvided) = await ScanImporter.ImportAsync(store, result, values, ct).ConfigureAwait(false);
             var counts = await store.CountByStateAsync(ct).ConfigureAwait(false);
 
@@ -115,10 +116,14 @@ internal sealed class ScanCommand
             }
 
             output.WriteLine();
-            if (result.MissingArchives.Count > 0)
+            if (review.FormatWarning() is { } warning)
             {
-                output.WriteLine($"WARNING: {result.MissingArchives.Count} archive(s) are missing or unreadable ({string.Join(", ", result.MissingArchives)}). "
-                    + "Their textures are not in this scan; existing jobs from them were left unchanged.");
+                output.WriteLine($"WARNING: {warning}");
+            }
+
+            if (review.FormatNotInstalled() is { } note)
+            {
+                output.WriteLine($"Note:     {note}");
             }
 
             output.WriteLine($"Imported {upserted:N0} rows into {layout.DatabasePath}; {nowProvided:N0} job(s) now provided by a mod.");

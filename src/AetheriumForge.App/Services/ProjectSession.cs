@@ -139,9 +139,10 @@ public sealed partial class ProjectSession : IScanProjectSession, IDisposable
                     [ProjectKeys.RulesJson] = request.Rules.ToJson(),
                     [ProjectKeys.ScannedAt] = _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture),
                 };
+                var review = await ScanImporter.ReviewMissingArchivesAsync(store, request.Result, request.Game.DataFolder, cancellationToken).ConfigureAwait(false);
                 var (upserted, nowProvided) = await ScanImporter.ImportAsync(store, request.Result, values, cancellationToken).ConfigureAwait(false);
                 var counts = await store.CountByStateAsync(CancellationToken.None).ConfigureAwait(false);
-                imported = new ScanImportResult(layout.DatabasePath, upserted, nowProvided, counts, request.Result.MissingArchives);
+                imported = new ScanImportResult(layout.DatabasePath, upserted, nowProvided, counts, review);
             }
             catch
             {

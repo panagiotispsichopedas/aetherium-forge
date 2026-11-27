@@ -427,6 +427,39 @@ public sealed class JobStore : IAsyncDisposable
     }
 
     /// <summary>
+    /// Tells which of <paramref name="archives"/> provide at least one job (compared case-insensitively).
+    /// </summary>
+    /// <param name="archives">Archive file names.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The archives that have jobs.</returns>
+    public async Task<IReadOnlySet<string>> GetArchivesWithJobsAsync(IEnumerable<string> archives, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(archives);
+
+        var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                command.CommandText = "SELECT EXISTS (SELECT 1 FROM job WHERE archive = $archive COLLATE NOCASE);";
+                var parameter = command.Parameters.Add("$archive", SqliteType.Text);
+                foreach (var archive in archives)
+                {
+                    parameter.Value = archive;
+                    if (Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture) == 1)
+                    {
+                        found.Add(archive);
+                    }
+                }
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
     /// Records the start of a processing run.
     /// </summary>
     /// <param name="ct">Cancels the operation.</param>
