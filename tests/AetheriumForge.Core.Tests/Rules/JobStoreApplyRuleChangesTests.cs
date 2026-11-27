@@ -173,4 +173,125 @@ public sealed class JobStoreApplyRuleChangesTests : IAsyncLifetime
         // Assert
         Assert.Null(await _store.GetProjectValueAsync(RulesApplier.RulesProjectKey, Ct));
     }
+
+    private static readonly ForgeRules _rules = new()
+    {
+        Groups =
+        [
+            new GroupRule { Name = "Clutter", Match = [@"*\clutter\*"], Cap = 2048, Model = "m" },
+            new GroupRule { Name = "Large", Match = ["*"], Cap = 4096, Model = "m" },
+        ],
+        Exclude = [],
+    };
+
+    private async Task<JobRecord> SeedDoneAsync(string path, string kind, string group, string? lookHash)
+    {
+        await _store.UpsertJobsAsync([Job(path) with { Kind = kind, Group = group, Target = 2048, Model = "m" }], Ct);
+        var job = await SingleAsync(path);
+        await _store.MarkDoneAsync(job.Id, 1.0, lookHash, Ct);
+        return job;
+    }
+
+    private static string HashOf(ForgeRules rules, string group, Core.Textures.TextureKind kind) => LookResolver.Resolve(rules, group, null).GetStableHash(kind);
+
+    [Fact]
+    public async Task FindDoneLookChangesAsync_GroupLookChanged_ReturnsTheRow()
+    {
+        // Arrange
+        var job = await SeedDoneAsync(@"textures\clutter\a.dds", "Diffuse", "Clutter", HashOf(_rules, "Clutter", Core.Textures.TextureKind.Diffuse));
+        var edited = _rules with { Groups = [_rules.Groups[0] with { Look = new LookOverrides { Saturation = 1.3 } }, _rules.Groups[1]] };
+
+        // Act
+        var ids = await RulesApplier.FindDoneLookChangesAsync(_store, _rules, edited, Ct);
+
+        // Assert
+        Assert.Equal([job.Id], ids);
+    }
+
+    [Fact]
+    public async Task FindDoneLookChangesAsync_LookUnchanged_ReturnsNothing()
+    {
+        // Arrange
+        await SeedDoneAsync(@"textures\clutter\a.dds", "Diffuse", "Clutter", HashOf(_rules, "Clutter", Core.Textures.TextureKind.Diffuse));
+
+        // Act
+        var ids = await RulesApplier.FindDoneLookChangesAsync(_store, _rules, _rules, Ct);
+
+        // Assert
+        Assert.Empty(ids);
+    }
+
+    [Fact]
+    public async Task FindDoneLookChangesAsync_ControlNotForTheKind_ReturnsNothing()
+    {
+        // Arrange: normal strength does not apply to a diffuse map.
+        await SeedDoneAsync(@"textures\clutter\a.dds", "Diffuse", "Clutter", HashOf(_rules, "Clutter", Core.Textures.TextureKind.Diffuse));
+        var edited = _rules with { Groups = [_rules.Groups[0] with { NormalStrength = 2.0 }, _rules.Groups[1]] };
+
+        // Act
+        var ids = await RulesApplier.FindDoneLookChangesAsync(_store, _rules, edited, Ct);
+
+        // Assert
+        Assert.Empty(ids);
+    }
+
+    [Fact]
+    public async Task FindDoneLookChangesAsync_RowMovesToGroupWithOtherLook_ReturnsTheRow()
+    {
+        // Arrange: the row was finished in Large; the edited rules send it to a new group with its own look.
+        var job = await SeedDoneAsync(@"textures\armor\a.dds", "Diffuse", "Large", HashOf(_rules, "Large", Core.Textures.TextureKind.Diffuse));
+        var edited = _rules with
+        {
+            Groups = [new GroupRule { Name = "Armor", Match = [@"*\armor\*"], Model = "m", Look = new LookOverrides { Contrast = 1.2 } }, .. _rules.Groups],
+        };
+
+        // Act
+        var ids = await RulesApplier.FindDoneLookChangesAsync(_store, _rules, edited, Ct);
+
+        // Assert
+        Assert.Equal([job.Id], ids);
+    }
+
+    [Fact]
+    public async Task FindDoneLookChangesAsync_NoHashAndSameAsBefore_ReturnsNothing()
+    {
+        // Arrange: finished before look hashes were recorded.
+        await SeedDoneAsync(@"textures\clutter\a_n.dds", "Normal", "Clutter", null);
+
+        // Act
+        var ids = await RulesApplier.FindDoneLookChangesAsync(_store, _rules, _rules, Ct);
+
+        // Assert
+        Assert.Empty(ids);
+    }
+
+    [Fact]
+    public async Task FindDoneLookChangesAsync_NoHashAndStrengthChanged_ReturnsTheRow()
+    {
+        // Arrange
+        var job = await SeedDoneAsync(@"textures\clutter\a_n.dds", "Normal", "Clutter", null);
+        var edited = _rules with { Groups = [_rules.Groups[0] with { NormalStrength = 2.0 }, _rules.Groups[1]] };
+
+        // Act
+        var ids = await RulesApplier.FindDoneLookChangesAsync(_store, _rules, edited, Ct);
+
+        // Assert
+        Assert.Equal([job.Id], ids);
+    }
+
+    [Fact]
+    public async Task FindDoneLookChangesAsync_TextureOverrideCoversTheChange_ReturnsNothing()
+    {
+        // Arrange: the texture sets its own saturation, so a group saturation change does not reach it.
+        await _store.SetTextureLookAsync(@"textures\clutter\a.dds", new LookOverrides { Saturation = 0.8 }, Ct);
+        var before = LookResolver.Resolve(_rules, "Clutter", new LookOverrides { Saturation = 0.8 }).GetStableHash(Core.Textures.TextureKind.Diffuse);
+        await SeedDoneAsync(@"textures\clutter\a.dds", "Diffuse", "Clutter", before);
+        var edited = _rules with { Groups = [_rules.Groups[0] with { Look = new LookOverrides { Saturation = 1.3 } }, _rules.Groups[1]] };
+
+        // Act
+        var ids = await RulesApplier.FindDoneLookChangesAsync(_store, _rules, edited, Ct);
+
+        // Assert
+        Assert.Empty(ids);
+    }
 }

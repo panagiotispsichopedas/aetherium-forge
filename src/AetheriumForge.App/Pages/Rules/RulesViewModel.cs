@@ -39,7 +39,10 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
     private readonly IForgeRunner? _runner;
     private readonly ILogger<RulesViewModel> _logger;
 
+    private readonly IStyleSelection _selection;
+
     private ForgeRules _baseline = ForgeRules.Default;
+    private LookOverrides? _allLook;
     private IReadOnlyList<JobRecord> _rows = [];
     private Func<string, double?>? _timings;
     private CancellationTokenSource? _recomputeCts;
@@ -54,6 +57,7 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
     /// <param name="navigation">Navigation (Compare link; reload when the page is shown).</param>
     /// <param name="services">Dialogs, pickers, models, timings and UI dispatch.</param>
     /// <param name="timeProvider">Clock for the recount debounce.</param>
+    /// <param name="selection">The group shown on Compare (set by "Edit the look on Compare").</param>
     /// <param name="serviceProvider">Resolves the optional <see cref="IForgeRunner"/> (Apply is disabled while a run is active).</param>
     /// <param name="logger">The logger.</param>
     public RulesViewModel(
@@ -61,9 +65,11 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
         INavigationService navigation,
         IRulesPageServices services,
         TimeProvider timeProvider,
+        IStyleSelection selection,
         IServiceProvider serviceProvider,
         ILogger<RulesViewModel> logger)
     {
+        ArgumentNullException.ThrowIfNull(selection);
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(navigation);
         ArgumentNullException.ThrowIfNull(services);
@@ -76,6 +82,7 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
         _services = services;
         _timeProvider = timeProvider;
         _logger = logger;
+        _selection = selection;
         _runner = serviceProvider.GetService<IForgeRunner>();
 
         ExclusionsText = string.Empty;
@@ -263,6 +270,7 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
 
         var rules = new ForgeRules
         {
+            Look = _allLook,
             Groups = groups,
             MinSource = minSource,
             Exclude = [.. RuleGroupViewModel.SplitLines(ExclusionsText)],
@@ -274,7 +282,7 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void AddGroup()
     {
-        var group = new RuleGroupViewModel(new GroupRule { Name = UniqueName("New group"), Model = AvailableModels.FirstOrDefault() ?? "realesrgan-x4plus" });
+        var group = new RuleGroupViewModel(new GroupRule { Name = UniqueName("New group"), Model = AvailableModels.FirstOrDefault() ?? ForgeRules.DefaultModel });
         int index = SelectedGroup is { } selected ? Groups.IndexOf(selected) + 1 : Groups.Count;
         InsertGroup(index, group);
     }
@@ -294,8 +302,16 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(HasSelection))]
     private async Task DeleteGroupAsync()
     {
-        if (SelectedGroup is not { } selected
-            || !await _services.ConfirmAsync("Delete group", $"Delete the group '{selected.Name}'? Nothing is saved until you apply.").ConfigureAwait(true)
+        if (SelectedGroup is not { } selected)
+        {
+            return;
+        }
+
+        int overridden = await CountTextureOverridesAsync(selected.Name).ConfigureAwait(true);
+        string warning = overridden == 0
+            ? string.Empty
+            : $" {overridden.ToString("N0", CultureInfo.CurrentCulture)} of its textures have their own look overrides; they stay attached to those textures.";
+        if (!await _services.ConfirmAsync("Delete group", $"Delete the group '{selected.Name}'?{warning} Nothing is saved until you apply.").ConfigureAwait(true)
             || !Groups.Contains(selected))
         {
             return;
@@ -336,7 +352,8 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
             var stored = await ReadStoredRulesAsync(store).ConfigureAwait(true) ?? _baseline;
             rules = MergeLooks(stored, rules);
             var rows = await ReadRowsAsync(store).ConfigureAwait(true);
-            var options = new RulesPreviewOptions { SecondsPerSourceMegapixel = _timings, DoneLookDiffers = RulesApplier.LookDiffersFrom(stored) };
+            var lookChanged = await RulesApplier.FindDoneLookChangesAsync(store, stored, rules).ConfigureAwait(true);
+            var options = new RulesPreviewOptions { SecondsPerSourceMegapixel = _timings, DoneLookDiffers = (job, _) => lookChanged.Contains(job.Id) };
             var preview = await Task.Run(() => RulesApplier.Preview(rows, rules, options)).ConfigureAwait(true);
 
             var changes = new List<JobRuleChange>(preview.Changes);
@@ -464,7 +481,11 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand]
-    private void OpenCompare() => _navigation.NavigateTo(AppPage.Compare);
+    private void OpenCompare()
+    {
+        _selection.SelectedGroup = SelectedGroup?.Name.Trim();
+        _navigation.NavigateTo(AppPage.Compare);
+    }
 
     partial void OnSelectedGroupChanged(RuleGroupViewModel? value)
     {
@@ -523,14 +544,56 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
 
     private ForgeRules MergeLooks(ForgeRules stored, ForgeRules rules)
     {
-        var looks = stored.Groups.GroupBy(g => g.Name, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First().Look, StringComparer.OrdinalIgnoreCase);
-        var merged = rules with { Groups = [.. rules.Groups.Select(g => looks.TryGetValue(g.Name, out var look) ? g with { Look = look } : g)] };
+        // Compare owns every look control except a group's normal strength, which this page edits.
+        var looks = stored.Groups.GroupBy(g => g.Name, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First().ScopeLook, StringComparer.OrdinalIgnoreCase);
+        var merged = rules with
+        {
+            Look = stored.Look,
+            Groups =
+            [
+                .. rules.Groups.Select(g => looks.TryGetValue(g.Name, out var look)
+                    ? g with { Look = RuleGroupViewModel.WithStrength(RuleGroupViewModel.WithoutStrength(look), g.Look?.NormalStrength) }
+                    : g),
+            ],
+        };
+        _allLook = stored.Look;
         for (int i = 0; i < Groups.Count && i < merged.Groups.Count; i++)
         {
             Groups[i].SetLook(merged.Groups[i].Look);
+            Groups[i].SetAllLook(_allLook);
         }
 
         return merged;
+    }
+
+    /// <summary>
+    /// Brings rules to the editor's canonical form (an empty look is no look; a group's normal strength lives in its look), so loading and
+    /// rebuilding the same rules compares equal.
+    /// </summary>
+    private static ForgeRules Normalize(ForgeRules rules) => rules with
+    {
+        Look = rules.Look is { IsEmpty: true } ? null : rules.Look,
+        Groups =
+        [
+            .. rules.Groups.Select(g => g with
+            {
+                Look = g.ScopeLook is { IsEmpty: false } look ? look : null,
+                NormalStrength = g.ScopeLook?.NormalStrength ?? 1.0,
+            }),
+        ],
+    };
+
+    private async Task<int> CountTextureOverridesAsync(string groupName)
+    {
+        if (_session.Store is not { } store)
+        {
+            return 0;
+        }
+
+        var overridden = (await store.ListTextureLooksAsync().ConfigureAwait(true)).Select(l => l.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return overridden.Count == 0
+            ? 0
+            : _rows.Count(r => overridden.Contains(r.Path) && string.Equals(r.Group, groupName.Trim(), StringComparison.OrdinalIgnoreCase));
     }
 
     private void LoadModels(ForgeRules rules)
@@ -555,9 +618,11 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
             }
 
             Groups.Clear();
+            _allLook = rules.Look;
             foreach (var rule in rules.Groups)
             {
                 var group = new RuleGroupViewModel(rule);
+                group.SetAllLook(_allLook);
                 group.Edited += OnGroupEdited;
                 Groups.Add(group);
             }
@@ -625,7 +690,7 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
         // Validation is immediate; the recount waits for the debounce and runs in the background.
         var rules = BuildRules(out string? error);
         ValidationError = error;
-        IsDirty = rules is null || !rules.Equals(_baseline);
+        IsDirty = rules is null || !Normalize(rules).Equals(Normalize(_baseline));
         ScheduleRecompute();
     }
 
@@ -648,7 +713,7 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
             }
 
             var rows = _rows;
-            var options = new RulesPreviewOptions { SecondsPerSourceMegapixel = _timings, DoneLookDiffers = RulesApplier.LookDiffersFrom(_baseline) };
+            var options = new RulesPreviewOptions { SecondsPerSourceMegapixel = _timings };
             var preview = await Task.Run(() => RulesApplier.Preview(rows, rules, options, ct), ct).ConfigureAwait(true);
             ct.ThrowIfCancellationRequested();
             ShowPreview(preview);
@@ -736,9 +801,19 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
             return;
         }
 
-        var looks = stored.Groups.GroupBy(g => g.Name, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First().Look, StringComparer.OrdinalIgnoreCase);
+        if (!IsDirty)
+        {
+            // Nothing unsaved: show exactly what the project holds now (Compare may have changed a look or a normal strength).
+            _baseline = stored;
+            Populate(stored);
+            return;
+        }
+
+        _allLook = stored.Look;
+        var looks = stored.Groups.GroupBy(g => g.Name, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First().ScopeLook, StringComparer.OrdinalIgnoreCase);
         foreach (var group in Groups)
         {
+            group.SetAllLook(_allLook);
             if (looks.TryGetValue(group.Name.Trim(), out var look))
             {
                 group.SetLook(look);

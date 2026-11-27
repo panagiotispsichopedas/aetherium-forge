@@ -273,49 +273,7 @@ public sealed class RulesApplierTests
         Assert.Equal(expected, result);
     }
 
-    [Fact]
-    public void Preview_DoneRowNormalStrengthChanged_IsListedInDoneChanges()
-    {
-        // Arrange
-        JobRecord[] jobs = [Job(1, @"textures\clutter\a.dds", state: JobState.Done, group: "Clutter", target: 2048, model: "model-a")];
-        var edited = _rules with { Groups = [_rules.Groups[0] with { NormalStrength = 2.0 }, _rules.Groups[1]] };
-        var options = new RulesPreviewOptions { DoneLookDiffers = RulesApplier.LookDiffersFrom(_rules) };
 
-        // Act
-        var preview = RulesApplier.Preview(jobs, edited, options, TestContext.Current.CancellationToken);
-
-        // Assert
-        Assert.Single(preview.DoneChanges);
-    }
-
-    [Fact]
-    public void Preview_DoneRowLookChanged_IsListedInDoneChanges()
-    {
-        // Arrange
-        JobRecord[] jobs = [Job(1, @"textures\clutter\a.dds", state: JobState.Done, group: "Clutter", target: 2048, model: "model-a")];
-        var edited = _rules with { Groups = [_rules.Groups[0] with { Look = new LookSettings { Saturation = 1.3 } }, _rules.Groups[1]] };
-        var options = new RulesPreviewOptions { DoneLookDiffers = RulesApplier.LookDiffersFrom(_rules) };
-
-        // Act
-        var preview = RulesApplier.Preview(jobs, edited, options, TestContext.Current.CancellationToken);
-
-        // Assert
-        Assert.Single(preview.DoneChanges);
-    }
-
-    [Fact]
-    public void Preview_DoneRowSameLookAndStrength_ProducesNoChange()
-    {
-        // Arrange
-        JobRecord[] jobs = [Job(1, @"textures\clutter\a.dds", state: JobState.Done, group: "Clutter", target: 2048, model: "model-a")];
-        var options = new RulesPreviewOptions { DoneLookDiffers = RulesApplier.LookDiffersFrom(_rules) };
-
-        // Act
-        var preview = RulesApplier.Preview(jobs, _rules, options, TestContext.Current.CancellationToken);
-
-        // Assert
-        Assert.Empty(preview.DoneChanges);
-    }
 
     [Fact]
     public void Preview_FailedRow_IsCountedButNotTimed()
@@ -379,5 +337,19 @@ public sealed class RulesApplierTests
 
         // Assert
         Assert.Equal(1, changed);
+    }
+
+    [Fact]
+    public void Preview_DoneLookDiffers_ListsTheRowInDoneChanges()
+    {
+        // Arrange
+        JobRecord[] jobs = [Job(1, @"textures\clutter\a.dds", state: JobState.Done, group: "Clutter", target: 2048, model: "model-a")];
+        var options = new RulesPreviewOptions { DoneLookDiffers = (job, _) => job.Id == 1 };
+
+        // Act
+        var preview = RulesApplier.Preview(jobs, _rules, options, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Single(preview.DoneChanges);
     }
 }

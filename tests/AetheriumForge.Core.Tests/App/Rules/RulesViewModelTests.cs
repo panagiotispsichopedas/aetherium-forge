@@ -10,8 +10,22 @@ namespace AetheriumForge.Core.Tests.App.Rules;
 public sealed class RulesViewModelTests : IAsyncLifetime
 {
     private const string ClutterPath = @"textures\clutter\bucket01.dds";
+    private const string NormalPath = @"textures\clutter\bucket01_n.dds";
     private const string RockPath = @"textures\landscape\rock01.dds";
 
+    /// <summary>The old two-group rules (Clutter, then the catch-all Large); most tests use them to keep counts small.</summary>
+    private static readonly ForgeRules _twoGroups = new()
+    {
+        Groups =
+        [
+            new GroupRule { Name = "Clutter", Match = [@"*\clutter\*"], Cap = 2048, MaxFactor = 4, Model = "realesrgan-x4plus", NormalStrength = 1.4, Look = new LookOverrides { NormalStrength = 1.4 } },
+            new GroupRule { Name = "Large", Match = ["*"], Cap = 4096, MaxFactor = 4, Model = "realesrgan-x4plus" },
+        ],
+        MinSource = ForgeRules.DefaultMinSource,
+        Exclude = ForgeRules.DefaultExcludedFolders,
+    };
+
+    private readonly StyleSelection _selection = new();
     private readonly string _folder = Path.Combine(Path.GetTempPath(), "aetherium-forge-tests", Guid.NewGuid().ToString("N"));
     private readonly ManualTimeProvider _time = new();
     private readonly FakeNavigation _navigation = new();
@@ -33,7 +47,7 @@ public sealed class RulesViewModelTests : IAsyncLifetime
                 Job(RockPath, "Large", 2048),
             ],
             Ct);
-        await CreateViewModelAsync(ForgeRules.Default);
+        await CreateViewModelAsync(_twoGroups);
     }
 
     public async ValueTask DisposeAsync()
@@ -50,7 +64,7 @@ public sealed class RulesViewModelTests : IAsyncLifetime
     {
         _vm?.Dispose();
         _session = new FakeProjectSession(new ProjectInfo(_folder, "game", "data", "out", "work", projectRules), _store);
-        _vm = new RulesViewModel(_session, _navigation, _services, _time, new SingleServiceProvider(_runner), NullLogger<RulesViewModel>.Instance);
+        _vm = new RulesViewModel(_session, _navigation, _services, _time, _selection, new SingleServiceProvider(_runner), NullLogger<RulesViewModel>.Instance);
         await _vm.LoadAsync();
         await SettleAsync();
     }
@@ -289,10 +303,11 @@ public sealed class RulesViewModelTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ApplyAsync_NormalStrengthChanged_AsksAboutFinishedRows()
+    public async Task ApplyAsync_NormalStrengthChanged_AsksAboutFinishedNormalMaps()
     {
         // Arrange
-        var job = await JobAsync(ClutterPath);
+        await _store.UpsertJobsAsync([Job(NormalPath, "Clutter", 2048) with { Kind = "Normal" }], Ct);
+        var job = await JobAsync(NormalPath);
         await _store.MarkDoneAsync(job.Id, 2.0, Ct);
         Group("Clutter").NormalStrengthText = "2";
 
@@ -588,7 +603,7 @@ public sealed class RulesViewModelTests : IAsyncLifetime
         _vm.RevertCommand.Execute(null);
 
         // Assert
-        Assert.Equal((ForgeRules.Default, false), (_vm.BuildRules(out _), _vm.IsDirty));
+        Assert.Equal((_twoGroups, false), (_vm.BuildRules(out _), _vm.IsDirty));
     }
 
     [Fact]
@@ -624,32 +639,32 @@ public sealed class RulesViewModelTests : IAsyncLifetime
     public async Task BuildRules_GroupWithLook_PreservesLookUntouched()
     {
         // Arrange
-        var look = new LookSettings { Saturation = 1.2, Sharpen = new SharpenSettings(0.5, 1.0) };
-        var rules = ForgeRules.Default with { Groups = [ForgeRules.Default.Groups[0] with { Look = look }, ForgeRules.Default.Groups[1]] };
+        var look = new LookOverrides { Saturation = 1.2, SharpenAmount = 0.5, NormalStrength = 1.4 };
+        var rules = _twoGroups with { Groups = [_twoGroups.Groups[0] with { Look = look }, _twoGroups.Groups[1]] };
         await CreateViewModelAsync(rules);
 
         // Act
         Group("Clutter").CapText = "1024";
 
         // Assert
-        Assert.Same(look, _vm.BuildRules(out _)!.Groups[0].Look);
+        Assert.Equal(look, _vm.BuildRules(out _)!.Groups[0].Look);
     }
 
     [Fact]
     public void LookSummary_NeutralGroup_SaysNeutral()
     {
         // Assert
-        Assert.Equal("Neutral", Group("Clutter").LookSummary);
+        Assert.Equal("Neutral", Group("Large").LookSummary);
     }
 
     [Fact]
     public void DescribeLook_ChangedControls_ListsThem()
     {
         // Act
-        var summary = RuleGroupViewModel.DescribeLook(new LookSettings { Saturation = 1.2, Contrast = 1.1 });
+        var summary = RuleGroupViewModel.DescribeLook(new LookOverrides { Saturation = 1.2 }, new LookOverrides { Contrast = 1.1, Saturation = 0.9 });
 
         // Assert
-        Assert.Equal("Contrast 1.1, Saturation 1.2", summary);
+        Assert.Equal("Sets: Saturation 1.2 · From All: Contrast 1.1", summary);
     }
 
     [Fact]
@@ -666,7 +681,7 @@ public sealed class RulesViewModelTests : IAsyncLifetime
     public async Task LoadAsync_StoredRules_WinOverSessionRules()
     {
         // Arrange
-        var stored = ForgeRules.Default with { MinSource = 64 };
+        var stored = _twoGroups with { MinSource = 64 };
         await _store.SetProjectValueAsync(RulesApplier.RulesProjectKey, stored.ToJson(), Ct);
 
         // Act
@@ -694,7 +709,7 @@ public sealed class RulesViewModelTests : IAsyncLifetime
     public async Task ResetToDefaults_RowsWouldChangeGroup_ConfirmationShowsCount()
     {
         // Arrange: rename the catch-all, so its row would change group back to "Large".
-        var rules = ForgeRules.Default with { Groups = [ForgeRules.Default.Groups[0], ForgeRules.Default.Groups[1] with { Name = "Everything" }] };
+        var rules = _twoGroups with { Groups = [_twoGroups.Groups[0], _twoGroups.Groups[1] with { Name = "Everything" }] };
         var rock = await JobAsync(RockPath);
         await _store.ApplyRuleChangesAsync([new JobRuleChange(rock.Id, rock.Path, JobState.Queued, JobState.Queued, "Everything", 2048, "realesrgan-x4plus", null)], Ct);
         await CreateViewModelAsync(rules);
@@ -704,5 +719,145 @@ public sealed class RulesViewModelTests : IAsyncLifetime
 
         // Assert
         Assert.Equal(["Replace the groups, exclusions and minimum size with the defaults? 1 of 2 textures would change group. Nothing is saved until you apply."], _services.Questions);
+    }
+
+    [Fact]
+    public async Task ApplyAsync_NormalStrengthChanged_DoesNotAskAboutFinishedDiffuse()
+    {
+        // Arrange
+        var job = await JobAsync(ClutterPath);
+        await _store.MarkDoneAsync(job.Id, 2.0, Ct);
+        Group("Clutter").NormalStrengthText = "2";
+
+        // Act
+        await _vm.ApplyCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Empty(_services.Questions);
+    }
+
+    [Fact]
+    public async Task ApplyAsync_CompareChangedStoredLook_AsksAboutFinishedRows()
+    {
+        // Arrange: the row finished with the current look; then Compare saved a new Clutter look to the project.
+        var job = await JobAsync(ClutterPath);
+        await _store.MarkDoneAsync(job.Id, 2.0, LookResolver.Resolve(_twoGroups, "Clutter", null).GetStableHash(Core.Textures.TextureKind.Diffuse), Ct);
+        var edited = _twoGroups with { Groups = [_twoGroups.Groups[0] with { Look = new LookOverrides { NormalStrength = 1.4, Saturation = 1.3 } }, _twoGroups.Groups[1]] };
+        await _store.SetProjectValueAsync(RulesApplier.RulesProjectKey, edited.ToJson(), Ct);
+
+        // Act
+        await _vm.ApplyCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal(["1 finished textures would change. Re-queue them?"], _services.Questions);
+    }
+
+    [Fact]
+    public async Task ApplyAsync_LookUnchanged_DoesNotAskAboutFinishedRows()
+    {
+        // Arrange
+        var job = await JobAsync(ClutterPath);
+        await _store.MarkDoneAsync(job.Id, 2.0, LookResolver.Resolve(_twoGroups, "Clutter", null).GetStableHash(Core.Textures.TextureKind.Diffuse), Ct);
+        Group("Large").CapText = "2048";
+
+        // Act
+        await _vm.ApplyCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Empty(_services.Questions);
+    }
+
+    [Fact]
+    public async Task LoadAsync_DefaultRules_ShowsTheEightDefaultGroups()
+    {
+        // Act
+        await CreateViewModelAsync(ForgeRules.Default);
+
+        // Assert
+        Assert.Equal(["Armor", "Weapons", "Clothes", "Creatures", "Architecture", "Landscape", "Clutter", "Large"], _vm.Groups.Select(g => g.Name));
+    }
+
+    [Fact]
+    public async Task LoadAsync_DefaultRules_CountsRowsInTheNewGroups()
+    {
+        // Act
+        await CreateViewModelAsync(ForgeRules.Default);
+
+        // Assert: the landscape rock moves from the catch-all to Landscape.
+        Assert.Equal((1, 1, 0), (Group("Clutter").Count, Group("Landscape").Count, Group("Large").Count));
+    }
+
+    [Fact]
+    public async Task LoadAsync_DefaultRules_IsNotDirty()
+    {
+        // Act
+        await CreateViewModelAsync(ForgeRules.Default);
+
+        // Assert
+        Assert.False(_vm.IsDirty);
+    }
+
+    [Fact]
+    public async Task LookSummary_GlobalLook_ShowsInheritedControls()
+    {
+        // Act
+        await CreateViewModelAsync(_twoGroups with { Look = new LookOverrides { Contrast = 1.1 } });
+
+        // Assert
+        Assert.Equal(("From All: Contrast 1.1", "Sets: Normal strength 1.4 · From All: Contrast 1.1"), (Group("Large").LookSummary, Group("Clutter").LookSummary));
+    }
+
+    [Fact]
+    public async Task BuildRules_GlobalLook_IsKept()
+    {
+        // Arrange
+        var all = new LookOverrides { Gamma = 1.2 };
+        await CreateViewModelAsync(_twoGroups with { Look = all });
+
+        // Act
+        Group("Large").CapText = "2048";
+
+        // Assert
+        Assert.Equal(all, _vm.BuildRules(out _)!.Look);
+    }
+
+    [Fact]
+    public void OpenCompare_SelectedGroup_PreselectsItOnCompare()
+    {
+        // Arrange
+        _vm.SelectedGroup = Group("Large");
+
+        // Act
+        _vm.OpenCompareCommand.Execute(null);
+
+        // Assert
+        Assert.Equal(("Large", AppPage.Compare), (_selection.SelectedGroup, _navigation.Current));
+    }
+
+    [Fact]
+    public async Task DeleteGroup_TexturesWithOverrides_WarnsTheyStayAttached()
+    {
+        // Arrange
+        await _store.SetTextureLookAsync(ClutterPath, new LookOverrides { Saturation = 1.1 }, Ct);
+        _vm.SelectedGroup = Group("Clutter");
+
+        // Act
+        await _vm.DeleteGroupCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal(["Delete the group 'Clutter'? 1 of its textures have their own look overrides; they stay attached to those textures. Nothing is saved until you apply."], _services.Questions);
+    }
+
+    [Fact]
+    public async Task DeleteGroup_NoOverrides_DoesNotWarn()
+    {
+        // Arrange
+        _vm.SelectedGroup = Group("Large");
+
+        // Act
+        await _vm.DeleteGroupCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal(["Delete the group 'Large'? Nothing is saved until you apply."], _services.Questions);
     }
 }

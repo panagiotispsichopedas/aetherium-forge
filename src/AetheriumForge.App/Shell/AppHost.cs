@@ -81,6 +81,8 @@ public static class AppHost
         services.AddSingleton<ModelsPagePlaceholder>(sp => new ModelsPagePlaceholder(sp.GetRequiredService<Pages.Models.ModelsViewModel>()));
 
         // ── PAGE: Rules (M5) ──
+        // IStyleSelection is shared with Compare (TryAdd, so whichever block registers it first wins and both get the same instance).
+        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<AetheriumForge.App.Pages.Rules.IStyleSelection, AetheriumForge.App.Pages.Rules.StyleSelection>(services);
         services.AddSingleton<AetheriumForge.App.Pages.Rules.IRulesPageServices, AetheriumForge.App.Pages.Rules.AvaloniaRulesPageServices>();
         services.AddSingleton<AetheriumForge.App.Pages.Rules.RulesViewModel>();
         services.AddSingleton<RulesPagePlaceholder>(sp => new RulesPagePlaceholder(sp.GetRequiredService<AetheriumForge.App.Pages.Rules.RulesViewModel>()));

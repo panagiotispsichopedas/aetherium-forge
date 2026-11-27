@@ -156,28 +156,55 @@ public static class RulesApplier
     }
 
     /// <summary>
-    /// Returns a <see cref="RulesPreviewOptions.DoneLookDiffers"/> comparison against the rules the finished rows were made with:
-    /// a finished row's look differs when the new group's normal strength or look differs from its previous group's (matched by name,
-    /// case-insensitively). A row whose previous group is unknown counts as different.
+    /// Finds the finished jobs whose effective look (§8 "Scopes": texture override, else group, else All) would change under
+    /// <paramref name="rules"/>, by comparing each Done job's recorded look hash for its kind with the hash of its new effective look. A job's
+    /// new group is the one <paramref name="rules"/> assign to it. Use the result as <see cref="RulesPreviewOptions.DoneLookDiffers"/>.
     /// </summary>
-    /// <param name="previous">The rules stored in the project before the edit.</param>
-    /// <returns>The comparison.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="previous"/> is <see langword="null"/>.</exception>
-    public static Func<JobRecord, GroupRule, bool> LookDiffersFrom(ForgeRules previous)
+    /// <remarks>
+    /// Jobs finished before look hashes were recorded have no hash. They were rendered with no look except their group's normal strength,
+    /// so they count as changed only when their new effective look differs from the look of their group in <paramref name="previous"/>
+    /// (plus their texture override).
+    /// </remarks>
+    /// <param name="store">The job store.</param>
+    /// <param name="previous">The rules stored before the edit.</param>
+    /// <param name="rules">The edited rules.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The ids of the affected Done jobs.</returns>
+    /// <exception cref="ArgumentNullException">An argument is <see langword="null"/>.</exception>
+    public static async Task<IReadOnlySet<long>> FindDoneLookChangesAsync(JobStore store, ForgeRules previous, ForgeRules rules, CancellationToken ct = default)
     {
+        ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(previous);
+        ArgumentNullException.ThrowIfNull(rules);
 
-        var byName = new Dictionary<string, GroupRule>(StringComparer.OrdinalIgnoreCase);
-        foreach (GroupRule group in previous.Groups)
+        var evaluator = new RuleEvaluator(rules);
+        string? NewGroup(JobRecord job) =>
+            evaluator.Evaluate(job.Path, new DdsHeader(job.SourceWidth, job.SourceHeight, 1, string.Empty, null, IsCubemap: false)).Group ?? job.Group;
+
+        var affected = await store.FindDoneAffectedByLookChangeAsync((job, texture) => LookResolver.Resolve(rules, NewGroup(job), texture), null, ct)
+            .ConfigureAwait(false);
+
+        // The store returns every job without a recorded hash; judge those against the look they were presumably rendered with.
+        Dictionary<string, LookOverrides>? overrides = null;
+        var ids = new HashSet<long>();
+        foreach (JobRecord job in affected)
         {
-            byName.TryAdd(group.Name, group);
+            if (job.LookHash is null && Enum.TryParse(job.Kind, ignoreCase: true, out TextureKind kind))
+            {
+                overrides ??= (await store.ListTextureLooksAsync(ct).ConfigureAwait(false)).ToDictionary(l => l.Path, l => l.Look, StringComparer.Ordinal);
+                LookOverrides? texture = overrides.GetValueOrDefault(job.Path);
+                string after = LookResolver.Resolve(rules, NewGroup(job), texture).GetStableHash(kind);
+                string before = LookResolver.Resolve(previous, job.Group, texture).GetStableHash(kind);
+                if (after == before)
+                {
+                    continue;
+                }
+            }
+
+            ids.Add(job.Id);
         }
 
-        return (job, group) =>
-            job.Group is null
-            || !byName.TryGetValue(job.Group, out GroupRule? old)
-            || !old.NormalStrength.Equals(group.NormalStrength)
-            || !Equals(old.Look, group.Look);
+        return ids;
     }
 
     /// <summary>
@@ -264,8 +291,8 @@ public sealed record RulesPreviewOptions
     public Func<string, double?>? SecondsPerSourceMegapixel { get; init; }
 
     /// <summary>
-    /// Gets a comparison that returns <see langword="true"/> when a finished row was made with a different look or normal strength than
-    /// its new group (see <see cref="RulesApplier.LookDiffersFrom"/>). When <see langword="null"/>, only target and model are compared.
+    /// Gets a comparison that returns <see langword="true"/> when a finished row's effective look would change (see
+    /// <see cref="RulesApplier.FindDoneLookChangesAsync"/>). When <see langword="null"/>, only target and model are compared.
     /// </summary>
     public Func<JobRecord, GroupRule, bool>? DoneLookDiffers { get; init; }
 }

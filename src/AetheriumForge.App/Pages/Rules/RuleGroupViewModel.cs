@@ -8,7 +8,8 @@ namespace AetheriumForge.App.Pages.Rules;
 
 /// <summary>
 /// One editable group on the Rules page. Numbers are edited as text so a half-typed value shows an inline error instead of being rejected.
-/// The group's <see cref="Look"/> is carried through unchanged; it is edited on the Compare page.
+/// The group's look is carried through unchanged and edited on the Compare page, except its normal strength, which this editor owns
+/// (the group-level <c>normalStrength</c> alias, §8).
 /// </summary>
 public sealed partial class RuleGroupViewModel : ObservableObject
 {
@@ -29,8 +30,8 @@ public sealed partial class RuleGroupViewModel : ObservableObject
         CapText = rule.Cap.ToString(CultureInfo.InvariantCulture);
         MaxFactorText = rule.MaxFactor.ToString(CultureInfo.InvariantCulture);
         Model = rule.Model;
-        NormalStrengthText = rule.NormalStrength.ToString("0.###", CultureInfo.InvariantCulture);
-        Look = rule.Look;
+        NormalStrengthText = rule.ScopeLook?.NormalStrength is double strength ? strength.ToString("0.###", CultureInfo.InvariantCulture) : string.Empty;
+        Look = WithoutStrength(rule.ScopeLook);
         Kinds = [.. Enum.GetValues<TextureKind>().Select(k => new KindOption(k, rule.Kinds?.Contains(k) == true))];
         foreach (var option in Kinds)
         {
@@ -73,7 +74,7 @@ public sealed partial class RuleGroupViewModel : ObservableObject
     [ObservableProperty]
     public partial string Model { get; set; }
 
-    /// <summary>Gets or sets the normal-map strength.</summary>
+    /// <summary>Gets or sets the normal-map strength; empty inherits it from the All look (or neutral 1.0).</summary>
     [ObservableProperty]
     public partial string NormalStrengthText { get; set; }
 
@@ -94,11 +95,14 @@ public sealed partial class RuleGroupViewModel : ObservableObject
     /// <summary>Gets the kinds; none selected means every kind.</summary>
     public IReadOnlyList<KindOption> Kinds { get; }
 
-    /// <summary>Gets the look, carried through unchanged (edited on Compare).</summary>
-    public LookSettings? Look { get; private set; }
+    /// <summary>Gets the group's look without its normal strength, carried through unchanged (edited on Compare).</summary>
+    public LookOverrides? Look { get; private set; }
 
-    /// <summary>Gets the look summary: <c>Neutral</c> or the changed controls.</summary>
-    public string LookSummary => DescribeLook(Look);
+    /// <summary>Gets the global (All) look the group inherits from, or <see langword="null"/>.</summary>
+    public LookOverrides? AllLook { get; private set; }
+
+    /// <summary>Gets the look summary: the controls the group sets and those it inherits from All, or <c>Neutral</c>.</summary>
+    public string LookSummary => DescribeLook(WithStrength(Look, TryParseStrength(NormalStrengthText)), AllLook);
 
     /// <summary>Gets the count for the list, for example <c>1,234</c>.</summary>
     public string CountText => Count is int count ? count.ToString("N0", CultureInfo.CurrentCulture) : "…";
@@ -106,49 +110,62 @@ public sealed partial class RuleGroupViewModel : ObservableObject
     /// <summary>Gets a value indicating whether the group has a problem.</summary>
     public bool HasError => Error is not null;
 
-    /// <summary>Describes a look: <c>Neutral</c>, or the controls that differ from neutral.</summary>
-    /// <param name="look">The look, or <see langword="null"/> for neutral.</param>
-    /// <returns>The summary.</returns>
-    public static string DescribeLook(LookSettings? look)
+    /// <summary>
+    /// Describes a group's look scope: the controls the group sets, then the controls it inherits from All (those All sets and the group
+    /// does not), or <c>Neutral</c> when neither sets anything.
+    /// </summary>
+    /// <param name="group">The group's look, or <see langword="null"/>.</param>
+    /// <param name="all">The All look, or <see langword="null"/>.</param>
+    /// <returns>The summary, for example <c>Sets: Saturation 1.2 · From All: Contrast 1.1</c>.</returns>
+    public static string DescribeLook(LookOverrides? group, LookOverrides? all)
     {
-        if (look is null || look.IsNeutral)
+        var sets = new List<string>();
+        var inherits = new List<string>();
+        foreach (var (label, read) in _controls)
         {
-            return "Neutral";
+            if (group is not null && read(group) is double own)
+            {
+                sets.Add(string.Create(CultureInfo.InvariantCulture, $"{label} {own:0.##}"));
+            }
+            else if (all is not null && read(all) is double inherited)
+            {
+                inherits.Add(string.Create(CultureInfo.InvariantCulture, $"{label} {inherited:0.##}"));
+            }
         }
 
-        var neutral = LookSettings.Neutral;
-        var parts = new List<string>();
-        Add(parts, "AI strength", look.AiStrength, neutral.AiStrength);
-        if (look.Sharpen != neutral.Sharpen)
+        var parts = new List<string>(2);
+        if (sets.Count > 0)
         {
-            parts.Add(string.Create(CultureInfo.InvariantCulture, $"Sharpen {look.Sharpen.Amount:0.##} (r {look.Sharpen.Radius:0.##})"));
+            parts.Add($"Sets: {string.Join(", ", sets)}");
         }
 
-        if (look.Denoise is double denoise)
+        if (inherits.Count > 0)
         {
-            parts.Add(string.Create(CultureInfo.InvariantCulture, $"Denoise {denoise:0.##}"));
+            parts.Add($"From All: {string.Join(", ", inherits)}");
         }
 
-        Add(parts, "Brightness", look.Brightness, neutral.Brightness);
-        Add(parts, "Contrast", look.Contrast, neutral.Contrast);
-        Add(parts, "Gamma", look.Gamma, neutral.Gamma);
-        Add(parts, "Saturation", look.Saturation, neutral.Saturation);
-        Add(parts, "Temperature", look.Temperature, neutral.Temperature);
-        Add(parts, "Normal strength", look.NormalStrength, neutral.NormalStrength);
-        Add(parts, "Specular", look.SpecularScale, neutral.SpecularScale);
-        return string.Join(", ", parts);
+        return parts.Count == 0 ? "Neutral" : string.Join(" · ", parts);
     }
 
-    /// <summary>Replaces the look (when the Compare page changed it in the project).</summary>
-    /// <param name="look">The new look.</param>
-    public void SetLook(LookSettings? look)
+    /// <summary>Replaces the look (when the Compare page changed it in the project). Its normal strength is ignored; the editor owns it.</summary>
+    /// <param name="look">The group's new look.</param>
+    public void SetLook(LookOverrides? look)
     {
-        if (Equals(Look, look))
+        var stripped = WithoutStrength(look);
+        if (Equals(Look, stripped))
         {
             return;
         }
 
-        Look = look;
+        Look = stripped;
+        OnPropertyChanged(nameof(LookSummary));
+    }
+
+    /// <summary>Sets the All look shown as inherited in <see cref="LookSummary"/>.</summary>
+    /// <param name="all">The All look, or <see langword="null"/>.</param>
+    public void SetAllLook(LookOverrides? all)
+    {
+        AllLook = all;
         OnPropertyChanged(nameof(LookSummary));
     }
 
@@ -184,9 +201,10 @@ public sealed partial class RuleGroupViewModel : ObservableObject
             return null;
         }
 
-        if (!double.TryParse(NormalStrengthText, NumberStyles.Float, CultureInfo.InvariantCulture, out double normalStrength) || !double.IsFinite(normalStrength))
+        double? normalStrength = TryParseStrength(NormalStrengthText);
+        if (!string.IsNullOrWhiteSpace(NormalStrengthText) && normalStrength is null)
         {
-            error = $"{label}: the normal strength must be a number.";
+            error = $"{label}: the normal strength must be a number or empty.";
             return null;
         }
 
@@ -201,8 +219,8 @@ public sealed partial class RuleGroupViewModel : ObservableObject
             Cap = cap,
             MaxFactor = maxFactor,
             Model = Model?.Trim() ?? string.Empty,
-            NormalStrength = normalStrength,
-            Look = Look,
+            NormalStrength = normalStrength ?? 1.0,
+            Look = WithStrength(Look, normalStrength),
         };
 
         // The same checks ForgeRules runs on load, applied to this group alone.
@@ -228,6 +246,32 @@ public sealed partial class RuleGroupViewModel : ObservableObject
         }
     }
 
+    private static readonly (string Label, Func<LookOverrides, double?> Read)[] _controls =
+    [
+        ("AI strength", l => l.AiStrength),
+        ("Sharpen", l => l.SharpenAmount),
+        ("Sharpen radius", l => l.SharpenRadius),
+        ("Denoise", l => l.Denoise),
+        ("Brightness", l => l.Brightness),
+        ("Contrast", l => l.Contrast),
+        ("Gamma", l => l.Gamma),
+        ("Saturation", l => l.Saturation),
+        ("Temperature", l => l.Temperature),
+        ("Normal strength", l => l.NormalStrength),
+        ("Specular", l => l.SpecularScale),
+    ];
+
+    /// <summary>Removes the normal strength from a look; an empty result is <see langword="null"/>.</summary>
+    internal static LookOverrides? WithoutStrength(LookOverrides? look) =>
+        look is null ? null : (look with { NormalStrength = null }) is { IsEmpty: false } rest ? rest : null;
+
+    /// <summary>Adds a normal strength to a look; nothing set is <see langword="null"/>.</summary>
+    internal static LookOverrides? WithStrength(LookOverrides? look, double? strength) =>
+        strength is null ? look : (look ?? LookOverrides.Empty) with { NormalStrength = strength };
+
+    private static double? TryParseStrength(string? text) =>
+        double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value) && double.IsFinite(value) ? value : null;
+
     private static string Format(int? value) => value?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
 
     private static bool TryParseOptional(string? text, out int? value)
@@ -247,14 +291,6 @@ public sealed partial class RuleGroupViewModel : ObservableObject
         return false;
     }
 
-    private static void Add(List<string> parts, string label, double value, double neutral)
-    {
-        if (!value.Equals(neutral))
-        {
-            parts.Add(string.Create(CultureInfo.InvariantCulture, $"{label} {value:0.##}"));
-        }
-    }
-
     partial void OnPickedModelChanged(string? value)
     {
         if (!string.IsNullOrWhiteSpace(value))
@@ -267,6 +303,7 @@ public sealed partial class RuleGroupViewModel : ObservableObject
     {
         TryBuild(out string? error);
         Error = error;
+        OnPropertyChanged(nameof(LookSummary));
         Edited?.Invoke(this, EventArgs.Empty);
     }
 }

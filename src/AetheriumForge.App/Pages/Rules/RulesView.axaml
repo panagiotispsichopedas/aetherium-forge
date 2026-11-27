@@ -100,7 +100,7 @@
                     </StackPanel>
                     <StackPanel Grid.Column="4" Spacing="4">
                       <TextBlock Text="Normal strength" />
-                      <TextBox Text="{Binding NormalStrengthText}" />
+                      <TextBox Text="{Binding NormalStrengthText}" PlaceholderText="inherit from All" />
                     </StackPanel>
                   </Grid>
                   <StackPanel Spacing="4">
