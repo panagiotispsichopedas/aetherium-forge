@@ -40,7 +40,10 @@ public static class AppHost
         services.AddSingleton<RunPagePlaceholder>(_ => new RunPagePlaceholder(new PagePlaceholderViewModel("Run")));
 
         // ── PAGE: Models ──
-        services.AddSingleton<ModelsPagePlaceholder>(_ => new ModelsPagePlaceholder(new PagePlaceholderViewModel("Models")));
+        // AddModelsPage: AddModelDownloads, IGpuAdapterProvider (DXGI), GpuProfiler and GpuProfileStore (TryAdd: shared with Run),
+        // the download coordinator, the dialogs, the view model and the first-run prompt.
+        services.AddModelsPage();
+        services.AddSingleton<ModelsPagePlaceholder>(sp => new ModelsPagePlaceholder(sp.GetRequiredService<Pages.Models.ModelsViewModel>()));
 
         services.AddSingleton<IReadOnlyDictionary<AppPage, object>>(sp => new Dictionary<AppPage, object>
         {
