@@ -160,12 +160,12 @@ Path comparison is case-insensitive with backslash separators. Normalise every p
 | 12 | u32 | archive flags |
 | 16 | u32 | folder count |
 | 20 | u32 | file count |
-| 24 | u32 | total folder-name length (including the length byte and null of each name) |
+| 24 | u32 | total folder-name length: Σ(name length + 1). Counts each name's null, **not** its length byte (verified against vanilla archives) |
 | 28 | u32 | total file-name length (including nulls) |
 | 32 | u16 | content flags (textures = `0x2`) |
 | 34 | u16 | padding |
 
-**Archive flags:** `0x1` folder names included, `0x2` file names included, `0x4` compressed by default, `0x100` file names embedded in the data blocks. For textures archives use `0x1 | 0x2 | 0x4` (= 7).
+**Archive flags:** `0x1` folder names included, `0x2` file names included, `0x4` compressed by default, `0x100` file names embedded in the data blocks. For textures archives use `0x1 | 0x2 | 0x4` (= 7). Vanilla texture archives use `0x107`: each file's full path is embedded as a bstring before its data, so the reader must skip it.
 
 ### Folder records (24 bytes each, sorted by folder hash)
 
