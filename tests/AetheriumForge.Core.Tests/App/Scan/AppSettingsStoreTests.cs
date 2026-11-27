@@ -92,4 +92,37 @@ public sealed class AppSettingsStoreTests : IDisposable
 
         Assert.Equal((AppSettingsStore.MaxRecentProjects, @"D:\New"), (recent.Count, recent[0]));
     }
+
+    [Fact]
+    public async Task LoadAsync_InvalidEntries_AreDropped()
+    {
+        await File.WriteAllTextAsync(FilePath, """{ "recentProjects": [ "relative\\path", "", "D:\\Good" ] }""", Ct);
+        var store = new AppSettingsStore(FilePath);
+
+        var settings = await store.LoadAsync(Ct);
+
+        Assert.Equal([@"D:\Good"], settings.RecentProjects);
+    }
+
+    [Fact]
+    public async Task SaveAsync_ManyConcurrentSaves_LeaveOneValidFile()
+    {
+        using var store = new AppSettingsStore(FilePath);
+
+        await Task.WhenAll(Enumerable.Range(0, 20).Select(i => store.SaveAsync(new AppSettings { RecentProjects = [$@"D:\P{i}"] }, Ct)));
+
+        Assert.Equal((1, 1), (Directory.GetFiles(_folder).Length, (await store.LoadAsync(Ct)).RecentProjects.Count));
+    }
+
+    [Fact]
+    public async Task SaveAsync_TwoStoresSameFile_BothSucceed()
+    {
+        using var first = new AppSettingsStore(FilePath);
+        using var second = new AppSettingsStore(FilePath);
+
+        var error = await Record.ExceptionAsync(() => Task.WhenAll(
+            Enumerable.Range(0, 10).Select(i => (i % 2 == 0 ? first : second).SaveAsync(new AppSettings { RecentProjects = [$@"D:\P{i}"] }, Ct))));
+
+        Assert.Null(error);
+    }
 }

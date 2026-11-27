@@ -32,7 +32,8 @@ public static class AppHost
 
         // ── PAGE: Scan (also owns IProjectSession) ──
         services.AddSingleton(sp => new AppSettingsStore(Path.Combine(AppDataFolder, AppSettingsStore.FileName), sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<AppSettingsStore>>()));
-        services.AddSingleton(sp => new ProjectSession(sp.GetRequiredService<AppSettingsStore>(), sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ProjectSession>>()));
+        services.AddSingleton<IAppSettingsStore>(sp => sp.GetRequiredService<AppSettingsStore>());
+        services.AddSingleton(sp => new ProjectSession(sp.GetRequiredService<IAppSettingsStore>(), sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ProjectSession>>()));
         services.AddSingleton<IScanProjectSession>(sp => sp.GetRequiredService<ProjectSession>());
         services.AddSingleton<IProjectSession>(sp => sp.GetRequiredService<ProjectSession>());
         services.AddHostedService<ProjectSessionStartup>();
@@ -50,6 +51,7 @@ public static class AppHost
             sp.GetRequiredService<IScanProjectSession>(),
             sp.GetRequiredService<INavigationService>(),
             sp.GetRequiredService<Pages.Scan.IFolderPicker>(),
+            sp.GetService<IForgeRunner>(),
             sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Pages.Scan.ScanViewModel>>()));
         services.AddSingleton<ScanPagePlaceholder>(sp => new ScanPagePlaceholder(sp.GetRequiredService<Pages.Scan.ScanViewModel>()));
 

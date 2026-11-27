@@ -15,10 +15,30 @@ public sealed record AppSettings
 }
 
 /// <summary>
-/// Loads and saves <see cref="AppSettings"/>. Saves are atomic (a temporary file replaced in one move); a missing, unreadable or corrupt file
+/// Loads and saves the per-user <see cref="AppSettings"/>. A seam so the JSON file can later move into the app-level <c>app.db</c>.
+/// </summary>
+public interface IAppSettingsStore
+{
+    /// <summary>Gets where the settings are kept (for messages and logs).</summary>
+    string FilePath { get; }
+
+    /// <summary>Loads the settings.</summary>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The settings, or the defaults when none are stored or they cannot be read.</returns>
+    Task<AppSettings> LoadAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Saves the settings.</summary>
+    /// <param name="settings">The settings.</param>
+    /// <param name="cancellationToken">Cancels the write.</param>
+    /// <returns>A task that completes when the settings are stored.</returns>
+    Task SaveAsync(AppSettings settings, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Loads and saves <see cref="AppSettings"/> as JSON. Saves are atomic (a temporary file replaced in one move); a missing, unreadable or corrupt file
 /// loads as the defaults and is logged, so a bad file never stops the app.
 /// </summary>
-public sealed partial class AppSettingsStore
+public sealed partial class AppSettingsStore : IAppSettingsStore, IDisposable
 {
     /// <summary>The settings file name.</summary>
     public const string FileName = "app-settings.json";
@@ -27,6 +47,7 @@ public sealed partial class AppSettingsStore
     public const int MaxRecentProjects = 10;
 
     private readonly ILogger<AppSettingsStore> _logger;
+    private readonly SemaphoreSlim _lock = new(1, 1);
 
     /// <summary>Initializes a new instance of the <see cref="AppSettingsStore"/> class.</summary>
     /// <param name="filePath">The settings file.</param>
@@ -39,13 +60,72 @@ public sealed partial class AppSettingsStore
         _logger = logger ?? NullLogger<AppSettingsStore>.Instance;
     }
 
-    /// <summary>Gets the settings file.</summary>
+    /// <inheritdoc />
     public string FilePath { get; }
 
-    /// <summary>Loads the settings.</summary>
-    /// <param name="cancellationToken">Cancels the read.</param>
-    /// <returns>The settings, or the defaults when the file is missing or cannot be read.</returns>
+    /// <inheritdoc />
     public async Task<AppSettings> LoadAsync(CancellationToken cancellationToken = default)
+    {
+        await _lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await LoadCoreAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task SaveAsync(AppSettings settings, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+
+        await _lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await SaveCoreAsync(settings, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc />
+    public void Dispose() => _lock.Dispose();
+
+    /// <summary>Tells whether a stored recent entry is a usable, fully qualified folder path.</summary>
+    /// <param name="folder">The entry.</param>
+    /// <returns><see langword="true"/> when it can be opened as a project folder.</returns>
+    public static bool IsValidFolder(string? folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || !Path.IsPathFullyQualified(folder))
+        {
+            return false;
+        }
+
+        try
+        {
+            _ = Path.GetFullPath(folder);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+        catch (PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<AppSettings> LoadCoreAsync(CancellationToken cancellationToken)
     {
         if (!File.Exists(FilePath))
         {
@@ -78,16 +158,12 @@ public sealed partial class AppSettingsStore
         }
     }
 
-    /// <summary>Saves the settings atomically.</summary>
-    /// <param name="settings">The settings.</param>
-    /// <param name="cancellationToken">Cancels the write.</param>
-    /// <returns>A task that completes when the file is replaced.</returns>
-    public async Task SaveAsync(AppSettings settings, CancellationToken cancellationToken = default)
+    private async Task SaveCoreAsync(AppSettings settings, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(settings);
-
         Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-        var temporary = $"{FilePath}.{Environment.ProcessId}.tmp";
+
+        // A unique temporary name per call, so two app instances never write the same temporary file.
+        var temporary = $"{FilePath}.{Guid.NewGuid():N}.tmp";
         try
         {
             var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous | FileOptions.WriteThrough);
@@ -123,7 +199,7 @@ public sealed partial class AppSettingsStore
 
     private static AppSettings Normalise(AppSettings? settings) => new()
     {
-        RecentProjects = [.. (settings?.RecentProjects ?? []).Where(r => !string.IsNullOrWhiteSpace(r)).Distinct(StringComparer.OrdinalIgnoreCase).Take(MaxRecentProjects)],
+        RecentProjects = [.. (settings?.RecentProjects ?? []).Where(IsValidFolder).Distinct(StringComparer.OrdinalIgnoreCase).Take(MaxRecentProjects)],
     };
 
     [LoggerMessage(EventId = 1, Level = LogLevel.Warning, Message = "The app settings file {Path} is corrupt; using the defaults")]

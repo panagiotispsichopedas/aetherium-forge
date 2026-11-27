@@ -164,4 +164,108 @@ public sealed class ProjectSessionTests : IDisposable
 
         Assert.Equal(1, raised);
     }
+
+    // ── Review fixes ──
+
+    [Fact]
+    public async Task ApplyScanAsync_UnreadableArchives_ReportsThem()
+    {
+        var result = await _session.ApplyScanAsync(
+            new ScanImportRequest(ProjectFolder(), _game, ForgeRules.Default, ScanTestData.Sample() with { MissingArchives = ["Skyrim - Textures3.bsa"] }),
+            Ct);
+
+        Assert.Equal(["Skyrim - Textures3.bsa"], result.UnreadableArchives);
+    }
+
+    [Fact]
+    public async Task OpenAsync_SettingsCannotBeSaved_StillOpensAndRaisesChanged()
+    {
+        await ScanIntoAsync(ProjectFolder());
+        using var session = new ProjectSession(new FailingSettings(), TimeProvider.System, postToUi: action => action());
+        var changed = 0;
+        session.Changed += (_, _) => changed++;
+
+        await session.OpenAsync(ProjectFolder(), Ct);
+
+        Assert.Equal((ProjectFolder(), 1), (session.Current?.Root, changed));
+    }
+
+    [Fact]
+    public async Task ApplyScanAsync_Rejected_RaisesNoChanged()
+    {
+        var changed = 0;
+        _session.Changed += (_, _) => changed++;
+
+        await Assert.ThrowsAsync<ProjectException>(() => ScanIntoAsync(Path.Combine(_gameFolder, "forge")));
+
+        Assert.Equal(0, changed);
+    }
+
+    [Fact]
+    public async Task GetJobsAsync_DuringProjectSwitches_NeverSeesDisposedStore()
+    {
+        await ScanIntoAsync(ProjectFolder("a"));
+        await ScanIntoAsync(ProjectFolder("b"));
+
+        var work = new List<Task>();
+        for (var i = 0; i < 10; i++)
+        {
+            work.Add(_session.OpenAsync(ProjectFolder(i % 2 == 0 ? "a" : "b"), Ct));
+            work.Add(_session.GetJobsAsync(Ct));
+            work.Add(_session.GetProjectValueAsync(ProjectKeys.GamePath, Ct));
+        }
+
+        var error = await Record.ExceptionAsync(() => Task.WhenAll(work));
+
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public async Task ReopenLastAsync_InvalidRecentEntryFirst_OpensTheNextProject()
+    {
+        await ScanIntoAsync(ProjectFolder("a"));
+        using var session = new ProjectSession(new FixedSettings(["bad\0path|", ProjectFolder("a")]), TimeProvider.System, postToUi: action => action());
+
+        var opened = await session.ReopenLastAsync(Ct);
+
+        Assert.Equal((true, ProjectFolder("a")), (opened, session.Current?.Root));
+    }
+
+    [Fact]
+    public async Task Dispose_ThenOpen_ThrowsObjectDisposed()
+    {
+        await ScanIntoAsync(ProjectFolder());
+        _session.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => _session.OpenAsync(ProjectFolder(), Ct));
+    }
+
+    [Fact]
+    public async Task Dispose_Twice_ReleasesStoreOnce()
+    {
+        await ScanIntoAsync(ProjectFolder());
+
+        _session.Dispose();
+        _session.Dispose();
+
+        Assert.Null(_session.Store);
+    }
+
+    private sealed class FailingSettings : IAppSettingsStore
+    {
+        public string FilePath => @"X:\settings.json";
+
+        public Task<AppSettings> LoadAsync(CancellationToken cancellationToken = default) => Task.FromResult(new AppSettings());
+
+        public Task SaveAsync(AppSettings settings, CancellationToken cancellationToken = default) => Task.FromException(new IOException("disk full"));
+    }
+
+    private sealed class FixedSettings(IReadOnlyList<string> recent) : IAppSettingsStore
+    {
+        public string FilePath => @"X:\settings.json";
+
+        public Task<AppSettings> LoadAsync(CancellationToken cancellationToken = default) => Task.FromResult(new AppSettings { RecentProjects = recent });
+
+        public Task SaveAsync(AppSettings settings, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
 }

@@ -32,7 +32,12 @@ public sealed partial class ProjectSessionStartup(IScanProjectSession session, I
     }
 
     /// <inheritdoc />
-    public void Dispose() => _stopping.Dispose();
+    public void Dispose()
+    {
+        // The host may be disposed without StopAsync: cancel the reopen so the session's Dispose does not wait for it.
+        _stopping.Cancel();
+        _stopping.Dispose();
+    }
 
     private async Task ReopenAsync()
     {

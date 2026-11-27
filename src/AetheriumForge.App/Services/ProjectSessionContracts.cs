@@ -16,7 +16,7 @@ public interface IScanProjectSession : IProjectSession
 
     /// <summary>
     /// Imports a scan into a project, creating the project when the folder has none, and makes it the open project. Stores the game path,
-    /// the store, the rules and the scan time in the project table (like <c>aetherium-forge scan</c>). Raises <see cref="IProjectSession.Changed"/>;
+    /// the store, the rules and the scan time in the project table (like <c>aetherium-forge scan</c>), all in one transaction. Raises <see cref="IProjectSession.Changed"/>;
     /// the caller raises <see cref="IProjectSession.JobsChanged"/> through <see cref="IProjectSession.NotifyJobsChanged"/>.
     /// </summary>
     /// <param name="request">The project folder, game, rules and scan.</param>
@@ -57,4 +57,10 @@ public sealed record ScanImportRequest(string ProjectFolder, GameInstall Game, F
 /// <param name="Upserted">Rows written.</param>
 /// <param name="NowProvidedByMod">Jobs newly skipped because a mod now provides them.</param>
 /// <param name="Counts">The project's jobs by state after the import.</param>
-public sealed record ScanImportResult(string DatabasePath, int Upserted, int NowProvidedByMod, IReadOnlyDictionary<JobState, int> Counts);
+/// <param name="UnreadableArchives">Archives the scan could not read; their textures are missing from the scan and their jobs were left unchanged.</param>
+public sealed record ScanImportResult(
+    string DatabasePath,
+    int Upserted,
+    int NowProvidedByMod,
+    IReadOnlyDictionary<JobState, int> Counts,
+    IReadOnlyList<string> UnreadableArchives);

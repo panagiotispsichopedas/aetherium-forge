@@ -3,6 +3,7 @@ using AetheriumForge.App.Services;
 using AetheriumForge.Core.Discovery;
 using AetheriumForge.Core.Game;
 using AetheriumForge.Core.Jobs;
+using AetheriumForge.Core.Pipeline;
 using AetheriumForge.Core.Projects;
 using AetheriumForge.Core.Rules;
 using AetheriumForge.Core.Textures;
@@ -67,10 +68,24 @@ internal sealed class FakeScanEnvironment : IScanEnvironment
     public Task<IReadOnlyList<GameInstall>> FindInstallsAsync(CancellationToken cancellationToken) =>
         DetectError is { } error ? Task.FromException<IReadOnlyList<GameInstall>>(error) : Task.FromResult<IReadOnlyList<GameInstall>>([.. Installs]);
 
-    public GameInstall? ValidateInstall(string gameFolder, GameStore store) =>
+    public List<int> ValidateThreads { get; } = [];
+
+    public GameInstall? ValidateInstall(string gameFolder, GameStore store) => RecordValidate(gameFolder, store);
+
+    private GameInstall? RecordValidate(string gameFolder, GameStore store) => RecordThread() &&
         ValidGameFolders.Contains(Path.TrimEndingDirectorySeparator(gameFolder))
             ? new GameInstall(Path.TrimEndingDirectorySeparator(gameFolder), Path.Combine(gameFolder, "Data"), store, null)
             : null;
+
+    private bool RecordThread()
+    {
+        lock (ValidateThreads)
+        {
+            ValidateThreads.Add(Environment.CurrentManagedThreadId);
+        }
+
+        return true;
+    }
 
     public GameProfilePaths LocateProfile(GameStore store) => new(@"C:\Users\u\Documents\My Games\Skyrim Special Edition", @"C:\Users\u\AppData\Local\Skyrim Special Edition\plugins.txt");
 
@@ -113,7 +128,11 @@ internal sealed class FakeScanSession : IScanProjectSession
 
     public List<string> Recent { get; } = [];
 
-    public IReadOnlyList<string> RecentProjects => Recent;
+    public bool ThrowOnRecent { get; set; }
+
+    public string OpenGameFolder { get; set; } = ScanTestData.GameFolder;
+
+    public IReadOnlyList<string> RecentProjects => ThrowOnRecent ? throw new InvalidOperationException("recent list broken") : Recent;
 
     public List<ScanImportRequest> Imports { get; } = [];
 
@@ -133,7 +152,7 @@ internal sealed class FakeScanSession : IScanProjectSession
         }
 
         var root = ProjectLayout.For(projectFolder).Root;
-        Current = new ProjectInfo(root, ScanTestData.GameFolder, ScanTestData.GameFolder + @"\Data", root + @"\output", root + @"\work", ForgeRules.Default);
+        Current = new ProjectInfo(root, OpenGameFolder, OpenGameFolder + @"\Data", root + @"\output", root + @"\work", ForgeRules.Default);
         Recent.Insert(0, root);
         Changed?.Invoke(this, EventArgs.Empty);
         return Task.CompletedTask;
@@ -147,7 +166,7 @@ internal sealed class FakeScanSession : IScanProjectSession
         Current = new ProjectInfo(layout.Root, request.Game.GameFolder, request.Game.DataFolder, layout.OutputRoot, layout.WorkRoot, request.Rules);
         Changed?.Invoke(this, EventArgs.Empty);
         var counts = new Dictionary<JobState, int> { [JobState.Queued] = request.Result.Queued.Count() };
-        return Task.FromResult(new ScanImportResult(layout.DatabasePath, request.Result.Textures.Count, 0, counts));
+        return Task.FromResult(new ScanImportResult(layout.DatabasePath, request.Result.Textures.Count, 0, counts, request.Result.MissingArchives));
     }
 
     public Task<string?> GetProjectValueAsync(string key, CancellationToken cancellationToken = default) =>
@@ -156,6 +175,8 @@ internal sealed class FakeScanSession : IScanProjectSession
     public Task<IReadOnlyList<JobRecord>> GetJobsAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<JobRecord>>([.. Jobs]);
 
     public Task<bool> ReopenLastAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+
+    public void RaiseChanged() => Changed?.Invoke(this, EventArgs.Empty);
 
     public void NotifyJobsChanged()
     {
@@ -183,5 +204,35 @@ internal sealed class FakeNavigation : INavigationService
     {
         Current = page;
         Navigated?.Invoke(this, page);
+    }
+}
+
+/// <summary>A scripted <see cref="IForgeRunner"/>.</summary>
+internal sealed class FakeForgeRunner : IForgeRunner
+{
+    public event EventHandler<PipelineProgress>? ProgressChanged { add { } remove { } }
+
+    public event EventHandler<PipelineRunSummary?>? RunStateChanged;
+
+    public PipelineState State { get; private set; } = PipelineState.Idle;
+
+    public PipelineProgress? LastProgress => null;
+
+    public void SetState(PipelineState state)
+    {
+        State = state;
+        RunStateChanged?.Invoke(this, null);
+    }
+
+    public Task<PipelineRunSummary> StartAsync(ForgeRunRequest request) => throw new NotSupportedException();
+
+    public void Pause() => State = PipelineState.Paused;
+
+    public void Unpause()
+    {
+    }
+
+    public void RequestStop()
+    {
     }
 }

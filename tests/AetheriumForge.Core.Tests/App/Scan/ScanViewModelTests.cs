@@ -14,14 +14,18 @@ public sealed class ScanViewModelTests
     private readonly FakeScanSession _session = new();
     private readonly FakeFolderPicker _picker = new();
     private readonly FakeNavigation _navigation = new();
+    private readonly FakeForgeRunner _runner = new();
 
-    private ScanViewModel Create() => new(_environment, _session, _navigation, _picker, postToUi: action => action());
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    private ScanViewModel Create() => new(_environment, _session, _navigation, _picker, _runner, postToUi: action => action());
 
     private async Task<ScanViewModel> CreateInitializedAsync()
     {
         var viewModel = Create();
         await viewModel.InitializeAsync();
         await viewModel.ProfileLoad;
+        await viewModel.ProjectFolderLoad;
         return viewModel;
     }
 
@@ -241,7 +245,7 @@ public sealed class ScanViewModelTests
     public async Task Rescan_ProjectOpen_ScansIntoOpenProject()
     {
         var viewModel = await CreateInitializedAsync();
-        await _session.OpenAsync(@"F:\Forge\Existing", TestContext.Current.CancellationToken);
+        await _session.OpenAsync(@"F:\Forge\Existing", Ct);
 
         await viewModel.RescanCommand.ExecuteAsync(null);
 
@@ -302,7 +306,7 @@ public sealed class ScanViewModelTests
     public async Task GoToQueue_ProjectOpen_NavigatesToQueue()
     {
         var viewModel = await CreateInitializedAsync();
-        await _session.OpenAsync(@"F:\Forge\Existing", TestContext.Current.CancellationToken);
+        await _session.OpenAsync(@"F:\Forge\Existing", Ct);
 
         viewModel.GoToQueueCommand.Execute(null);
 
@@ -315,6 +319,147 @@ public sealed class ScanViewModelTests
         var viewModel = await CreateInitializedAsync();
 
         Assert.False(viewModel.GoToQueueCommand.CanExecute(null));
+    }
+
+    // ── Review fixes ──
+
+    [Fact]
+    public async Task Scan_ArchivesUnreadable_ShowsWarning()
+    {
+        _environment.Result = ScanTestData.Sample() with { MissingArchives = ["Skyrim - Textures3.bsa"] };
+        var viewModel = await CreateInitializedAsync();
+
+        await viewModel.ScanCommand.ExecuteAsync(null);
+
+        Assert.Contains("Skyrim - Textures3.bsa", viewModel.WarningMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Scan_AllArchivesRead_ShowsNoWarning()
+    {
+        var viewModel = await CreateInitializedAsync();
+
+        await viewModel.ScanCommand.ExecuteAsync(null);
+
+        Assert.False(viewModel.HasWarning);
+    }
+
+    [Fact]
+    public async Task ChooseProjectFolder_DriveRoot_IsRejected()
+    {
+        var viewModel = await CreateInitializedAsync();
+        _picker.Answers.Enqueue(@"F:\");
+
+        await viewModel.ChooseProjectFolderCommand.ExecuteAsync(null);
+
+        Assert.Equal((DefaultProject, true), (viewModel.ProjectFolder, viewModel.HasError));
+    }
+
+    [Fact]
+    public async Task ChooseProjectFolder_InsideAnotherDetectedInstall_IsRejected()
+    {
+        _environment.Installs.Add(new AetheriumForge.Core.Discovery.GameInstall(@"G:\Gog\Skyrim", @"G:\Gog\Skyrim\Data", AetheriumForge.Core.Discovery.GameStore.Gog, null));
+        var viewModel = await CreateInitializedAsync();
+        _picker.Answers.Enqueue(@"G:\Gog\Skyrim\forge");
+
+        await viewModel.ChooseProjectFolderCommand.ExecuteAsync(null);
+
+        Assert.Equal((DefaultProject, true), (viewModel.ProjectFolder, viewModel.HasError));
+    }
+
+    [Fact]
+    public async Task BrowseGame_FromUiThread_ValidatesOffThatThread()
+    {
+        _environment.ValidGameFolders.Add(@"F:\Games\Skyrim");
+        var viewModel = await CreateInitializedAsync();
+        _picker.Answers.Enqueue(@"F:\Games\Skyrim");
+
+        var uiThread = await SingleThreadContext.RunAsync(() => viewModel.BrowseGameCommand.ExecuteAsync(null));
+
+        Assert.DoesNotContain(uiThread, _environment.ValidateThreads);
+    }
+
+    [Fact]
+    public async Task SessionChanged_HandlerFails_ShowsErrorInsteadOfCrashing()
+    {
+        var viewModel = await CreateInitializedAsync();
+        _session.ThrowOnRecent = true;
+
+        _session.RaiseChanged();
+
+        Assert.Equal("recent list broken", viewModel.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task OpenExisting_GameNotDetectedOrValid_ShowsItUnresolved()
+    {
+        _session.OpenGameFolder = @"H:\Gone\Skyrim";
+        var viewModel = await CreateInitializedAsync();
+        _picker.Answers.Enqueue(@"F:\Forge\Existing");
+
+        await viewModel.OpenExistingCommand.ExecuteAsync(null);
+
+        Assert.Equal(((GameInstallItem?)null, @"H:\Gone\Skyrim"), (viewModel.SelectedInstall, viewModel.UnresolvedGameFolder));
+    }
+
+    [Fact]
+    public async Task OpenExisting_GameNotDetectedOrValid_CannotScan()
+    {
+        _session.OpenGameFolder = @"H:\Gone\Skyrim";
+        var viewModel = await CreateInitializedAsync();
+        _picker.Answers.Enqueue(@"F:\Forge\Existing");
+
+        await viewModel.OpenExistingCommand.ExecuteAsync(null);
+
+        Assert.False(viewModel.ScanCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task Scanning_FolderPickers_AreDisabled()
+    {
+        _environment.ScanGate = new TaskCompletionSource();
+        var viewModel = await CreateInitializedAsync();
+
+        var scan = viewModel.ScanCommand.ExecuteAsync(null);
+        var enabled = (viewModel.BrowseGameCommand.CanExecute(null), viewModel.ChooseProjectFolderCommand.CanExecute(null));
+        _environment.ScanGate.SetResult();
+        await scan;
+
+        Assert.Equal((false, false), enabled);
+    }
+
+    [Fact]
+    public async Task RunActive_ScanRescanAndOpen_AreBlocked()
+    {
+        var viewModel = await CreateInitializedAsync();
+        await _session.OpenAsync(@"F:\Forge\Existing", Ct);
+
+        _runner.SetState(AetheriumForge.Core.Pipeline.PipelineState.Running);
+
+        Assert.Equal(
+            (false, false, false),
+            (viewModel.ScanCommand.CanExecute(null), viewModel.RescanCommand.CanExecute(null), viewModel.OpenExistingCommand.CanExecute(null)));
+    }
+
+    [Fact]
+    public async Task RunEnded_Scan_IsAvailableAgain()
+    {
+        var viewModel = await CreateInitializedAsync();
+        _runner.SetState(AetheriumForge.Core.Pipeline.PipelineState.Paused);
+
+        _runner.SetState(AetheriumForge.Core.Pipeline.PipelineState.Idle);
+
+        Assert.True(viewModel.ScanCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task NoRunner_Scan_IsAvailable()
+    {
+        var viewModel = new ScanViewModel(_environment, _session, _navigation, _picker, runner: null, postToUi: action => action());
+        await viewModel.InitializeAsync();
+        await viewModel.ProjectFolderLoad;
+
+        Assert.True(viewModel.ScanCommand.CanExecute(null));
     }
 
     private static JobRecord Job(string path, JobState state, string? error, int target) =>

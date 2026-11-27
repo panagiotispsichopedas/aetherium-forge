@@ -43,6 +43,15 @@
           <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" VerticalAlignment="Center" />
         </DockPanel>
       </Border>
+      <Border IsVisible="{Binding HasWarning}" Background="#33F7A600" BorderBrush="#F7A600" BorderThickness="1" CornerRadius="6" Padding="12,8">
+        <DockPanel>
+          <Button DockPanel.Dock="Right" Content="✕" Command="{Binding DismissWarningCommand}" Padding="8,2" VerticalAlignment="Top" />
+          <TextBlock Text="{Binding WarningMessage}" TextWrapping="Wrap" VerticalAlignment="Center" />
+        </DockPanel>
+      </Border>
+      <Border IsVisible="{Binding IsRunActive}" Background="#330078D4" BorderBrush="#0078D4" BorderThickness="1" CornerRadius="6" Padding="12,8">
+        <TextBlock Text="A run is active. Scan, Rescan and Open project are unavailable until it stops." TextWrapping="Wrap" />
+      </Border>
       <Border IsVisible="{Binding HasInfo}" Background="#330078D4" BorderBrush="#0078D4" BorderThickness="1" CornerRadius="6" Padding="12,8">
         <DockPanel>
           <Button DockPanel.Dock="Right" Content="✕" Command="{Binding DismissInfoCommand}" Padding="8,2" VerticalAlignment="Top" />
@@ -59,6 +68,10 @@
               <TextBlock Classes="cardTitle" Text="Game" />
             </DockPanel>
             <TextBlock Text="Detecting installations…" IsVisible="{Binding IsDetecting}" Opacity="0.7" />
+            <TextBlock IsVisible="{Binding HasUnresolvedGame}" TextWrapping="Wrap" Foreground="#F7A600">
+              <Run Text="The open project's game was not found:" />
+              <Run Text="{Binding UnresolvedGameFolder}" />
+            </TextBlock>
             <ListBox ItemsSource="{Binding Installs}" SelectedItem="{Binding SelectedInstall}" MaxHeight="160">
               <ListBox.ItemTemplate>
                 <DataTemplate x:DataType="scan:GameInstallItem">
