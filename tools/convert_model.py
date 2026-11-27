@@ -129,11 +129,18 @@ ARCHS = {
 
 
 def load_state(weights: Path) -> dict:
-    """Loads the official checkpoint (EMA weights when present)."""
-    try:
-        state = torch.load(weights, map_location="cpu", weights_only=True)
-    except TypeError:  # torch < 1.13 has no weights_only
-        state = torch.load(weights, map_location="cpu")
+    """Loads the official checkpoint (EMA weights when present).
+
+    Always loads with ``weights_only=True``: a full unpickle can run arbitrary code from the checkpoint, so there is no
+    fallback to it. torch older than 1.13 has no ``weights_only`` and is rejected.
+    """
+    if "weights_only" not in inspect.signature(torch.load).parameters:
+        raise SystemExit(
+            f"torch {torch.__version__} is too old: torch.load has no weights_only parameter, and loading a checkpoint "
+            "without it can execute arbitrary code. Install torch 1.13 or later."
+        )
+
+    state = torch.load(weights, map_location="cpu", weights_only=True)
 
     for key in ("params_ema", "params"):
         if isinstance(state, dict) and key in state:
