@@ -43,7 +43,9 @@ public static class AppHost
         services.AddSingleton<ModelsPagePlaceholder>(_ => new ModelsPagePlaceholder(new PagePlaceholderViewModel("Models")));
 
         // ── PAGE: Rules (M5) ──
-        services.AddSingleton<RulesPagePlaceholder>(_ => new RulesPagePlaceholder(new PagePlaceholderViewModel("Rules")));
+        services.AddSingleton<AetheriumForge.App.Pages.Rules.IRulesPageServices, AetheriumForge.App.Pages.Rules.AvaloniaRulesPageServices>();
+        services.AddSingleton<AetheriumForge.App.Pages.Rules.RulesViewModel>();
+        services.AddSingleton<RulesPagePlaceholder>(sp => new RulesPagePlaceholder(sp.GetRequiredService<AetheriumForge.App.Pages.Rules.RulesViewModel>()));
 
         // ── PAGE: Compare (M5) ──
         services.AddSingleton<ComparePagePlaceholder>(_ => new ComparePagePlaceholder(new PagePlaceholderViewModel("Compare")));

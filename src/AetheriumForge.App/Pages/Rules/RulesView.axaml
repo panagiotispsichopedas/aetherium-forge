@@ -1,0 +1,151 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:rules="using:AetheriumForge.App.Pages.Rules"
+             x:Class="AetheriumForge.App.Pages.Rules.RulesView"
+             x:DataType="rules:RulesViewModel">
+  <DockPanel>
+    <!-- Header: title, actions, status -->
+    <StackPanel DockPanel.Dock="Top" Spacing="8" Margin="0,0,0,12">
+      <StackPanel Orientation="Horizontal" Spacing="12">
+        <TextBlock Text="Rules" FontSize="24" FontWeight="SemiBold" VerticalAlignment="Center" />
+        <TextBlock Text="● unsaved changes" Foreground="Orange" VerticalAlignment="Center" IsVisible="{Binding IsDirty}" />
+      </StackPanel>
+      <WrapPanel>
+        <Button Content="Apply" Command="{Binding ApplyCommand}" Classes="accent" Margin="0,0,8,4"
+                ToolTip.Tip="Save the rules to the project and update the queued and skipped jobs" />
+        <Button Content="Revert" Command="{Binding RevertCommand}" Margin="0,0,8,4" ToolTip.Tip="Discard unsaved edits" />
+        <Button Content="Reset to defaults" Command="{Binding ResetToDefaultsCommand}" Margin="0,0,8,4" />
+        <Button Content="Import JSON…" Command="{Binding ImportCommand}" Margin="0,0,8,4" />
+        <Button Content="Export JSON…" Command="{Binding ExportCommand}" Margin="0,0,8,4" />
+      </WrapPanel>
+      <TextBlock Text="A run is active: Apply is disabled until it ends." Foreground="Orange" IsVisible="{Binding IsRunActive}" />
+      <TextBlock Text="{Binding ValidationError}" Foreground="IndianRed" TextWrapping="Wrap" IsVisible="{Binding ValidationError, Converter={x:Static ObjectConverters.IsNotNull}}" />
+      <TextBlock Text="{Binding StatusMessage}" Opacity="0.8" TextWrapping="Wrap" IsVisible="{Binding StatusMessage, Converter={x:Static ObjectConverters.IsNotNull}}" />
+    </StackPanel>
+
+    <Grid ColumnDefinitions="260,16,*,16,300">
+      <!-- Group list: order matters, the first match wins -->
+      <DockPanel Grid.Column="0">
+        <TextBlock DockPanel.Dock="Top" Text="Groups (first match wins)" FontWeight="SemiBold" Margin="0,0,0,6" />
+        <WrapPanel DockPanel.Dock="Bottom" Margin="0,6,0,0">
+          <Button Content="Add" Command="{Binding AddGroupCommand}" Margin="0,0,4,4" />
+          <Button Content="Duplicate" Command="{Binding DuplicateGroupCommand}" Margin="0,0,4,4" />
+          <Button Content="Delete" Command="{Binding DeleteGroupCommand}" Margin="0,0,4,4" />
+          <Button Content="▲" Command="{Binding MoveUpCommand}" Margin="0,0,4,4" ToolTip.Tip="Move up" />
+          <Button Content="▼" Command="{Binding MoveDownCommand}" Margin="0,0,4,4" ToolTip.Tip="Move down" />
+        </WrapPanel>
+        <ListBox ItemsSource="{Binding Groups}" SelectedItem="{Binding SelectedGroup}">
+          <ListBox.ItemTemplate>
+            <DataTemplate x:DataType="rules:RuleGroupViewModel">
+              <Grid ColumnDefinitions="Auto,*,Auto">
+                <TextBlock Grid.Column="0" Text="⚠ " Foreground="IndianRed" IsVisible="{Binding HasError}" ToolTip.Tip="{Binding Error}" />
+                <TextBlock Grid.Column="1" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Column="2" Text="{Binding CountText}" Opacity="0.7" Margin="8,0,0,0" />
+              </Grid>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </DockPanel>
+
+      <!-- Group editor -->
+      <ScrollViewer Grid.Column="2">
+        <StackPanel Spacing="12">
+          <TextBlock Text="Select a group to edit it." Opacity="0.7" IsVisible="{Binding SelectedGroup, Converter={x:Static ObjectConverters.IsNull}}" />
+          <ContentControl Content="{Binding SelectedGroup}">
+            <ContentControl.ContentTemplate>
+              <DataTemplate x:DataType="rules:RuleGroupViewModel">
+                <StackPanel Spacing="10">
+                  <TextBlock Text="{Binding Error}" Foreground="IndianRed" TextWrapping="Wrap" IsVisible="{Binding HasError}" />
+                  <StackPanel Spacing="4">
+                    <TextBlock Text="Name" />
+                    <TextBox Text="{Binding Name}" />
+                  </StackPanel>
+                  <StackPanel Spacing="4">
+                    <TextBlock Text="Match patterns (one per line; * any characters, ? one character)" />
+                    <TextBox Text="{Binding PatternsText}" AcceptsReturn="True" MinHeight="72" FontFamily="Consolas,monospace" />
+                  </StackPanel>
+                  <Grid ColumnDefinitions="*,12,*">
+                    <StackPanel Grid.Column="0" Spacing="4">
+                      <TextBlock Text="Source size from (px, optional)" />
+                      <TextBox Text="{Binding MinSourceMaxText}" PlaceholderText="any" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Spacing="4">
+                      <TextBlock Text="Source size up to (px, optional)" />
+                      <TextBox Text="{Binding MaxSourceMaxText}" PlaceholderText="any" />
+                    </StackPanel>
+                  </Grid>
+                  <StackPanel Spacing="4">
+                    <TextBlock Text="Kinds (none checked = every kind)" />
+                    <ItemsControl ItemsSource="{Binding Kinds}">
+                      <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                          <WrapPanel />
+                        </ItemsPanelTemplate>
+                      </ItemsControl.ItemsPanel>
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="rules:KindOption">
+                          <CheckBox Content="{Binding Kind}" IsChecked="{Binding IsSelected}" Margin="0,0,12,0" />
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </StackPanel>
+                  <Grid ColumnDefinitions="*,12,*,12,*">
+                    <StackPanel Grid.Column="0" Spacing="4">
+                      <TextBlock Text="Cap (px)" />
+                      <TextBox Text="{Binding CapText}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Spacing="4">
+                      <TextBlock Text="Max factor" />
+                      <TextBox Text="{Binding MaxFactorText}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="4" Spacing="4">
+                      <TextBlock Text="Normal strength" />
+                      <TextBox Text="{Binding NormalStrengthText}" />
+                    </StackPanel>
+                  </Grid>
+                  <StackPanel Spacing="4">
+                    <TextBlock Text="Model" />
+                    <TextBox Text="{Binding Model}" PlaceholderText="model name" />
+                    <ComboBox ItemsSource="{Binding $parent[UserControl].((rules:RulesViewModel)DataContext).AvailableModels}"
+                              SelectedItem="{Binding PickedModel}" PlaceholderText="Pick an installed model…" HorizontalAlignment="Stretch" />
+                  </StackPanel>
+                </StackPanel>
+              </DataTemplate>
+            </ContentControl.ContentTemplate>
+          </ContentControl>
+
+          <!-- Look: read only here, edited on Compare -->
+          <Border IsVisible="{Binding SelectedGroup, Converter={x:Static ObjectConverters.IsNotNull}}" BorderThickness="1" CornerRadius="4" Padding="10"
+                  BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
+            <StackPanel Spacing="6">
+              <TextBlock Text="Look" FontWeight="SemiBold" />
+              <TextBlock Text="{Binding SelectedGroup.LookSummary, FallbackValue=''}" TextWrapping="Wrap" />
+              <Button Content="Edit the look on Compare…" Command="{Binding OpenCompareCommand}" />
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+
+      <!-- Exclusions, minimum size, live totals -->
+      <ScrollViewer Grid.Column="4">
+        <StackPanel Spacing="12">
+          <StackPanel Spacing="4">
+            <TextBlock Text="Live estimate" FontWeight="SemiBold" />
+            <TextBlock Text="{Binding UpscaledText}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding SkippedText}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding SizeText}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding TimeText}" TextWrapping="Wrap" />
+          </StackPanel>
+          <StackPanel Spacing="4">
+            <TextBlock Text="Minimum source size (px)" FontWeight="SemiBold" />
+            <TextBox Text="{Binding MinSourceText}" />
+          </StackPanel>
+          <StackPanel Spacing="4">
+            <TextBlock Text="Excluded folders (one per line)" FontWeight="SemiBold" />
+            <TextBox Text="{Binding ExclusionsText}" AcceptsReturn="True" MinHeight="200" FontFamily="Consolas,monospace" />
+          </StackPanel>
+        </StackPanel>
+      </ScrollViewer>
+    </Grid>
+  </DockPanel>
+</UserControl>
