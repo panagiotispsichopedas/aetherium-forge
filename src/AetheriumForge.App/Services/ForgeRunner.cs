@@ -1,3 +1,4 @@
+using AetheriumForge.Core.Concurrency;
 using AetheriumForge.Core.Gpu;
 using AetheriumForge.Core.Imaging;
 using AetheriumForge.Core.Jobs;
@@ -27,6 +28,12 @@ public sealed partial class ForgeRunner : IForgeRunner, IDisposable
     private readonly ChildProcessTracker _processes;
     private readonly ILogger _logger;
     private readonly Lock _gate = new();
+
+    /// <summary>How long Start waits for another GPU job (a calibration, the CLI) before reporting it.</summary>
+    private static readonly TimeSpan GpuLockTimeout = TimeSpan.FromSeconds(5);
+
+    // Machine-wide: a named mutex shared with calibration and the CLI's forge command.
+    private readonly GpuWorkLock _gpuLock = new("Aetherium Forge desktop app");
     private ActiveRun? _active;
     private PipelineProgress? _lastProgress;
     private bool _disposed;
@@ -130,6 +137,9 @@ public sealed partial class ForgeRunner : IForgeRunner, IDisposable
         {
             RunStateChanged?.Invoke(this, null);
             var plan = await BuildPlanAsync(request, run.Stop.Token).ConfigureAwait(false);
+
+            // One GPU job at a time on this machine (another run, a calibration, or the CLI): wait briefly, then report who holds it.
+            using var gpu = await _gpuLock.AcquireAsync("forge run", GpuLockTimeout, run.Stop.Token).ConfigureAwait(false);
             using var resources = _backend.CreateRun(plan);
             using var throttled = new ThrottledProgress<PipelineProgress>(p => OnProgress(run, p), _progressInterval);
             var pipeline = resources.Pipeline;

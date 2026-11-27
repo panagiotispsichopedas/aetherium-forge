@@ -1,4 +1,5 @@
 using System.Globalization;
+using AetheriumForge.Core.Concurrency;
 using AetheriumForge.Core.Game;
 using AetheriumForge.Core.Jobs;
 using AetheriumForge.Core.Projects;
@@ -32,6 +33,9 @@ public sealed partial class ProjectSession : IScanProjectSession, IDisposable
     private IReadOnlyList<string> _recent = [];
     private bool _recentLoaded;
     private bool _disposed;
+
+    // Held while a project is open, so the CLI or another app instance cannot write to it at the same time.
+    private ProjectLock? _projectLock;
 
     /// <summary>Initializes a new instance of the <see cref="ProjectSession"/> class.</summary>
     /// <param name="settings">The app settings (recent projects).</param>
@@ -84,20 +88,31 @@ public sealed partial class ProjectSession : IScanProjectSession, IDisposable
                 ?? throw new ProjectException($"The project {layout.Root} has no game folder recorded. Scan the game into it again.");
             ProjectLocator.EnsureOutsideGame(layout, gamePath);
 
-            var store = await JobStore.OpenAsync(layout.DatabasePath, _timeProvider, cancellationToken).ConfigureAwait(false);
+            // One writer per project (the CLI or another app instance): take the lock before opening the store, which writes.
+            var projectLock = AcquireProjectLock(layout.Root);
+            JobStore store;
             ForgeRules rules;
             try
             {
-                var rulesJson = await store.GetProjectValueAsync(ProjectKeys.RulesJson, cancellationToken).ConfigureAwait(false);
-                rules = rulesJson is null ? ForgeRules.Default : ForgeRules.FromJson(rulesJson);
+                store = await JobStore.OpenAsync(layout.DatabasePath, _timeProvider, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    var rulesJson = await store.GetProjectValueAsync(ProjectKeys.RulesJson, cancellationToken).ConfigureAwait(false);
+                    rules = rulesJson is null ? ForgeRules.Default : ForgeRules.FromJson(rulesJson);
+                }
+                catch
+                {
+                    await store.DisposeAsync().ConfigureAwait(false);
+                    throw;
+                }
             }
             catch
             {
-                await store.DisposeAsync().ConfigureAwait(false);
+                ReleaseIfNew(projectLock);
                 throw;
             }
 
-            await ReplaceAsync(layout, gamePath, rules, store).ConfigureAwait(false);
+            await ReplaceAsync(layout, gamePath, rules, store, projectLock).ConfigureAwait(false);
             committed = true;
             LogOpened(_logger, layout.Root, gamePath);
             await RememberAsync(layout.Root).ConfigureAwait(false);
@@ -127,7 +142,18 @@ public sealed partial class ProjectSession : IScanProjectSession, IDisposable
             Directory.CreateDirectory(layout.Root);
 
             var reuse = Store is not null && Current is not null && string.Equals(Current.Root, layout.Root, StringComparison.OrdinalIgnoreCase);
-            var store = reuse ? Store! : await JobStore.OpenAsync(layout.DatabasePath, _timeProvider, cancellationToken).ConfigureAwait(false);
+            var projectLock = AcquireProjectLock(layout.Root);
+            JobStore store;
+            try
+            {
+                store = reuse ? Store! : await JobStore.OpenAsync(layout.DatabasePath, _timeProvider, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                ReleaseIfNew(projectLock);
+                throw;
+            }
+
             ScanImportResult imported;
             try
             {
@@ -151,10 +177,11 @@ public sealed partial class ProjectSession : IScanProjectSession, IDisposable
                     await store.DisposeAsync().ConfigureAwait(false);
                 }
 
+                ReleaseIfNew(projectLock);
                 throw;
             }
 
-            await ReplaceAsync(layout, gameFolder, request.Rules, store).ConfigureAwait(false);
+            await ReplaceAsync(layout, gameFolder, request.Rules, store, projectLock).ConfigureAwait(false);
             committed = true;
             LogScanImported(_logger, imported.Upserted, layout.Root);
             await RememberAsync(layout.Root).ConfigureAwait(false);
@@ -287,6 +314,8 @@ public sealed partial class ProjectSession : IScanProjectSession, IDisposable
 
             Store = null;
             Current = null;
+            _projectLock?.Dispose();
+            _projectLock = null;
         }
         finally
         {
@@ -324,13 +353,42 @@ public sealed partial class ProjectSession : IScanProjectSession, IDisposable
         }
     }
 
-    private async Task ReplaceAsync(ProjectLayout layout, string gameFolder, ForgeRules rules, JobStore store)
+    /// <summary>
+    /// Returns the lock for <paramref name="projectRoot"/>: the one already held when it is the open project, otherwise a new lock.
+    /// </summary>
+    /// <exception cref="ProjectLockedException">Another process (the CLI or another app instance) has the project open.</exception>
+    private ProjectLock AcquireProjectLock(string projectRoot)
+    {
+        if (_projectLock is not null && Current is not null && string.Equals(Current.Root, projectRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return _projectLock;
+        }
+
+        return ProjectLock.Acquire(projectRoot, "Aetherium Forge desktop app");
+    }
+
+    /// <summary>Releases a lock taken for a switch that did not happen (never the open project's lock).</summary>
+    private void ReleaseIfNew(ProjectLock projectLock)
+    {
+        if (!ReferenceEquals(projectLock, _projectLock))
+        {
+            projectLock.Dispose();
+        }
+    }
+
+    private async Task ReplaceAsync(ProjectLayout layout, string gameFolder, ForgeRules rules, JobStore store, ProjectLock projectLock)
     {
         if (Store is { } previous && !ReferenceEquals(previous, store))
         {
             await previous.DisposeAsync().ConfigureAwait(false);
         }
 
+        if (_projectLock is { } previousLock && !ReferenceEquals(previousLock, projectLock))
+        {
+            previousLock.Dispose();
+        }
+
+        _projectLock = projectLock;
         Store = store;
         Current = new ProjectInfo(layout.Root, gameFolder, Path.Combine(gameFolder, GameProfileLoader.DataFolderName), layout.OutputRoot, layout.WorkRoot, rules);
     }
