@@ -14,7 +14,7 @@
 
 ---
 
-> **Status: early development.** There is no UI and no upscaling yet. See [Status](#status).
+> **Status: early development.** The core scan and the GPU upscaling engine work; there is no UI or packaging yet. See [Status](#status).
 
 Aetherium Forge finds every texture that Skyrim still loads from its **original game archives**, upscales it on your GPU with an ONNX model, and packages the result as a self-contained mod that any mod manager can install.
 
@@ -68,7 +68,7 @@ Details: [Architecture](https://github.com/panagiotispsichopedas/aetherium-forge
 | Milestone | Scope | State |
 |---|---|---|
 | **M1** Core | Game, profile and drive discovery; `plugins.txt`, INI and `Skyrim.ccc` parsing; SSE BSA reader and TES4 hash; gap-set scan; texture classifier; editable rules; SQLite job store with rescan | **Merged** into `develop` |
-| **M2** Imaging | texconv wrapper, image operations, tiled ONNX Runtime + DirectML upscaler, post-processing, model conversion script; converted models published as `models-v1` | **In progress** |
+| **M2** Imaging | texconv wrapper, image operations, tiled ONNX Runtime + DirectML upscaler, post-processing, model conversion script; converted models published as `models-v1` | **Merged** into `develop`: reproduces the prototype's output at 42–45 dB PSNR |
 | **M2b** GPU auto profile | DXGI adapter and video-memory budget, FP16/FP32 benchmark, tile calibration, default model tier; in-app model downloads | Next |
 | M3 – M7 | Pipeline (Pause/Resume/Stop), Avalonia UI, rules editor and compare view, packaging, prototype import and polish | Planned |
 
@@ -129,8 +129,6 @@ dotnet test --solution AetheriumForge.slnx
 
 Tests run on Microsoft.Testing.Platform (xUnit v3). Integration tests that need the game, texconv or a model are skipped unless you point environment variables at them; see [Building and testing](https://github.com/panagiotispsichopedas/aetherium-forge/wiki/Building-and-Testing) in the wiki.
 
-> `tools\fetch-tools.ps1` arrives with the M2 imaging work. On a branch without it, the build and the M1 tests do not need texconv.
-
 ## Models
 
 Aetherium Forge never bundles AI models in the repository or the app download.
@@ -146,7 +144,7 @@ Contributors convert models from PyTorch with `tools/convert_model.py`; that is 
 
 ```
 assets/                      icon sources (SVG, ICO, PNG)
-src/AetheriumForge.Core/     all logic, no UI: Discovery, Game, Archives, Textures, Rules, Jobs (+ Imaging, Pipeline in M2)
+src/AetheriumForge.Core/     all logic, no UI: Discovery, Game, Archives, Textures, Rules, Jobs, Imaging, Pipeline
 src/AetheriumForge.Native/   (planned, M2b) DXGI interop through LibraryImport
 src/AetheriumForge.App/      (planned, M4) Avalonia desktop UI
 tests/                       xUnit v3 tests

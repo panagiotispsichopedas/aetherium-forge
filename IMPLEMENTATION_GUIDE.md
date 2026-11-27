@@ -3,7 +3,8 @@
 AI texture forge for Skyrim Special Edition / Anniversary Edition.
 It finds every texture the game still loads from the original game archives, upscales it with an ONNX model on the GPU, and packages the result as a self-contained mod that any mod manager can install. It fills gaps only, so it never overrides textures from installed mods.
 
-Status: M1 (core scan) implemented. On the reference install it queues the same 3,433 vanilla textures as the prototype, with identical targets, plus Creation Club and `_ResourcePack.bsa` textures (base tier, §5 item 3).
+Status: M1 (core scan) and M2 (imaging) implemented. M2 check: the 5 textures the prototype finished, reprocessed with `realesrgan-x4plus` (FP32, DirectML, GTX 1080), match the prototype's output at 42.2–45.5 dB PSNR, with a mean difference of 0.8–1.1 of 255 levels and a mean normal angle difference of 0.7–0.9°. Upscaling a 2048² texture to 4096² takes about 38 s on that GPU.
+M1 detail: On the reference install it queues the same 3,433 vanilla textures as the prototype, with identical targets, plus Creation Club and `_ResourcePack.bsa` textures (base tier, §5 item 3).
 Proven prototype: `TextureGapUpscale`, an unpublished local tool (Python + texconv + Real-ESRGAN ncnn). Its scan, classification, post-processing and resume logic are the reference for this guide.
 
 ---
@@ -311,7 +312,31 @@ using var session = new InferenceSession(modelPath, so);
 - Default: Real-ESRGAN x4plus (BSD-3). Convert `RealESRGAN_x4plus.pth` (GitHub release) to ONNX with PyTorch, using `torch.onnx.export`, opset 17, and dynamic H/W axes. A one-off script goes in `tools/convert_model.py`.
 - More models: the community model database (OpenModelDB) lists texture-oriented models. **Check each model's licence**; some are non-commercial only.
 - Models folder: `models\*.onnx` plus an optional `models\<name>.json` sidecar (`displayName`, `scale`, `precision`, `licence`, `recommendedFor: ["diffuse","normal"]`).
-- First run: offer to download the default models into `%LOCALAPPDATA%\AetheriumForge\models`.
+- **Model download is part of the UI** (Settings → Models, and a first-run prompt):
+  - A model manifest (`models.json`, shipped with the app) lists each downloadable model: name, display name, URL, SHA-256, size, scale, precision, licence, and recommended GPU tier.
+  - Converted ONNX models (FP32 and FP16) are published as assets of a `models-vN` GitHub release of this repository, each with its licence. Only models whose licence allows redistribution are hosted (Real-ESRGAN: BSD-3-Clause).
+  - The UI shows installed and available models, downloads with progress, Pause/Cancel and resume (HTTP range), and verifies the SHA-256 before moving the file into `%LOCALAPPDATA%\AetheriumForge\models`. Users can delete models and add their own `.onnx` with a sidecar.
+  - The download needs the user's confirmation and shows the size and licence first.
+- **Discovery contract** (published: [`models-v1`](https://github.com/panagiotispsichopedas/aetherium-forge/releases/tag/models-v1)):
+  1. `GET https://api.github.com/repos/panagiotispsichopedas/aetherium-forge/releases?per_page=100` (header `Accept: application/vnd.github+json`, a generic `User-Agent`, no token).
+  2. Keep non-draft releases whose tag matches `^models-v(\d+)$` and take the highest number. Never use `/releases/latest`: it can point at a models release or at an app release.
+  3. Download that release's `models.json` asset. Fallback when the API is rate-limited (60 requests/hour unauthenticated): `https://github.com/panagiotispsichopedas/aetherium-forge/releases/download/models-v1/models.json`. Cache the manifest with its ETag.
+  4. `models.json` has `schemaVersion` (1), `release` and `models[]`. Each model has `name`, `family`, `displayName`, `description`, `architecture`, `parametersMillions`, `fileName`, `url`, `size`, `sha256` (lowercase hex), `sidecarFileName`, `scale`, `precision` (`fp32`/`fp16`), `tier` (`standard`/`low`), `licence`, `licenceFile`, `licenceUrl`, `recommendedFor`, `source`, `input`, `output`, `opset`, `maxAbsDiffVsPyTorch`. The app ignores fields it does not know and refuses a `schemaVersion` it does not support.
+  5. Download to `<name>.onnx.partial` (resume with HTTP `Range`), check the size and SHA-256, then move it into the models folder and write the sidecar (also published as an asset).
+  - New or updated models go in a new `models-vN` release; published assets are never replaced, so a SHA-256 always identifies one file. Rebuild models with `tools/convert_model.py --validate`.
+
+### GPU auto profile
+
+Runs on first launch, when the GPU or driver changes, or on request (Settings → GPU → Recalibrate). Results are stored per adapter (LUID + driver version) and model.
+
+1. **Enumerate adapters** with DXGI (`IDXGIFactory6::EnumAdapterByGpuPreference`, high performance first). Read the name, LUID, dedicated video memory, and whether it is integrated or software. Pick the discrete adapter with the most dedicated memory by default.
+2. **Memory budget** from `IDXGIAdapter3::QueryVideoMemoryInfo` (local segment `Budget − CurrentUsage`).
+3. **Precision:** if the FP16 model exists, run a short benchmark of FP16 against FP32 at the same tile and keep the faster. FP16 normally wins on RTX-class GPUs; Pascal (GTX 10xx) normally keeps FP32.
+4. **Tile size:** starting from a size estimated from the budget, run one tile, measure peak memory use, and grow or halve until it stays below about 80 % of the budget. The upscaler still halves the tile when the GPU runs out of memory at run time.
+5. **Throughput:** record seconds per megapixel. This seeds the ETA (§11).
+6. **Default model:** low tier (integrated GPU or under 4 GB of dedicated memory) recommends a compact model (for example `realesr-general-x4v3`); otherwise `realesrgan-x4plus`. This only sets the first-run defaults for the groups; the Rules screen keeps the per-group choice.
+
+DXGI interop lives in a separate `AetheriumForge.Native` project that uses `LibraryImport` with `AllowUnsafeBlocks`, so Core stays free of unsafe code (§4.2).
 
 ---
 
@@ -400,7 +425,8 @@ CREATE TABLE run (id INTEGER PRIMARY KEY, started TEXT, ended TEXT, done INT, fa
 | **Run** | Start / Pause / Resume / Stop; overall bar + ETA; per-stage lanes (decode, upscale, post, encode) with the current item and tile progress; throughput; GPU load and video memory; live log tail | Buttons enabled by state machine (Idle → Running ⇄ Paused → Stopping → Idle) |
 | **Compare** | Before/after slider for any finished job; zoom 100–400%; channel view (RGB, alpha, normal) | Pick the model per group by testing on samples (a "Preview 10 random from group" button) |
 | **Package** | Archive plan (archives, sizes, plugins), output path, build button, result | Shows the load-order note and the PGPatcher/DynDOLOD reminder |
-| **Settings** | GPU adapter, tile size and overlap, worker counts, texconv path, models folder, log level | — |
+| **Settings** | GPU adapter and its auto profile (precision, tile, throughput), tile overlap, worker counts, texconv path, models folder, log level | Recalibrate GPU; manual overrides for the profile |
+| **Models** (in Settings, and a first-run prompt) | Installed models (size, precision, licence, recommended tier) and models available from the manifest | Download with progress, Pause/Cancel and resume; hash check; delete; add a custom `.onnx` |
 
 **MVVM notes**
 - `ObservableCollection` + `DataGrid` virtualisation for about 5,000 rows; update rows in batches (`DispatcherTimer`, about 10 Hz), not per event.
@@ -430,6 +456,7 @@ CREATE TABLE run (id INTEGER PRIMARY KEY, started TEXT, ended TEXT, done INT, fa
 |---|---|---|
 | M1 | Core: discovery, plugin/INI parsing, BSA reader + hash, scanner, classifier, SQLite store | The scan of the reference PC reproduces the prototype manifest (3,433 jobs) |
 | M2 | Imaging: texconv wrapper, ONNX DirectML tiled upscaler, post-processing | 5 textures match the prototype's output quality |
+| M2b | GPU auto profile (§9): DXGI adapters and memory budget (`AetheriumForge.Native`), precision benchmark, tile calibration, throughput, default model tier; model manifest and download service (hash-verified, resumable) | On the reference GTX 1080 the profile picks an adapter, precision and tile without manual settings; a model downloads, verifies and loads |
 | M3 | Pipeline: channels, Pause/Resume/Stop, ETA, crash recovery | A 30-minute run interrupted 3 ways resumes with no corruption |
 | M4 | UI: Scan, Queue, Run | Full run controllable from the UI |
 | M5 | Rules editor + Compare | Per-group model choice works end to end |
