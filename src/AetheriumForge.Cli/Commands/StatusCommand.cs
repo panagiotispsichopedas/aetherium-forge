@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.Globalization;
 using AetheriumForge.Cli.Hosting;
 using AetheriumForge.Core.Jobs;
+using AetheriumForge.Core.Projects;
 
 namespace AetheriumForge.Cli.Commands;
 

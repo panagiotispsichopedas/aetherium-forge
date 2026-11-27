@@ -1,7 +1,7 @@
 using System.Globalization;
 using Microsoft.Data.Sqlite;
 
-namespace AetheriumForge.Cli.Hosting;
+namespace AetheriumForge.Core.Projects;
 
 /// <summary>
 /// One row of the <c>run</c> table.
@@ -11,7 +11,7 @@ namespace AetheriumForge.Cli.Hosting;
 /// <param name="Ended">End time, or <see langword="null"/> while running or after a crash.</param>
 /// <param name="Done">Jobs finished.</param>
 /// <param name="Failed">Jobs failed.</param>
-internal sealed record RunRecord(long Id, DateTimeOffset? Started, DateTimeOffset? Ended, int Done, int Failed);
+public sealed record RunRecord(long Id, DateTimeOffset? Started, DateTimeOffset? Ended, int Done, int Failed);
 
 /// <summary>
 /// Read-only queries on a project's <c>forge.db</c> that do not open a <c>JobStore</c> (which creates the schema and switches to WAL):
@@ -21,7 +21,7 @@ internal sealed record RunRecord(long Id, DateTimeOffset? Started, DateTimeOffse
 /// <c>JobStore</c> writes runs but has no query for them yet. Replace <see cref="ReadLatestRunsAsync"/> with a <c>JobStore.GetRunsAsync</c>
 /// when Core gains one.
 /// </remarks>
-internal static class ProjectDatabaseReader
+public static class ProjectDatabaseReader
 {
     /// <summary>Reads one project value.</summary>
     /// <param name="databasePath">The project's <c>forge.db</c>.</param>
