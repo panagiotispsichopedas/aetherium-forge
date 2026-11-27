@@ -146,6 +146,7 @@ internal static class CompositionRoot
         {
             NormalStrengthForGroup = group => NormalStrengthFor(forge.Rules, group),
             LookForGroup = group => LookFor(forge.Rules, group),
+            ResolveLook = (group, texture) => LookResolver.Resolve(forge.Rules, group, texture),
         };
     }
 
@@ -155,12 +156,12 @@ internal static class CompositionRoot
     /// <returns>The strength.</returns>
     internal static double NormalStrengthFor(ForgeRules rules, string group) => LookFor(rules, group)?.NormalStrength ?? 1.0;
 
-    /// <summary>Gets the effective look of a rule group by name (§8); <see langword="null"/> when the group no longer exists.</summary>
+    /// <summary>Gets the resolved look of a rule group by name (§8 scopes All and Group); <see langword="null"/> when the group no longer exists.</summary>
     /// <param name="rules">The project's rules.</param>
     /// <param name="group">The group name stored on the job.</param>
     /// <returns>The look, or <see langword="null"/>.</returns>
     internal static LookSettings? LookFor(ForgeRules rules, string group) =>
-        rules.Groups.FirstOrDefault(g => string.Equals(g.Name, group, StringComparison.OrdinalIgnoreCase))?.EffectiveLook;
+        LookResolver.FindGroup(rules, group) is null ? null : LookResolver.Resolve(rules, group, null);
 
     private static SequentialPipeline CreateSequentialPipeline(IServiceProvider services)
     {

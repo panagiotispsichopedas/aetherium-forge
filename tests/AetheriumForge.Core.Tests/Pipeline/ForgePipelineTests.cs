@@ -549,6 +549,51 @@ public sealed class ForgePipelineTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RunAsync_ResolveLookWithTextureOverride_AppliesScopesAndStoresTheirHash()
+    {
+        // Arrange: a global look, a group look and a texture override on one of two jobs.
+        var rules = new ForgeRules
+        {
+            Look = new LookOverrides { Contrast = 1.2 },
+            Groups = [new GroupRule { Name = "Clutter", Model = "fake", Look = new LookOverrides { Saturation = 1.3 } }],
+        };
+        var texture = new LookOverrides { Gamma = 1.4 };
+        await _store.UpsertJobsAsync(
+            [Record(@"textures\t\own.dds") with { Group = "Clutter" }, Record(@"textures\t\plain.dds") with { Group = "Clutter" }],
+            Ct);
+        await _store.SetTextureLookAsync(@"textures\t\own.dds", texture, Ct);
+        var processor = new TextureProcessor(new PipelineFakeSource(), new PipelineFakeCodec(), _ => new PipelineFakeUpscaler(), OutputRoot, WorkRoot);
+        var pipeline = new ForgePipeline(_store, processor, new FakeEtaEstimator(), Options())
+        {
+            LookForGroup = _ => LookSettings.Neutral with { Brightness = 0.5 },
+            ResolveLook = (group, textureLook) => LookResolver.Resolve(rules, group, textureLook),
+        };
+
+        // Act
+        await pipeline.RunAsync(null, Ct);
+
+        // Assert: the resolver wins over LookForGroup, and each job's hash is its own effective look's.
+        var hashes = (await AllJobsAsync()).OrderBy(j => j.Path).Select(j => j.LookHash);
+        Assert.Equal(
+            [LookResolver.Resolve(rules, "Clutter", texture).GetStableHash(TextureKind.Diffuse), LookResolver.Resolve(rules, "Clutter", null).GetStableHash(TextureKind.Diffuse)],
+            hashes);
+    }
+
+    [Fact]
+    public void ToTextureJob_ResolvedLook_WinsOverLookups()
+    {
+        // Arrange
+        var resolved = LookSettings.Neutral with { NormalStrength = 3.0 };
+        var record = Record(@"textures\t\n.dds") with { Kind = "normal", Group = "Clutter" };
+
+        // Act
+        var job = ForgePipeline.ToTextureJob(record, _ => 1.4, _ => LookSettings.Neutral, resolved);
+
+        // Assert
+        Assert.Equal((3.0, resolved), (job.NormalStrength, job.EffectiveLook));
+    }
+
+    [Fact]
     public void ToTextureJob_OddAspect_RoundsLikeRuleEvaluator()
     {
         // Arrange

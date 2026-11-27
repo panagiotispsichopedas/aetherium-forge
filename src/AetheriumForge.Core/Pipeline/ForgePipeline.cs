@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Threading.Channels;
+using AetheriumForge.Core.Common;
 using AetheriumForge.Core.Jobs;
 using AetheriumForge.Core.Rules;
 using AetheriumForge.Core.Textures;
@@ -91,6 +92,14 @@ public sealed partial class ForgePipeline : IForgePipeline
     /// </summary>
     public Func<string, LookSettings?>? LookForGroup { get; init; }
 
+    /// <summary>
+    /// Gets the per-job look resolver (§8 scopes): given the job's group (or <see langword="null"/>) and the job's "This texture" override
+    /// (or <see langword="null"/>), it returns the effective look, normally <c>(group, texture) =&gt; LookResolver.Resolve(rules, group, texture)</c>.
+    /// When set, it wins over <see cref="LookForGroup"/> and <see cref="NormalStrengthForGroup"/>, and the pipeline loads the texture
+    /// overrides from the job store once at the start of each run.
+    /// </summary>
+    public Func<string?, LookOverrides?, LookSettings>? ResolveLook { get; init; }
+
     /// <inheritdoc />
     public PipelineState State
     {
@@ -146,6 +155,12 @@ public sealed partial class ForgePipeline : IForgePipeline
             }
 
             run.Total = jobs.Count;
+            if (ResolveLook is not null)
+            {
+                run.TextureLooks = (await _store.ListTextureLooksAsync(CancellationToken.None).ConfigureAwait(false))
+                    .ToDictionary(l => l.Path, l => l.Look, StringComparer.Ordinal);
+            }
+
             LogRunStarted(jobs.Count, recovered);
 
             if (!stopToken.IsCancellationRequested && jobs.Count > 0)
@@ -228,9 +243,14 @@ public sealed partial class ForgePipeline : IForgePipeline
     /// <param name="record">The job row.</param>
     /// <param name="normalStrengthForGroup">Optional group → normal strength lookup (used when there is no look).</param>
     /// <param name="lookForGroup">Optional group → effective look lookup; a returned look wins over the normal strength lookup.</param>
+    /// <param name="resolvedLook">The job's fully resolved look (§8 scopes); when set it wins over both lookups.</param>
     /// <returns>The texture job. <see cref="TextureJob.SourceDxgiFormat"/> is left null; the decode stage reads it from the DDS header.</returns>
     /// <exception cref="InvalidDataException">The kind is unknown, or the source or target size is missing.</exception>
-    internal static TextureJob ToTextureJob(JobRecord record, Func<string, double>? normalStrengthForGroup = null, Func<string, LookSettings?>? lookForGroup = null)
+    internal static TextureJob ToTextureJob(
+        JobRecord record,
+        Func<string, double>? normalStrengthForGroup = null,
+        Func<string, LookSettings?>? lookForGroup = null,
+        LookSettings? resolvedLook = null)
     {
         ArgumentNullException.ThrowIfNull(record);
 
@@ -250,7 +270,7 @@ public sealed partial class ForgePipeline : IForgePipeline
         }
 
         var sourceMax = Math.Max(record.SourceWidth, record.SourceHeight);
-        var look = record.Group is { } lookGroup && lookForGroup is not null ? lookForGroup(lookGroup) : null;
+        var look = resolvedLook ?? (record.Group is { } lookGroup && lookForGroup is not null ? lookForGroup(lookGroup) : null);
         var strength = look?.NormalStrength
             ?? (record.Group is { } group && normalStrengthForGroup is not null ? normalStrengthForGroup(group) : 1.0);
 
@@ -426,7 +446,8 @@ public sealed partial class ForgePipeline : IForgePipeline
                 TextureJob job;
                 try
                 {
-                    job = ToTextureJob(record, NormalStrengthForGroup, LookForGroup);
+                    var resolved = ResolveLook?.Invoke(record.Group, run.TextureLooks?.GetValueOrDefault(GamePath.Normalize(record.Path)));
+                    job = ToTextureJob(record, NormalStrengthForGroup, LookForGroup, resolved);
                     if (_options.ModelOverride is { Length: > 0 } modelOverride)
                     {
                         job = job with { Model = modelOverride };
@@ -923,6 +944,9 @@ public sealed partial class ForgePipeline : IForgePipeline
         private readonly Dictionary<string, (int Count, double Megapixels)> _remainingByModel = new(StringComparer.Ordinal);
         private readonly Queue<(TimeSpan At, double Megapixels)> _recent = new();
         private readonly List<(long Id, string Path, double Seconds, string LookHash)> _unrecordedDone = [];
+
+        /// <summary>Gets or sets the texture look overrides by normalised path, loaded at the start of the run (only with a resolver).</summary>
+        public Dictionary<string, LookOverrides>? TextureLooks { get; set; }
         private int _total;
         private int _done;
         private int _failed;

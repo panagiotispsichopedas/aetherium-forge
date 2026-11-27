@@ -1,7 +1,9 @@
 using System.Diagnostics;
+using AetheriumForge.Core.Common;
 using AetheriumForge.Core.Imaging;
 using AetheriumForge.Core.Jobs;
 using AetheriumForge.Core.Pipeline;
+using AetheriumForge.Core.Rules;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -35,6 +37,7 @@ internal sealed partial class SequentialPipeline : IForgePipeline
     private readonly TimeProvider _time;
     private readonly ILogger<SequentialPipeline> _logger;
     private readonly Func<long, double, string?, Task> _markDone;
+    private Dictionary<string, LookOverrides>? _textureLooks;
     private readonly PauseTokenSource _pause = new();
     private readonly Stopwatch _active = new();
     private readonly Lock _gate = new();
@@ -333,6 +336,9 @@ internal sealed partial class SequentialPipeline : IForgePipeline
 
     private async Task<List<JobRecord>> LoadQueuedAsync()
     {
+        _textureLooks = (await _store.ListTextureLooksAsync(CancellationToken.None).ConfigureAwait(false))
+            .ToDictionary(l => l.Path, l => l.Look, StringComparer.Ordinal);
+
         var jobs = new List<JobRecord>();
         await foreach (var job in _store.GetJobsAsync(JobState.Queued, CancellationToken.None).ConfigureAwait(false))
         {
@@ -352,7 +358,7 @@ internal sealed partial class SequentialPipeline : IForgePipeline
         TextureJob textureJob;
         try
         {
-            textureJob = _mapper.Map(job);
+            textureJob = _mapper.Map(job, _textureLooks?.GetValueOrDefault(GamePath.Normalize(job.Path)));
         }
         catch (InvalidOperationException ex)
         {

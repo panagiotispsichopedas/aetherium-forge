@@ -1,14 +1,19 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using AetheriumForge.Core.Common;
+using AetheriumForge.Core.Rules;
+using AetheriumForge.Core.Textures;
 using Microsoft.Data.Sqlite;
 
 namespace AetheriumForge.Core.Jobs;
 
 /// <summary>
-/// SQLite-backed store of a project's settings, texture jobs and runs (IMPLEMENTATION_GUIDE §12).
+/// SQLite-backed store of a project's settings, texture jobs, runs and per-texture look overrides (IMPLEMENTATION_GUIDE §8, §12).
 /// </summary>
 /// <remarks>
+/// Opening a database created by an older version upgrades it in place: the <c>look_hash</c> column and the <c>texture_look</c> table are
+/// added when missing, safely even when two processes open it at once.
 /// Every operation opens its own pooled connection, so the store is safe to call from several pipeline workers at once.
 /// The database runs in WAL mode; SQLite serialises writers and Microsoft.Data.Sqlite retries while the database is busy.
 /// </remarks>
@@ -35,6 +40,7 @@ public sealed class JobStore : IAsyncDisposable
         );
         CREATE INDEX IF NOT EXISTS job_state ON job(state);
         CREATE TABLE IF NOT EXISTS run (id INTEGER PRIMARY KEY, started TEXT, ended TEXT, done INT, failed INT);
+        CREATE TABLE IF NOT EXISTS texture_look (path TEXT PRIMARY KEY, look_json TEXT NOT NULL, updated_at TEXT);
         """;
 
     private const string JobColumns = "id, path, archive, src_w, src_h, format, kind, grp, target, model, state, attempts, error, seconds, finished_at, look_hash";
@@ -342,7 +348,7 @@ public sealed class JobStore : IAsyncDisposable
     /// </summary>
     /// <param name="id">The job id.</param>
     /// <param name="seconds">Processing time in seconds.</param>
-    /// <param name="lookHash">The stable hash of the effective look for the job's kind (<see cref="Rules.LookSettings.GetStableHash(Textures.TextureKind)"/>), or <see langword="null"/> to record that it is unknown.</param>
+    /// <param name="lookHash">The stable hash of the effective look for the job's kind (<see cref="LookSettings.GetStableHash(TextureKind)"/>), or <see langword="null"/> to record that it is unknown.</param>
     /// <param name="ct">Cancels the operation.</param>
     /// <returns>A task that completes when the state is stored.</returns>
     /// <exception cref="KeyNotFoundException">No job has this id.</exception>
@@ -359,7 +365,7 @@ public sealed class JobStore : IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// Hashes are per kind, so one hash fits a group only when its jobs share the kind's applicable controls. For the
-    /// "Apply to finished textures?" flow use <see cref="FindDoneWithDifferentLookAsync(string, Rules.LookSettings, CancellationToken)"/>.
+    /// "Apply to finished textures?" flow use <see cref="FindDoneWithDifferentLookAsync(string, LookSettings, CancellationToken)"/>.
     /// </remarks>
     /// <param name="group">The group name, compared case-insensitively.</param>
     /// <param name="lookHash">The hash to compare with.</param>
@@ -401,19 +407,19 @@ public sealed class JobStore : IAsyncDisposable
     /// <summary>
     /// Finds the <see cref="JobState.Done"/> jobs of a group that were finished with a different look than <paramref name="look"/>, for the
     /// "Apply to finished textures?" flow (§8). Each job is compared with the hash of <paramref name="look"/> for its own kind
-    /// (<see cref="Rules.LookSettings.GetStableHash(Textures.TextureKind)"/>), so a change to, say, the normal strength returns only the
+    /// (<see cref="LookSettings.GetStableHash(TextureKind)"/>), so a change to, say, the normal strength returns only the
     /// group's normal maps. Jobs with no recorded look, or with a kind that cannot be parsed, count as different.
     /// </summary>
     /// <param name="group">The group name, compared case-insensitively.</param>
     /// <param name="look">The group's current effective look.</param>
     /// <param name="ct">Cancels the operation.</param>
     /// <returns>The jobs in id order.</returns>
-    public async Task<IReadOnlyList<JobRecord>> FindDoneWithDifferentLookAsync(string group, Rules.LookSettings look, CancellationToken ct = default)
+    public async Task<IReadOnlyList<JobRecord>> FindDoneWithDifferentLookAsync(string group, LookSettings look, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(group);
         ArgumentNullException.ThrowIfNull(look);
 
-        var hashes = new Dictionary<Textures.TextureKind, string>();
+        var hashes = new Dictionary<TextureKind, string>();
         var jobs = new List<JobRecord>();
         var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using (connection.ConfigureAwait(false))
@@ -430,8 +436,7 @@ public sealed class JobStore : IAsyncDisposable
                     {
                         var job = ReadJob(reader);
                         if (job.LookHash is null
-                            || !Enum.TryParse<Textures.TextureKind>(job.Kind, ignoreCase: true, out var kind)
-                            || !Enum.IsDefined(kind)
+                            || !TryParseKind(job.Kind, out var kind)
                             || !string.Equals(job.LookHash, HashFor(kind), StringComparison.Ordinal))
                         {
                             jobs.Add(job);
@@ -443,7 +448,7 @@ public sealed class JobStore : IAsyncDisposable
 
         return jobs;
 
-        string HashFor(Textures.TextureKind kind)
+        string HashFor(TextureKind kind)
         {
             if (!hashes.TryGetValue(kind, out var hash))
             {
@@ -453,6 +458,228 @@ public sealed class JobStore : IAsyncDisposable
 
             return hash;
         }
+    }
+
+    /// <summary>
+    /// Finds the <see cref="JobState.Done"/> jobs whose effective look would change after a scope edit (§8 "Apply to N finished textures?").
+    /// For each Done job, <paramref name="effectiveLookAfterChange"/> gives its effective look under the edited scopes (it receives the job
+    /// and the texture override currently stored for its path), and the job is returned when that look's hash for the job's kind differs
+    /// from the hash recorded when the job finished.
+    /// </summary>
+    /// <remarks>
+    /// Jobs with no recorded hash (finished before looks were recorded) or an unknown kind are always returned. Typical resolvers:
+    /// <c>(job, texture) =&gt; LookResolver.Resolve(editedRules, job.Group, texture)</c> after an All or Group edit, and the same with the
+    /// pending override substituted for the edited path after a "This texture" edit.
+    /// </remarks>
+    /// <param name="effectiveLookAfterChange">Resolves a job's effective look after the change.</param>
+    /// <param name="group">Only consider jobs of this group (case-insensitive); <see langword="null"/> considers every group (an All edit).</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The affected jobs in id order.</returns>
+    public async Task<IReadOnlyList<JobRecord>> FindDoneAffectedByLookChangeAsync(
+        Func<JobRecord, LookOverrides?, LookSettings> effectiveLookAfterChange,
+        string? group = null,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(effectiveLookAfterChange);
+
+        var overrides = (await ListTextureLooksAsync(ct).ConfigureAwait(false)).ToDictionary(l => l.Path, l => l.Look, StringComparer.Ordinal);
+        var affected = new List<JobRecord>();
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                if (group is null)
+                {
+                    command.CommandText = $"SELECT {JobColumns} FROM job WHERE state = 'Done' ORDER BY id;";
+                }
+                else
+                {
+                    command.CommandText = $"SELECT {JobColumns} FROM job WHERE state = 'Done' AND grp = $grp COLLATE NOCASE ORDER BY id;";
+                    command.Parameters.AddWithValue("$grp", group);
+                }
+
+                var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                await using (reader.ConfigureAwait(false))
+                {
+                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        var job = ReadJob(reader);
+                        if (job.LookHash is null || !TryParseKind(job.Kind, out var kind))
+                        {
+                            affected.Add(job);
+                            continue;
+                        }
+
+                        LookSettings after = effectiveLookAfterChange(job, overrides.GetValueOrDefault(job.Path));
+                        if (!string.Equals(after.GetStableHash(kind), job.LookHash, StringComparison.Ordinal))
+                        {
+                            affected.Add(job);
+                        }
+                    }
+                }
+            }
+        }
+
+        return affected;
+    }
+
+    /// <summary>
+    /// Reads the "This texture" look override of a path (§8).
+    /// </summary>
+    /// <param name="path">The canonical game path (normalised before lookup).</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The override, or <see langword="null"/> when the texture has none.</returns>
+    /// <exception cref="JsonException">The stored override is corrupt.</exception>
+    public async Task<LookOverrides?> GetTextureLookAsync(string path, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        var result = await ExecuteScalarAsync("SELECT look_json FROM texture_look WHERE path = $path;", [("$path", GamePath.Normalize(path))], ct).ConfigureAwait(false);
+        return result is string json ? LookOverrides.FromJson(json) : null;
+    }
+
+    /// <summary>
+    /// Stores (inserts or replaces) the "This texture" look override of a path. An empty override removes the row, as it changes nothing.
+    /// </summary>
+    /// <param name="path">The canonical game path (normalised before storing).</param>
+    /// <param name="look">The controls the texture sets.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>A task that completes when the override is stored.</returns>
+    /// <exception cref="ArgumentException">A value in <paramref name="look"/> is out of range.</exception>
+    public async Task SetTextureLookAsync(string path, LookOverrides look, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(look);
+
+        await SetTextureLooksAsync(new Dictionary<string, LookOverrides> { [path] = look }, replaceExisting: false, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Stores several texture overrides in one transaction (used by <see cref="TextureLooksFile.ImportAsync"/>). Empty overrides remove
+    /// their rows. Every override is validated before anything is written.
+    /// </summary>
+    /// <param name="looks">The overrides by canonical path (normalised before storing).</param>
+    /// <param name="replaceExisting"><see langword="true"/> removes every other override first.</param>
+    /// <param name="ct">Cancels the operation; nothing is written when cancelled.</param>
+    /// <returns>A task that completes when the overrides are stored.</returns>
+    /// <exception cref="ArgumentException">A value is out of range.</exception>
+    public async Task SetTextureLooksAsync(IReadOnlyDictionary<string, LookOverrides> looks, bool replaceExisting, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(looks);
+
+        var rows = new List<(string Path, string? Json)>(looks.Count);
+        foreach (var (path, look) in looks)
+        {
+            ArgumentNullException.ThrowIfNull(path, nameof(looks));
+            ArgumentNullException.ThrowIfNull(look, nameof(looks));
+            try
+            {
+                look.Validate($"Texture '{path}'");
+            }
+            catch (JsonException ex)
+            {
+                throw new ArgumentException(ex.Message, nameof(looks), ex);
+            }
+
+            rows.Add((GamePath.Normalize(path), look.IsEmpty ? null : look.ToJson()));
+        }
+
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+            await using (transaction.ConfigureAwait(false))
+            {
+                if (replaceExisting)
+                {
+                    await ExecuteAsync(connection, "DELETE FROM texture_look;", ct, transaction).ConfigureAwait(false);
+                }
+
+                var upsert = connection.CreateCommand();
+                var delete = connection.CreateCommand();
+                await using (upsert.ConfigureAwait(false))
+                await using (delete.ConfigureAwait(false))
+                {
+                    upsert.Transaction = transaction;
+                    upsert.CommandText = """
+                        INSERT INTO texture_look (path, look_json, updated_at) VALUES ($path, $look_json, $updated_at)
+                        ON CONFLICT(path) DO UPDATE SET look_json = excluded.look_json, updated_at = excluded.updated_at;
+                        """;
+                    var pathParameter = upsert.Parameters.Add("$path", SqliteType.Text);
+                    var jsonParameter = upsert.Parameters.Add("$look_json", SqliteType.Text);
+                    upsert.Parameters.AddWithValue("$updated_at", FormatTimestamp(_timeProvider.GetUtcNow()));
+
+                    delete.Transaction = transaction;
+                    delete.CommandText = "DELETE FROM texture_look WHERE path = $path;";
+                    var deletePath = delete.Parameters.Add("$path", SqliteType.Text);
+
+                    foreach (var (path, json) in rows)
+                    {
+                        if (json is null)
+                        {
+                            deletePath.Value = path;
+                            await delete.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            pathParameter.Value = path;
+                            jsonParameter.Value = json;
+                            await upsert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        }
+                    }
+                }
+
+                await transaction.CommitAsync(ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Removes the "This texture" look override of a path.
+    /// </summary>
+    /// <param name="path">The canonical game path (normalised before lookup).</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns><see langword="true"/> when an override was removed.</returns>
+    public async Task<bool> RemoveTextureLookAsync(string path, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        return await ExecuteNonQueryAsync("DELETE FROM texture_look WHERE path = $path;", [("$path", GamePath.Normalize(path))], ct).ConfigureAwait(false) == 1;
+    }
+
+    /// <summary>
+    /// Lists every "This texture" look override, ordered by path.
+    /// </summary>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The overrides.</returns>
+    /// <exception cref="JsonException">A stored override is corrupt.</exception>
+    public async Task<IReadOnlyList<TextureLook>> ListTextureLooksAsync(CancellationToken ct = default)
+    {
+        var looks = new List<TextureLook>();
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                command.CommandText = "SELECT path, look_json, updated_at FROM texture_look ORDER BY path;";
+                var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                await using (reader.ConfigureAwait(false))
+                {
+                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        looks.Add(new TextureLook(
+                            reader.GetString(0),
+                            LookOverrides.FromJson(reader.GetString(1)),
+                            reader.IsDBNull(2) ? DateTimeOffset.MinValue : ParseTimestamp(reader.GetString(2))));
+                    }
+                }
+            }
+        }
+
+        return looks;
     }
 
     /// <summary>
@@ -622,6 +849,9 @@ public sealed class JobStore : IAsyncDisposable
         DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
 
     private static JobState ParseState(string value) => Enum.Parse<JobState>(value, ignoreCase: false);
+
+    private static bool TryParseKind(string value, out TextureKind kind) =>
+        Enum.TryParse(value, ignoreCase: true, out kind) && Enum.IsDefined(kind) && !int.TryParse(value, out _);
 
     private static JobRecord ReadJob(SqliteDataReader reader) => new(
         Id: reader.GetInt64(0),

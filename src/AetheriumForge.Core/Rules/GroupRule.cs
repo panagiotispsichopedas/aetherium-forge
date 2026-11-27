@@ -40,26 +40,34 @@ public sealed record GroupRule
     public required string Model { get; init; }
 
     /// <summary>
-    /// Gets the group-level normal-map strength multiplier. Defaults to 1.0. Kept as a compatibility alias of
-    /// <see cref="LookSettings.NormalStrength"/>: it is used only when <see cref="Look"/> is <see langword="null"/>; see <see cref="EffectiveLook"/>.
+    /// Gets the group-level normal-map strength. Defaults to 1.0. Kept as a compatibility alias of <see cref="LookOverrides.NormalStrength"/>:
+    /// when the group's <see cref="Look"/> does not set the normal strength and this is not 1.0, it acts as the group's normal strength
+    /// (see <see cref="ScopeLook"/>). Reading JSON sets it to the group's resolved normal strength (the look's, else the group-level
+    /// <c>normalStrength</c>, else 1.0); writing JSON moves it into the group's <c>look</c>.
     /// </summary>
     public double NormalStrength { get; init; } = 1.0;
 
     /// <summary>
-    /// Gets the group's artistic look (§8), or <see langword="null"/> for neutral apart from <see cref="NormalStrength"/>.
+    /// Gets the group's look (§8 scope "Group"): only the controls the group sets; every other control inherits from the rules' global
+    /// look (<see cref="ForgeRules.Look"/>). <see langword="null"/> sets nothing.
     /// </summary>
     /// <remarks>
-    /// When reading JSON, a <c>look</c> block without <c>normalStrength</c> takes the group-level <c>normalStrength</c>; when both are
-    /// present, <c>look.normalStrength</c> wins. In memory, a non-null <see cref="Look"/> always wins over <see cref="NormalStrength"/>.
+    /// When reading JSON, a <c>look</c> block without <c>normalStrength</c> takes the group-level <c>normalStrength</c> when that is
+    /// present; when both are present, <c>look.normalStrength</c> wins. A group-level <c>normalStrength</c> without a <c>look</c> becomes a
+    /// look that sets only the normal strength.
     /// </remarks>
-    public LookSettings? Look { get; init; }
+    public LookOverrides? Look { get; init; }
 
     /// <summary>
-    /// Gets the look the pipeline applies: <see cref="Look"/> when set, otherwise the neutral look with the group-level
-    /// <see cref="NormalStrength"/> (equal to <see cref="LookSettings.Neutral"/> when that is 1.0).
+    /// Gets the group's look with the <see cref="NormalStrength"/> alias applied: <see cref="Look"/>, with its normal strength taken from
+    /// <see cref="NormalStrength"/> when the look does not set one and the alias is not 1.0. Use <see cref="LookResolver"/> for the
+    /// effective look of a texture.
     /// </summary>
     [JsonIgnore]
-    public LookSettings EffectiveLook => Look ?? new LookSettings { NormalStrength = NormalStrength };
+    public LookOverrides? ScopeLook =>
+        Look?.NormalStrength is not null || NormalStrength == 1.0
+            ? Look
+            : (Look ?? LookOverrides.Empty) with { NormalStrength = NormalStrength };
 
     /// <summary>Determines whether two rules have equal values, comparing <see cref="Match"/> and <see cref="Kinds"/> element by element.</summary>
     /// <param name="other">The rule to compare with.</param>

@@ -49,9 +49,10 @@ internal sealed partial class JobMapper
 
     /// <summary>Maps a job row.</summary>
     /// <param name="job">The job row.</param>
+    /// <param name="textureOverride">The job's "This texture" look override (§8 scopes), or <see langword="null"/>.</param>
     /// <returns>The texture job.</returns>
     /// <exception cref="InvalidOperationException">The row has no usable source size or target.</exception>
-    public TextureJob Map(JobRecord job)
+    public TextureJob Map(JobRecord job, LookOverrides? textureOverride = null)
     {
         ArgumentNullException.ThrowIfNull(job);
 
@@ -65,11 +66,10 @@ internal sealed partial class JobMapper
 
         int width;
         int height;
-        var normalStrength = 1.0;
-        LookSettings? look = null;
+        string? lookGroup = null;
         if (!decision.IsSkipped && Math.Max(decision.TargetWidth, decision.TargetHeight) == job.Target)
         {
-            (width, height, normalStrength, look) = (decision.TargetWidth, decision.TargetHeight, decision.NormalStrength, decision.Look);
+            (width, height, lookGroup) = (decision.TargetWidth, decision.TargetHeight, decision.Group);
         }
         else
         {
@@ -78,12 +78,11 @@ internal sealed partial class JobMapper
             (width, height) = FitToMax(job.SourceWidth, job.SourceHeight, job.Target);
             if (!decision.IsSkipped)
             {
-                (normalStrength, look) = (decision.NormalStrength, decision.Look);
+                lookGroup = decision.Group;
             }
-            else if (job.Group is not null && _rules.Groups.FirstOrDefault(g => string.Equals(g.Name, job.Group, StringComparison.OrdinalIgnoreCase)) is { } group)
+            else if (LookResolver.FindGroup(_rules, job.Group) is { } group)
             {
-                look = group.EffectiveLook;
-                normalStrength = look.NormalStrength;
+                lookGroup = group.Name;
             }
             else
             {
@@ -91,7 +90,9 @@ internal sealed partial class JobMapper
             }
         }
 
-        return new TextureJob(job.Path, job.Archive, kind, width, height, ModelFor(job), normalStrength, Look: look);
+        // Scopes (§8): texture override, else group, else the global look, else neutral. Without a group only the global look applies.
+        LookSettings look = LookResolver.Resolve(_rules, lookGroup, textureOverride);
+        return new TextureJob(job.Path, job.Archive, kind, width, height, ModelFor(job), look.NormalStrength, Look: look);
     }
 
     /// <summary>Scales a size so that its larger side equals <paramref name="target"/>, keeping the aspect ratio.</summary>

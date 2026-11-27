@@ -12,7 +12,7 @@ namespace AetheriumForge.Core.Rules;
 /// <param name="TargetHeight">The output height in pixels; 0 when skipped.</param>
 /// <param name="Model">The upscaling model; <see langword="null"/> when skipped.</param>
 /// <param name="NormalStrength">The effective normal-map strength of the group (used for normal maps); 0 when skipped.</param>
-/// <param name="Look">The group's effective look (<see cref="GroupRule.EffectiveLook"/>); <see langword="null"/> when skipped.</param>
+/// <param name="Look">The group's resolved look (global and group scopes, no texture override; <see cref="LookResolver"/>); <see langword="null"/> when skipped.</param>
 public sealed record TextureDecision(
     SkipReason Skip,
     TextureKind Kind,

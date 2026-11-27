@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using AetheriumForge.Core.Rules;
 
@@ -8,7 +9,8 @@ public sealed class ForgeRulesLookTests
     private const string OldRulesJson = """
         {
           "groups": [
-            { "name": "Clutter", "match": ["*\\clutter\\*"], "cap": 2048, "model": "realesrgan-x4plus", "normalStrength": 1.4 }
+            { "name": "Clutter", "match": ["*\\clutter\\*"], "cap": 2048, "model": "realesrgan-x4plus", "normalStrength": 1.4 },
+            { "name": "Large", "model": "realesrgan-x4plus" }
           ]
         }
         """;
@@ -17,37 +19,37 @@ public sealed class ForgeRulesLookTests
         $$"""{ "groups": [ { "name": "G", "model": "m"{{groupExtras}}, "look": {{look}} } ] }""";
 
     [Fact]
-    public void FromJson_RulesWithoutLook_LookIsNull()
+    public void FromJson_OldRulesWithGroupNormalStrength_BecomesLookSettingOnlyNormalStrength()
     {
         // Act
         ForgeRules rules = ForgeRules.FromJson(OldRulesJson);
 
         // Assert
-        Assert.Null(rules.Groups[0].Look);
+        Assert.Equal(new LookOverrides { NormalStrength = 1.4 }, rules.Groups[0].Look);
     }
 
     [Fact]
-    public void FromJson_RulesWithoutLook_EffectiveLookCarriesGroupNormalStrength()
+    public void FromJson_OldRulesWithoutNormalStrength_LookIsNull()
     {
         // Act
         ForgeRules rules = ForgeRules.FromJson(OldRulesJson);
 
         // Assert
-        Assert.Equal(LookSettings.Neutral with { NormalStrength = 1.4 }, rules.Groups[0].EffectiveLook);
+        Assert.Equal((null, (LookOverrides?)null), (rules.Look, rules.Groups[1].Look));
     }
 
     [Fact]
-    public void FromJson_EmptyLook_KeepsNeutralDefaults()
+    public void FromJson_EmptyLook_SetsNothing()
     {
         // Act
         ForgeRules rules = ForgeRules.FromJson(GroupJson("{}"));
 
         // Assert
-        Assert.Equal(LookSettings.Neutral, rules.Groups[0].Look);
+        Assert.Equal(LookOverrides.Empty, rules.Groups[0].Look);
     }
 
     [Fact]
-    public void FromJson_PartialLook_SetsGivenValuesAndKeepsOtherDefaults()
+    public void FromJson_PartialLook_SetsOnlyGivenControls()
     {
         // Arrange
         string json = GroupJson("""{ "saturation": 1.2, "sharpen": { "amount": 0.5 } }""");
@@ -56,7 +58,7 @@ public sealed class ForgeRulesLookTests
         ForgeRules rules = ForgeRules.FromJson(json);
 
         // Assert
-        Assert.Equal(LookSettings.Neutral with { Saturation = 1.2, Sharpen = new SharpenSettings(0.5, 1.0) }, rules.Groups[0].Look);
+        Assert.Equal(new LookOverrides { Saturation = 1.2, SharpenAmount = 0.5 }, rules.Groups[0].Look);
     }
 
     [Fact]
@@ -69,7 +71,7 @@ public sealed class ForgeRulesLookTests
         ForgeRules rules = ForgeRules.FromJson(json);
 
         // Assert
-        Assert.Equal(1.6, rules.Groups[0].Look!.NormalStrength);
+        Assert.Equal(new LookOverrides { Gamma = 1.1, NormalStrength = 1.6 }, rules.Groups[0].Look);
     }
 
     [Fact]
@@ -82,7 +84,20 @@ public sealed class ForgeRulesLookTests
         ForgeRules rules = ForgeRules.FromJson(json);
 
         // Assert
-        Assert.Equal(2.0, rules.Groups[0].EffectiveLook.NormalStrength);
+        Assert.Equal((2.0, 2.0), (rules.Groups[0].Look!.NormalStrength!.Value, rules.Groups[0].NormalStrength));
+    }
+
+    [Fact]
+    public void FromJson_GlobalLook_IsRead()
+    {
+        // Arrange
+        const string json = """{ "look": { "contrast": 1.2, "specularScale": 0.8 }, "groups": [ { "name": "G", "model": "m" } ] }""";
+
+        // Act
+        ForgeRules rules = ForgeRules.FromJson(json);
+
+        // Assert
+        Assert.Equal(new LookOverrides { Contrast = 1.2, SpecularScale = 0.8 }, rules.Look);
     }
 
     [Theory]
@@ -90,7 +105,6 @@ public sealed class ForgeRulesLookTests
     [InlineData("""{ "aiStrength": -0.1 }""")]
     [InlineData("""{ "sharpen": { "amount": 6 } }""")]
     [InlineData("""{ "sharpen": { "amount": 1, "radius": 0 } }""")]
-    [InlineData("""{ "sharpen": null }""")]
     [InlineData("""{ "denoise": 2 }""")]
     [InlineData("""{ "brightness": -1.5 }""")]
     [InlineData("""{ "contrast": 0.2 }""")]
@@ -99,10 +113,25 @@ public sealed class ForgeRulesLookTests
     [InlineData("""{ "temperature": 1.01 }""")]
     [InlineData("""{ "normalStrength": -1 }""")]
     [InlineData("""{ "specularScale": 2.5 }""")]
-    public void FromJson_LookValueOutOfRange_ThrowsJsonException(string look)
+    public void FromJson_GroupLookValueOutOfRange_ThrowsJsonException(string look)
     {
         // Act
         var act = () => ForgeRules.FromJson(GroupJson(look));
+
+        // Assert
+        Assert.Throws<JsonException>(act);
+    }
+
+    [Theory]
+    [InlineData("""{ "gamma": 3 }""")]
+    [InlineData("""{ "sharpen": { "radius": 20 } }""")]
+    public void FromJson_GlobalLookValueOutOfRange_ThrowsJsonException(string look)
+    {
+        // Arrange
+        string json = $$"""{ "look": {{look}}, "groups": [ { "name": "G", "model": "m" } ] }""";
+
+        // Act
+        var act = () => ForgeRules.FromJson(json);
 
         // Assert
         Assert.Throws<JsonException>(act);
@@ -114,7 +143,7 @@ public sealed class ForgeRulesLookTests
     public void FromJson_GroupNormalStrengthOutOfRangeWithoutLook_ThrowsJsonException(double strength)
     {
         // Arrange
-        string json = $$"""{ "groups": [ { "name": "G", "model": "m", "normalStrength": {{strength.ToString(System.Globalization.CultureInfo.InvariantCulture)}} } ] }""";
+        string json = $$"""{ "groups": [ { "name": "G", "model": "m", "normalStrength": {{strength.ToString(CultureInfo.InvariantCulture)}} } ] }""";
 
         // Act
         var act = () => ForgeRules.FromJson(json);
@@ -124,36 +153,24 @@ public sealed class ForgeRulesLookTests
     }
 
     [Fact]
-    public void FromJson_GroupNormalStrengthOutOfLookRange_ThrowsJsonExceptionWhenLookPresent()
-    {
-        // Arrange: the alias flows into the look, which validates it.
-        string json = GroupJson("{}", """, "normalStrength": 9""");
-
-        // Act
-        var act = () => ForgeRules.FromJson(json);
-
-        // Assert
-        Assert.Throws<JsonException>(act);
-    }
-
-    [Fact]
-    public void ToJson_RulesWithLook_RoundTrips()
+    public void ToJson_RulesWithGlobalAndGroupLooks_RoundTrips()
     {
         // Arrange
-        var look = new LookSettings
+        var rules = new ForgeRules
         {
-            AiStrength = 0.75,
-            Sharpen = new SharpenSettings(0.6, 1.5),
-            Denoise = 0.3,
-            Brightness = 0.05,
-            Contrast = 1.1,
-            Gamma = 0.9,
-            Saturation = 1.2,
-            Temperature = -0.25,
-            NormalStrength = 1.8,
-            SpecularScale = 0.7,
+            Look = new LookOverrides { Contrast = 1.1, SharpenRadius = 2.0 },
+            Groups =
+            [
+                new GroupRule
+                {
+                    Name = "G",
+                    Model = "m",
+                    NormalStrength = 1.8,
+                    Look = new LookOverrides { AiStrength = 0.75, SharpenAmount = 0.6, Denoise = 0.3, Temperature = -0.25, NormalStrength = 1.8, SpecularScale = 0.7 },
+                },
+                new GroupRule { Name = "H", Model = "m" },
+            ],
         };
-        var rules = new ForgeRules { Groups = [new GroupRule { Name = "G", Model = "m", NormalStrength = 1.8, Look = look }] };
 
         // Act
         ForgeRules roundTripped = ForgeRules.FromJson(rules.ToJson());
@@ -163,34 +180,63 @@ public sealed class ForgeRulesLookTests
     }
 
     [Fact]
-    public void ToJson_OldRules_RoundTripsWithoutLook()
+    public void ToJson_Default_RoundTrips()
+    {
+        // Act
+        ForgeRules roundTripped = ForgeRules.FromJson(ForgeRules.Default.ToJson());
+
+        // Assert
+        Assert.Equal(ForgeRules.Default, roundTripped);
+    }
+
+    [Fact]
+    public void ToJson_OldRules_RoundTrips()
     {
         // Arrange
         ForgeRules rules = ForgeRules.FromJson(OldRulesJson);
 
         // Act
-        string json = rules.ToJson();
+        ForgeRules roundTripped = ForgeRules.FromJson(rules.ToJson());
 
         // Assert
-        Assert.Equal((false, rules), (json.Contains("\"look\"", StringComparison.Ordinal), ForgeRules.FromJson(json)));
+        Assert.Equal(rules, roundTripped);
     }
 
     [Fact]
-    public void ToJson_RulesWithLook_WritesCamelCaseLookWithoutComputedProperties()
+    public void ToJson_GroupNormalStrengthAlias_IsWrittenInsideLookOnly()
     {
-        // Arrange
-        var rules = new ForgeRules { Groups = [new GroupRule { Name = "G", Model = "m", Look = LookSettings.Neutral with { SpecularScale = 1.5 } }] };
+        // Arrange: the alias set in memory without a look, as older code builds groups.
+        var rules = new ForgeRules { Groups = [new GroupRule { Name = "G", Model = "m", NormalStrength = 1.4 }] };
 
         // Act
         using JsonDocument document = JsonDocument.Parse(rules.ToJson());
         JsonElement group = document.RootElement.GetProperty("groups")[0];
 
         // Assert
-        Assert.Equal(
-            (1.5, false, false, false),
-            (group.GetProperty("look").GetProperty("specularScale").GetDouble(),
-             group.GetProperty("look").TryGetProperty("isNeutral", out _),
-             group.TryGetProperty("effectiveLook", out _),
-             group.GetProperty("look").TryGetProperty("denoise", out _)));
+        Assert.Equal((1.4, false), (group.GetProperty("look").GetProperty("normalStrength").GetDouble(), group.TryGetProperty("normalStrength", out _)));
+    }
+
+    [Fact]
+    public void ToJson_PartialLook_OmitsUnsetControlsAndComputedProperties()
+    {
+        // Arrange
+        var rules = new ForgeRules { Groups = [new GroupRule { Name = "G", Model = "m", Look = new LookOverrides { SpecularScale = 1.5 } }] };
+
+        // Act
+        using JsonDocument document = JsonDocument.Parse(rules.ToJson());
+        JsonElement look = document.RootElement.GetProperty("groups")[0].GetProperty("look");
+
+        // Assert
+        Assert.Equal(["specularScale"], look.EnumerateObject().Select(p => p.Name));
+    }
+
+    [Fact]
+    public void ToJson_NoGlobalLook_OmitsTopLevelLook()
+    {
+        // Act
+        using JsonDocument document = JsonDocument.Parse(ForgeRules.Default.ToJson());
+
+        // Assert
+        Assert.False(document.RootElement.TryGetProperty("look", out _));
     }
 }

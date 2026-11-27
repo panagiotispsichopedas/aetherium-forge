@@ -85,7 +85,7 @@ public sealed class RuleEvaluator
         long targetMax = Math.Min(group.Cap, (long)sourceMax * group.MaxFactor);
         int width = Scale(header.Width, targetMax, sourceMax);
         int height = Scale(header.Height, targetMax, sourceMax);
-        LookSettings look = group.EffectiveLook;
+        LookSettings look = LookResolver.Resolve(_rules, group.Name, null);
         return new TextureDecision(SkipReason.None, kind, group.Name, width, height, group.Model, look.NormalStrength, look);
     }
 
