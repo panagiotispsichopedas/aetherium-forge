@@ -79,6 +79,9 @@ internal sealed class SimulatedGpu : IGpuAdapterProvider
     /// <summary>Gets or sets a hook called before each run with the 1-based run number.</summary>
     public Action<int>? BeforeRun { get; set; }
 
+    /// <summary>Gets or sets a hook called at the start of each <see cref="QueryVideoMemory"/>.</summary>
+    public Action? OnQueryVideoMemory { get; set; }
+
     /// <summary>Gets or sets the error thrown by the runner factory, by 1-based creation number; <see langword="null"/> for none.</summary>
     public Func<int, ModelInfo, Exception?> CreateFailure { get; set; } = (_, _) => null;
 
@@ -129,6 +132,7 @@ internal sealed class SimulatedGpu : IGpuAdapterProvider
     public VideoMemoryInfo? QueryVideoMemory(long luid)
     {
         Interlocked.Increment(ref _queryCount);
+        OnQueryVideoMemory?.Invoke();
         lock (_gate)
         {
             return ReportsMemory && luid == Luid ? new VideoMemoryInfo(Budget, BaseUsage + _usage, Budget, 0) : null;

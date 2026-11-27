@@ -16,17 +16,61 @@ public sealed class RuleEvaluatorTests
         TextureDecision decision = _defaultEvaluator.Evaluate(@"textures\clutter\bucket01.dds", Header(512, 512));
 
         // Assert
-        Assert.Equal(new TextureDecision(SkipReason.None, TextureKind.Diffuse, "Clutter", 2048, 2048, "realesrgan-x4plus", 1.4), decision);
+        Assert.Equal(new TextureDecision(SkipReason.None, TextureKind.Diffuse, "Clutter", 2048, 2048, "realesrgan-x4plus", 1.4, LookSettings.Neutral with { NormalStrength = 1.4 }), decision);
     }
 
     [Fact]
-    public void Evaluate_NonClutterPath_FallsThroughToLarge()
+    public void Evaluate_UncategorisedPath_FallsThroughToLarge()
     {
         // Act
-        TextureDecision decision = _defaultEvaluator.Evaluate(@"textures\armor\iron\cuirass_n.dds", Header(1024, 1024));
+        TextureDecision decision = _defaultEvaluator.Evaluate(@"textures\magic\runes\rune01_n.dds", Header(1024, 1024));
 
         // Assert
-        Assert.Equal(new TextureDecision(SkipReason.None, TextureKind.Normal, "Large", 4096, 4096, "realesrgan-x4plus", 1.0), decision);
+        Assert.Equal(new TextureDecision(SkipReason.None, TextureKind.Normal, "Large", 4096, 4096, "realesrgan-x4plus", 1.0, LookSettings.Neutral), decision);
+    }
+
+    [Theory]
+    [InlineData(@"textures\armor\iron\cuirass_n.dds", "Armor")]
+    [InlineData(@"textures\dlc01\armor\dawnguard\cuirass.dds", "Armor")]
+    [InlineData(@"textures\weapons\iron\sword.dds", "Weapons")]
+    [InlineData(@"textures\clothes\farmclothes\shirt.dds", "Clothes")]
+    [InlineData(@"textures\actors\wolf\wolf.dds", "Creatures")]
+    [InlineData(@"textures\architecture\whiterun\wall.dds", "Architecture")]
+    [InlineData(@"textures\dungeons\nordic\floor.dds", "Architecture")]
+    [InlineData(@"textures\landscape\rocks\rock01.dds", "Landscape")]
+    [InlineData(@"textures\plants\fern.dds", "Landscape")]
+    [InlineData(@"textures\trees\pine.dds", "Landscape")]
+    [InlineData(@"textures\clutter\bucket01.dds", "Clutter")]
+    public void Evaluate_DefaultRules_PicksCategoryGroup(string path, string group)
+    {
+        // Act
+        TextureDecision decision = _defaultEvaluator.Evaluate(path, Header(512, 512));
+
+        // Assert
+        Assert.Equal(group, decision.Group);
+    }
+
+    [Fact]
+    public void Evaluate_CharacterActorPath_StaysExcluded()
+    {
+        // Act
+        TextureDecision decision = _defaultEvaluator.Evaluate(@"textures\actors\character\male\body.dds", Header(512, 512));
+
+        // Assert
+        Assert.True(decision.IsSkipped);
+    }
+
+    [Fact]
+    public void Evaluate_GlobalLook_IsResolvedIntoDecision()
+    {
+        // Arrange
+        var rules = ForgeRules.Default with { Look = new LookOverrides { Saturation = 1.3, NormalStrength = 2.0 } };
+
+        // Act
+        TextureDecision decision = new RuleEvaluator(rules).Evaluate(@"textures\clutter\bucket01_n.dds", Header(512, 512));
+
+        // Assert: the group's normal strength (1.4) wins over the global one; saturation comes from the global look.
+        Assert.Equal((1.4, 1.3), (decision.NormalStrength, decision.Look!.Saturation));
     }
 
     [Fact]

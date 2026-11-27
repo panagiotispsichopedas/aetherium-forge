@@ -1,6 +1,6 @@
-using AetheriumForge.Cli.Hosting;
+using AetheriumForge.Core.Projects;
 
-namespace AetheriumForge.Core.Tests.Cli;
+namespace AetheriumForge.Core.Tests.Projects;
 
 public sealed class ProjectLocatorTests
 {
@@ -60,7 +60,7 @@ public sealed class ProjectLocatorTests
     [Fact]
     public void ResolveForScan_ProjectInsideGameFolder_Throws()
     {
-        var ex = Assert.Throws<CliException>(() => ProjectLocator.ResolveForScan(Game + @"\Data\forge", Game, Drives, 0, None));
+        var ex = Assert.Throws<ProjectException>(() => ProjectLocator.ResolveForScan(Game + @"\Data\forge", Game, Drives, 0, None));
 
         Assert.Contains("inside the game folder", ex.Message, StringComparison.Ordinal);
     }
@@ -68,7 +68,7 @@ public sealed class ProjectLocatorTests
     [Fact]
     public void ResolveExisting_ExplicitFolderWithoutDatabase_Throws()
     {
-        var ex = Assert.Throws<CliException>(() => ProjectLocator.ResolveExisting(@"F:\Nothing", [], Drives, None));
+        var ex = Assert.Throws<ProjectException>(() => ProjectLocator.ResolveExisting(@"F:\Nothing", [], Drives, None));
 
         Assert.Contains("aetherium-forge scan", ex.Message, StringComparison.Ordinal);
     }
@@ -86,7 +86,7 @@ public sealed class ProjectLocatorTests
     [Fact]
     public void ResolveExisting_NoProjectAnywhere_Throws()
     {
-        Assert.Throws<CliException>(() => ProjectLocator.ResolveExisting(null, [Game], Drives, None));
+        Assert.Throws<ProjectException>(() => ProjectLocator.ResolveExisting(null, [Game], Drives, None));
     }
 
     [Fact]
@@ -116,7 +116,7 @@ public sealed class ProjectLocatorTests
     [Fact]
     public void EnsureOutsideGame_GameAtDriveRoot_RejectsProjectOnThatDrive()
     {
-        Assert.Throws<CliException>(() => ProjectLocator.EnsureOutsideGame(ProjectLayout.For(@"D:\AetheriumForge\Projects\Game"), @"D:\"));
+        Assert.Throws<ProjectException>(() => ProjectLocator.EnsureOutsideGame(ProjectLayout.For(@"D:\AetheriumForge\Projects\Game"), @"D:\"));
     }
 
     [Fact]

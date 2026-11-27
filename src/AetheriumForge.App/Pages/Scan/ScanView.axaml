@@ -1,0 +1,262 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:scan="using:AetheriumForge.App.Pages.Scan"
+             x:Class="AetheriumForge.App.Pages.Scan.ScanView"
+             x:DataType="scan:ScanViewModel">
+  <UserControl.Styles>
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Padding" Value="14" />
+    </Style>
+    <Style Selector="TextBlock.cardTitle">
+      <Setter Property="FontSize" Value="15" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Opacity" Value="0.7" />
+      <Setter Property="Margin" Value="0,0,12,0" />
+    </Style>
+    <Style Selector="TextBlock.stat">
+      <Setter Property="FontSize" Value="26" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+  </UserControl.Styles>
+
+  <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+    <StackPanel Spacing="12" Margin="0,0,12,12">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <Button Content="Open existing project…" Command="{Binding OpenExistingCommand}" />
+        </StackPanel>
+        <StackPanel>
+          <TextBlock Text="Scan" FontSize="24" FontWeight="SemiBold" />
+          <TextBlock Text="Find the textures the game still loads from its original archives and queue them in a project." Opacity="0.7" TextWrapping="Wrap" />
+        </StackPanel>
+      </DockPanel>
+
+      <!-- InfoBar-style messages -->
+      <Border IsVisible="{Binding HasError}" Background="#33D13438" BorderBrush="#D13438" BorderThickness="1" CornerRadius="6" Padding="12,8">
+        <DockPanel>
+          <Button DockPanel.Dock="Right" Content="✕" Command="{Binding DismissErrorCommand}" Padding="8,2" VerticalAlignment="Top" />
+          <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" VerticalAlignment="Center" />
+        </DockPanel>
+      </Border>
+      <Border IsVisible="{Binding HasWarning}" Background="#33F7A600" BorderBrush="#F7A600" BorderThickness="1" CornerRadius="6" Padding="12,8">
+        <DockPanel>
+          <Button DockPanel.Dock="Right" Content="✕" Command="{Binding DismissWarningCommand}" Padding="8,2" VerticalAlignment="Top" />
+          <TextBlock Text="{Binding WarningMessage}" TextWrapping="Wrap" VerticalAlignment="Center" />
+        </DockPanel>
+      </Border>
+      <Border IsVisible="{Binding IsRunActive}" Background="#330078D4" BorderBrush="#0078D4" BorderThickness="1" CornerRadius="6" Padding="12,8">
+        <TextBlock Text="A run is active. Scan, Rescan and Open project are unavailable until it stops." TextWrapping="Wrap" />
+      </Border>
+      <Border IsVisible="{Binding HasInfo}" Background="#330078D4" BorderBrush="#0078D4" BorderThickness="1" CornerRadius="6" Padding="12,8">
+        <DockPanel>
+          <Button DockPanel.Dock="Right" Content="✕" Command="{Binding DismissInfoCommand}" Padding="8,2" VerticalAlignment="Top" />
+          <TextBlock Text="{Binding InfoMessage}" TextWrapping="Wrap" VerticalAlignment="Center" />
+        </DockPanel>
+      </Border>
+
+      <Grid ColumnDefinitions="*,12,*">
+        <!-- Game -->
+        <Border Grid.Column="0" Classes="card">
+          <StackPanel Spacing="8">
+            <DockPanel>
+              <Button DockPanel.Dock="Right" Content="Browse…" Command="{Binding BrowseGameCommand}" />
+              <TextBlock Classes="cardTitle" Text="Game" />
+            </DockPanel>
+            <TextBlock Text="Detecting installations…" IsVisible="{Binding IsDetecting}" Opacity="0.7" />
+            <TextBlock IsVisible="{Binding HasUnresolvedGame}" TextWrapping="Wrap" Foreground="#F7A600">
+              <Run Text="The open project's game was not found:" />
+              <Run Text="{Binding UnresolvedGameFolder}" />
+            </TextBlock>
+            <ListBox ItemsSource="{Binding Installs}" SelectedItem="{Binding SelectedInstall}" MaxHeight="160">
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="scan:GameInstallItem">
+                  <StackPanel>
+                    <TextBlock Text="{Binding GameFolder}" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" Opacity="0.7">
+                      <TextBlock Text="{Binding StoreText}" />
+                      <TextBlock Text="·" />
+                      <TextBlock Text="{Binding VersionText}" />
+                    </StackPanel>
+                  </StackPanel>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+
+            <TextBlock Classes="cardTitle" Text="Profile" Margin="0,8,0,0" />
+            <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" >
+              <TextBlock Grid.Row="0" Classes="label" Text="INI folder" />
+              <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding IniFolder}" TextWrapping="Wrap" />
+              <TextBlock Grid.Row="1" Classes="label" Text="plugins.txt" />
+              <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding PluginsTxtPath}" TextWrapping="Wrap" />
+              <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding PluginsTxtNote}" Opacity="0.7" />
+              <TextBlock Grid.Row="3" Classes="label" Text="Load order" />
+              <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding LoadOrderText}" TextWrapping="Wrap" />
+            </Grid>
+          </StackPanel>
+        </Border>
+
+        <!-- Project -->
+        <Border Grid.Column="2" Classes="card">
+          <StackPanel Spacing="8">
+            <DockPanel>
+              <Button DockPanel.Dock="Right" Content="Choose folder…" Command="{Binding ChooseProjectFolderCommand}" />
+              <TextBlock Classes="cardTitle" Text="Project" />
+            </DockPanel>
+            <TextBlock Text="{Binding ProjectFolder}" TextWrapping="Wrap" FontWeight="SemiBold" />
+            <TextBlock Text="{Binding ProjectFolderReason}" Opacity="0.7" />
+            <TextBlock IsVisible="{Binding HasProject}" TextWrapping="Wrap" Opacity="0.7">
+              <Run Text="Open project:" />
+              <Run Text="{Binding OpenProjectRoot}" />
+            </TextBlock>
+
+            <TextBlock Classes="cardTitle" Text="Drives" Margin="0,8,0,0" />
+            <ItemsControl ItemsSource="{Binding Drives}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="scan:DriveItem">
+                  <Grid ColumnDefinitions="48,120,*">
+                    <TextBlock Text="{Binding Root}" FontWeight="SemiBold" />
+                    <TextBlock Grid.Column="1" Text="{Binding FreeText}" />
+                    <TextBlock Grid.Column="2" Text="{Binding Notes}" Opacity="0.7" />
+                  </Grid>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <TextBlock Classes="cardTitle" Text="Recent projects" Margin="0,8,0,0" IsVisible="{Binding !!RecentProjects.Count}" />
+            <ItemsControl ItemsSource="{Binding RecentProjects}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="x:String">
+                  <Button Content="{Binding}" Padding="4,2" Background="Transparent"
+                          Command="{Binding $parent[UserControl].((scan:ScanViewModel)DataContext).OpenRecentCommand}"
+                          CommandParameter="{Binding}" />
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+        </Border>
+      </Grid>
+
+      <!-- Scan controls -->
+      <Border Classes="card">
+        <StackPanel Spacing="8">
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Content="Scan" Command="{Binding ScanCommand}" Classes="accent" MinWidth="96" />
+            <Button Content="Rescan project" Command="{Binding RescanCommand}" />
+            <Button Content="Cancel" Command="{Binding CancelScanCommand}" IsVisible="{Binding IsScanning}" />
+          </StackPanel>
+          <ProgressBar Minimum="0" Maximum="100" Value="{Binding ProgressValue}" IsVisible="{Binding IsScanning}" Height="6" />
+          <TextBlock Text="{Binding ProgressText}" Opacity="0.7" />
+        </StackPanel>
+      </Border>
+
+      <!-- Summary -->
+      <StackPanel Spacing="12" IsVisible="{Binding HasSummary}">
+        <DockPanel>
+          <Button DockPanel.Dock="Right" Content="Go to Queue →" Command="{Binding GoToQueueCommand}" Classes="accent" />
+          <StackPanel>
+            <TextBlock Text="Summary" FontSize="18" FontWeight="SemiBold" />
+            <TextBlock Text="{Binding Summary.Source, FallbackValue=''}" Opacity="0.7" TextWrapping="Wrap" />
+          </StackPanel>
+        </DockPanel>
+
+        <UniformGrid Columns="4">
+          <Border Classes="card" Margin="0,0,6,0">
+            <StackPanel>
+              <TextBlock Classes="label" Text="Gaps" />
+              <TextBlock Classes="stat" Text="{Binding Summary.GapsText, FallbackValue=''}" />
+            </StackPanel>
+          </Border>
+          <Border Classes="card" Margin="6,0">
+            <StackPanel>
+              <TextBlock Classes="label" Text="Queued" />
+              <TextBlock Classes="stat" Text="{Binding Summary.QueuedText, FallbackValue=''}" />
+            </StackPanel>
+          </Border>
+          <Border Classes="card" Margin="6,0">
+            <StackPanel>
+              <TextBlock Classes="label" Text="Skipped" />
+              <TextBlock Classes="stat" Text="{Binding Summary.SkippedText, FallbackValue=''}" />
+            </StackPanel>
+          </Border>
+          <Border Classes="card" Margin="6,0,0,0">
+            <StackPanel>
+              <TextBlock Classes="label" Text="Estimated output" />
+              <TextBlock Classes="stat" Text="{Binding Summary.EstimatedOutputText, FallbackValue=''}" />
+            </StackPanel>
+          </Border>
+        </UniformGrid>
+
+        <UniformGrid Columns="4">
+          <Border Classes="card" Margin="0,0,6,0">
+            <StackPanel>
+              <TextBlock Classes="cardTitle" Text="Skipped by reason" />
+              <ItemsControl ItemsSource="{Binding Summary.SkippedByReason, FallbackValue={x:Null}}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="scan:SummaryRow">
+                    <DockPanel>
+                      <TextBlock DockPanel.Dock="Right" Text="{Binding CountText}" />
+                      <TextBlock Text="{Binding Label}" Opacity="0.8" />
+                    </DockPanel>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+          </Border>
+          <Border Classes="card" Margin="6,0">
+            <StackPanel>
+              <TextBlock Classes="cardTitle" Text="Queued by group" />
+              <ItemsControl ItemsSource="{Binding Summary.ByGroup, FallbackValue={x:Null}}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="scan:SummaryRow">
+                    <Grid ColumnDefinitions="*,Auto,72">
+                      <TextBlock Text="{Binding Label}" Opacity="0.8" TextTrimming="CharacterEllipsis" />
+                      <TextBlock Grid.Column="1" Text="{Binding CountText}" />
+                      <TextBlock Grid.Column="2" Text="{Binding BytesText}" Opacity="0.6" HorizontalAlignment="Right" />
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+          </Border>
+          <Border Classes="card" Margin="6,0">
+            <StackPanel>
+              <TextBlock Classes="cardTitle" Text="Queued by kind" />
+              <ItemsControl ItemsSource="{Binding Summary.ByKind, FallbackValue={x:Null}}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="scan:SummaryRow">
+                    <Grid ColumnDefinitions="*,Auto,72">
+                      <TextBlock Text="{Binding Label}" Opacity="0.8" TextTrimming="CharacterEllipsis" />
+                      <TextBlock Grid.Column="1" Text="{Binding CountText}" />
+                      <TextBlock Grid.Column="2" Text="{Binding BytesText}" Opacity="0.6" HorizontalAlignment="Right" />
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+          </Border>
+          <Border Classes="card" Margin="6,0,0,0">
+            <StackPanel>
+              <TextBlock Classes="cardTitle" Text="Queued by resolution" />
+              <ItemsControl ItemsSource="{Binding Summary.ByResolution, FallbackValue={x:Null}}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="scan:SummaryRow">
+                    <Grid ColumnDefinitions="*,Auto,72">
+                      <TextBlock Text="{Binding Label}" Opacity="0.8" />
+                      <TextBlock Grid.Column="1" Text="{Binding CountText}" />
+                      <TextBlock Grid.Column="2" Text="{Binding BytesText}" Opacity="0.6" HorizontalAlignment="Right" />
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+          </Border>
+        </UniformGrid>
+      </StackPanel>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

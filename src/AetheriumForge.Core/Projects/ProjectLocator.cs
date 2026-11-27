@@ -1,12 +1,12 @@
 using AetheriumForge.Core.Discovery;
 
-namespace AetheriumForge.Cli.Hosting;
+namespace AetheriumForge.Core.Projects;
 
 /// <summary>
 /// Chooses the project folder. The default is <c>&lt;best drive&gt;\AetheriumForge\Projects\&lt;game folder name&gt;</c>, where the best drive
 /// comes from <see cref="DriveAdvisor.Rank"/>; an existing project for the same game on any drive is reused, so later commands find it again.
 /// </summary>
-internal static class ProjectLocator
+public static class ProjectLocator
 {
     /// <summary>The folder under a drive root that holds the projects.</summary>
     public static readonly string ProjectsFolder = Path.Combine("AetheriumForge", "Projects");
@@ -45,7 +45,7 @@ internal static class ProjectLocator
     /// <param name="requiredBytes">Estimated space the project needs.</param>
     /// <param name="fileExists">File existence probe (injected for tests).</param>
     /// <returns>The layout and a short reason shown to the user.</returns>
-    /// <exception cref="CliException">No drive is available, or the folder is inside the game folder.</exception>
+    /// <exception cref="ProjectException">No drive is available, or the folder is inside the game folder.</exception>
     public static (ProjectLayout Layout, string Reason) ResolveForScan(
         string? explicitFolder,
         string gameFolder,
@@ -74,7 +74,7 @@ internal static class ProjectLocator
                 .ToList();
             if (ranked.Count == 0)
             {
-                throw new CliException("No fixed drive outside the game folder is available for the project folder. Pass --project <dir>.");
+                throw new ProjectException("No fixed drive outside the game folder is available for the project folder. Pass --project <dir>.");
             }
 
             var best = ranked[0];
@@ -96,7 +96,7 @@ internal static class ProjectLocator
     /// <param name="drives">Fixed drives.</param>
     /// <param name="fileExists">File existence probe.</param>
     /// <returns>The layout of a folder that holds <c>forge.db</c>.</returns>
-    /// <exception cref="CliException">No project was found.</exception>
+    /// <exception cref="ProjectException">No project was found.</exception>
     public static ProjectLayout ResolveExisting(
         string? explicitFolder,
         IReadOnlyList<string> gameFolders,
@@ -112,7 +112,7 @@ internal static class ProjectLocator
             var layout = ProjectLayout.For(explicitFolder);
             if (!fileExists(layout.DatabasePath))
             {
-                throw new CliException($"{layout.Root} is not a project (no {ProjectLayout.DatabaseFileName}). Run 'aetherium-forge scan --project \"{layout.Root}\"' first.");
+                throw new ProjectException($"{layout.Root} is not a project (no {ProjectLayout.DatabaseFileName}). Run 'aetherium-forge scan --project \"{layout.Root}\"' first.");
             }
 
             return layout;
@@ -126,7 +126,7 @@ internal static class ProjectLocator
             }
         }
 
-        throw new CliException("No project found. Run 'aetherium-forge scan' first, or pass --project <dir>.");
+        throw new ProjectException("No project found. Run 'aetherium-forge scan' first, or pass --project <dir>.");
     }
 
     /// <summary>Finds a project for the game on any of the drives.</summary>
@@ -154,7 +154,7 @@ internal static class ProjectLocator
     /// <summary>Rejects a project folder inside the game folder: Aetherium Forge never writes there.</summary>
     /// <param name="layout">The project.</param>
     /// <param name="gameFolder">The game folder.</param>
-    /// <exception cref="CliException">The project is inside the game folder.</exception>
+    /// <exception cref="ProjectException">The project is inside the game folder.</exception>
     public static void EnsureOutsideGame(ProjectLayout layout, string gameFolder)
     {
         ArgumentNullException.ThrowIfNull(layout);
@@ -162,7 +162,7 @@ internal static class ProjectLocator
 
         if (PathGuard.IsUnder(layout.Root, gameFolder))
         {
-            throw new CliException($"The project folder {layout.Root} is inside the game folder {gameFolder}. Choose a folder outside the game with --project.");
+            throw new ProjectException($"The project folder {layout.Root} is inside the game folder {gameFolder}. Choose a folder outside the game with --project.");
         }
     }
 

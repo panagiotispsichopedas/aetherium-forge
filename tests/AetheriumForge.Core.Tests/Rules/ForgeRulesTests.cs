@@ -7,23 +7,61 @@ namespace AetheriumForge.Core.Tests.Rules;
 public sealed class ForgeRulesTests
 {
     [Fact]
-    public void Default_Groups_AreClutterThenLarge()
+    public void Default_Groups_AreGuideOrder()
     {
         // Act
         IReadOnlyList<GroupRule> groups = ForgeRules.Default.Groups;
 
         // Assert
-        Assert.Equal(["Clutter", "Large"], groups.Select(g => g.Name));
+        Assert.Equal(["Armor", "Weapons", "Clothes", "Creatures", "Architecture", "Landscape", "Clutter", "Large"], groups.Select(g => g.Name));
+    }
+
+    [Fact]
+    public void Default_Groups_MatchGuidePatterns()
+    {
+        // Act
+        var patterns = ForgeRules.Default.Groups.Select(g => string.Join("|", g.Match));
+
+        // Assert
+        Assert.Equal(
+            [@"*\armor\*", @"*\weapons\*", @"*\clothes\*", @"textures\actors\*", @"*\architecture\*|*\dungeons\*", @"*\landscape\*|*\plants\*|*\trees\*", @"*\clutter\*", "*"],
+            patterns);
+    }
+
+    [Fact]
+    public void Default_GroupsOtherThanClutter_AreNeutralWithCap4096()
+    {
+        // Act
+        var others = ForgeRules.Default.Groups.Where(g => g.Name != "Clutter");
+
+        // Assert
+        Assert.All(others, g => Assert.True(
+            g.Look is null && g.NormalStrength == 1.0 && g.Cap == 4096 && g.MaxFactor == 4 && g.Model == "realesrgan-x4plus",
+            g.Name));
+    }
+
+    [Fact]
+    public void Default_Look_IsNull()
+    {
+        // Act
+        LookOverrides? look = ForgeRules.Default.Look;
+
+        // Assert
+        Assert.Null(look);
     }
 
     [Fact]
     public void Default_ClutterGroup_MatchesGuideValues()
     {
         // Arrange
-        var expected = new GroupRule { Name = "Clutter", Match = [@"*\clutter\*"], Cap = 2048, MaxFactor = 4, Model = "realesrgan-x4plus", NormalStrength = 1.4 };
+        var expected = new GroupRule
+        {
+            Name = "Clutter", Match = [@"*\clutter\*"], Cap = 2048, MaxFactor = 4, Model = "realesrgan-x4plus", NormalStrength = 1.4,
+            Look = new LookOverrides { NormalStrength = 1.4 },
+        };
 
         // Act
-        GroupRule clutter = ForgeRules.Default.Groups[0];
+        GroupRule clutter = ForgeRules.Default.Groups.Single(g => g.Name == "Clutter");
 
         // Assert
         Assert.Equal(expected, clutter);
@@ -73,9 +111,9 @@ public sealed class ForgeRulesTests
 
         // Assert
         using JsonDocument doc = JsonDocument.Parse(json);
-        JsonElement group = doc.RootElement.GetProperty("groups")[0];
+        JsonElement clutter = doc.RootElement.GetProperty("groups")[6];
         Assert.True(doc.RootElement.TryGetProperty("minSource", out _) && doc.RootElement.TryGetProperty("exclude", out _)
-            && group.TryGetProperty("maxFactor", out _) && group.TryGetProperty("normalStrength", out _) && !group.TryGetProperty("kinds", out _));
+            && clutter.TryGetProperty("maxFactor", out _) && clutter.GetProperty("look").TryGetProperty("normalStrength", out _) && !clutter.TryGetProperty("kinds", out _));
     }
 
     [Fact]
@@ -114,7 +152,7 @@ public sealed class ForgeRulesTests
                 new GroupRule
                 {
                     Name = "Small", Match = [@"textures\armor\*"], MinSourceMax = 64, MaxSourceMax = 512, Kinds = [TextureKind.Diffuse, TextureKind.Normal],
-                    Cap = 1024, MaxFactor = 2, Model = "x2", NormalStrength = 1.2,
+                    Cap = 1024, MaxFactor = 2, Model = "x2", NormalStrength = 1.2, Look = new LookOverrides { NormalStrength = 1.2 },
                 },
             ],
             MinSource = 64,
