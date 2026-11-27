@@ -41,6 +41,7 @@ logs/
 appsettings.*.local.json
 *.user
 .claude/settings.local.json
+.claude/worktrees/
 
 # ---------------------------------------------------------------
 # .NET / Visual Studio / Rider
