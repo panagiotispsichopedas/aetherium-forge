@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using AetheriumForge.App.Pages.Rules;
 using AetheriumForge.App.Services;
 using AetheriumForge.Core.Imaging;
 using AetheriumForge.Core.Jobs;
@@ -47,6 +48,7 @@ public sealed partial class CompareViewModel : ObservableObject
     private readonly Stack<(LookOverrides Overrides, PreviewRender Render)> _undo = new();
     private readonly ILogger<CompareViewModel> _logger;
     private readonly IForgeRunner? _runner;
+    private readonly IStyleSelection? _selection;
     private readonly SynchronizationContext? _uiContext;
     private CancellationTokenSource? _loadCancellation;
     private PreviewSample? _sample;
@@ -64,6 +66,7 @@ public sealed partial class CompareViewModel : ObservableObject
     /// <param name="lookStore">Where scope looks are stored; defaults to <see cref="CoreLookScopeStore"/> over <paramref name="data"/>.</param>
     /// <param name="logger">Logger; <see langword="null"/> disables logging.</param>
     /// <param name="runner">The pipeline runner, or <see langword="null"/> when none is registered; its state locks GPU previews and rule changes.</param>
+    /// <param name="selection">The group selection shared with the Rules page ("Edit the look on Compare" preselects that group), or <see langword="null"/>.</param>
     public CompareViewModel(
         PreviewEngine engine,
         ICompareProjectData data,
@@ -71,7 +74,8 @@ public sealed partial class CompareViewModel : ObservableObject
         Random? random = null,
         ILookScopeStore? lookStore = null,
         ILogger<CompareViewModel>? logger = null,
-        IForgeRunner? runner = null)
+        IForgeRunner? runner = null,
+        IStyleSelection? selection = null)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(data);
@@ -84,6 +88,7 @@ public sealed partial class CompareViewModel : ObservableObject
         _looks = lookStore ?? new CoreLookScopeStore(data);
         _logger = logger ?? NullLogger<CompareViewModel>.Instance;
         _runner = runner;
+        _selection = selection;
         _uiContext = SynchronizationContext.Current;
 
         Look.LookChanged += (_, _) => UpdateRenderState();
@@ -104,6 +109,17 @@ public sealed partial class CompareViewModel : ObservableObject
         {
             // Raised on any thread: hop to the UI thread when there is one.
             runner.RunStateChanged += (_, _) => PostToUi(UpdateRunState);
+        }
+
+        if (selection is not null)
+        {
+            selection.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(IStyleSelection.SelectedGroup))
+                {
+                    ApplyStyleSelection();
+                }
+            };
         }
 
         UpdateRunState();
@@ -358,9 +374,11 @@ public sealed partial class CompareViewModel : ObservableObject
             Groups.Add(group.Name);
         }
 
-        if (SelectedGroup is null || !Groups.Contains(SelectedGroup))
+        // The Rules page's "Edit the look on Compare" selection wins, then the group already shown, then the first group.
+        var preferred = FindGroup(_selection?.SelectedGroup) ?? FindGroup(SelectedGroup) ?? Groups.FirstOrDefault();
+        if (!string.Equals(preferred, SelectedGroup, StringComparison.Ordinal))
         {
-            SelectedGroup = Groups.FirstOrDefault();
+            SelectedGroup = preferred;
         }
         else
         {
@@ -753,6 +771,30 @@ public sealed partial class CompareViewModel : ObservableObject
         var maxY = Math.Max(0, (DisplayHeight - ViewportHeight) / 2);
         PanX = Math.Clamp(PanX, -maxX, maxX);
         PanY = Math.Clamp(PanY, -maxY, maxY);
+    }
+
+    private string? FindGroup(string? name) =>
+        name is null ? null : Groups.FirstOrDefault(group => string.Equals(group, name.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Shows the group the Rules page selected; reloads the groups first when it is new (just applied on Rules).</summary>
+    private void ApplyStyleSelection()
+    {
+        if (_selection?.SelectedGroup is not { } name || string.IsNullOrWhiteSpace(name))
+        {
+            return;
+        }
+
+        if (FindGroup(name) is { } match)
+        {
+            if (!string.Equals(match, SelectedGroup, StringComparison.Ordinal))
+            {
+                SelectedGroup = match;
+            }
+
+            return;
+        }
+
+        _ = RefreshAsync();
     }
 
     private static string ScopeName(LookScope scope) => scope switch
