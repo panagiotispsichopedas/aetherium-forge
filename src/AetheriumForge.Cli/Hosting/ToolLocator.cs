@@ -83,8 +83,10 @@ internal static class ToolLocator
     {
         ArgumentNullException.ThrowIfNull(fileExists);
 
+        // Trim the trailing separator first (AppContext.BaseDirectory has one): GetDirectoryName of "x\y\" is "x\y", which would
+        // spend one level on the same folder.
         var level = 0;
-        for (var dir = Path.GetFullPath(start); !string.IsNullOrEmpty(dir) && level <= MaxRepositoryLevels; dir = Path.GetDirectoryName(dir), level++)
+        for (var dir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(start)); !string.IsNullOrEmpty(dir) && level <= MaxRepositoryLevels; dir = Path.GetDirectoryName(dir), level++)
         {
             if (fileExists(Path.Combine(dir, SolutionFileName)))
             {

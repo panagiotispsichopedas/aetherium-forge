@@ -67,4 +67,13 @@ public sealed class ToolLocatorTests
 
         Assert.Null(root);
     }
+
+    [Fact]
+    public void FindRepositoryRoot_StartWithTrailingSeparatorSixLevelsDown_FindsRoot()
+    {
+        // AppContext.BaseDirectory ends with a separator; the walk must not spend a level on it.
+        var root = ToolLocator.FindRepositoryRoot(@"C:\repo\src\AetheriumForge.Cli\bin\Release\net10.0-windows\win-x64\", Exists(@"C:\repo\AetheriumForge.slnx"));
+
+        Assert.Equal(@"C:\repo", root);
+    }
 }

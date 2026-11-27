@@ -27,4 +27,9 @@
     <InternalsVisibleTo Include="AetheriumForge.Core.Tests" />
   </ItemGroup>
 
+  <!-- Ship texconv next to the exe (tools\texconv.exe) when it has been fetched with tools\fetch-tools.ps1. It is never committed. -->
+  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)..\..\tools\texconv.exe')">
+    <None Include="$(MSBuildThisFileDirectory)..\..\tools\texconv.exe" Link="tools\texconv.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
