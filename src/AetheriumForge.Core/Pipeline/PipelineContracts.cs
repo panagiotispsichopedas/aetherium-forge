@@ -115,7 +115,7 @@ public interface IForgePipeline
     PipelineState State { get; }
 
     /// <summary>
-    /// Runs until every queued job is done or failed, or until <paramref name="stop"/> is cancelled. On start it recovers from a
+    /// Runs until every queued job is done or failed, or until <paramref name="stopToken"/> is cancelled. On start it recovers from a
     /// crash: interrupted jobs return to Queued and the work folder is wiped. On stop, items in flight are abandoned and returned to
     /// Queued; nothing partial reaches the output folder. Completes normally on stop (it does not throw <see cref="OperationCanceledException"/>).
     /// </summary>
