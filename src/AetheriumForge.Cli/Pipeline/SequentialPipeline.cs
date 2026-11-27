@@ -296,30 +296,39 @@ internal sealed partial class SequentialPipeline : IForgePipeline
         }
 
         // Wipe leftovers entry by entry: a file another process still holds (an antivirus scan, an orphaned texconv) is logged and left
-        // for the next start instead of blocking the run. Each job works in its own new folder, so leftovers never collide.
-        if (Directory.Exists(_options.WorkRoot))
-        {
-            foreach (var entry in new DirectoryInfo(_options.WorkRoot).EnumerateFileSystemInfos())
-            {
-                try
-                {
-                    if (entry is DirectoryInfo directory)
-                    {
-                        directory.Delete(recursive: true);
-                    }
-                    else
-                    {
-                        entry.Delete();
-                    }
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    LogWorkCleanupFailed(ex, entry.FullName);
-                }
-            }
-        }
+        // for the next start instead of blocking the run. Each job works in its own new folder, so leftovers never collide. The
+        // processor's hidden staging folder in the output (half-moved files) is wiped the same way.
+        WipeContents(_options.WorkRoot);
+        WipeContents(Path.Combine(_options.OutputRoot, TextureProcessor.StagingFolderName));
 
         Directory.CreateDirectory(_options.WorkRoot);
+    }
+
+    private void WipeContents(string folder)
+    {
+        if (!Directory.Exists(folder))
+        {
+            return;
+        }
+
+        foreach (var entry in new DirectoryInfo(folder).EnumerateFileSystemInfos())
+        {
+            try
+            {
+                if (entry is DirectoryInfo directory)
+                {
+                    directory.Delete(recursive: true);
+                }
+                else
+                {
+                    entry.Delete();
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                LogWorkCleanupFailed(ex, entry.FullName);
+            }
+        }
     }
 
     private async Task<List<JobRecord>> LoadQueuedAsync()
@@ -347,11 +356,22 @@ internal sealed partial class SequentialPipeline : IForgePipeline
         }
         catch (InvalidOperationException ex)
         {
-            await FailAsync(job, ex).ConfigureAwait(false);
+            await FailAsync(job, ex, attempts: 1).ConfigureAwait(false);
             return true;
         }
 
-        await _store.MarkRunningAsync(job.Id, CancellationToken.None).ConfigureAwait(false);
+        // A rescan (or another run) may have changed the job since the queue was read: it wins, and the job is skipped here.
+        if (!await _store.TryMarkRunningAsync(job.Id, CancellationToken.None).ConfigureAwait(false))
+        {
+            lock (_gate)
+            {
+                _total--;
+            }
+
+            LogNotQueued(job.Path);
+            return true;
+        }
+
         var tiles = new TileReporter(this);
         for (var attempt = 1; ; attempt++)
         {
@@ -375,7 +395,7 @@ internal sealed partial class SequentialPipeline : IForgePipeline
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                await FailAsync(job, ex).ConfigureAwait(false);
+                await FailAsync(job, ex, attempt).ConfigureAwait(false);
                 SetCurrent(null, PipelineStage.Decode);
                 return true;
             }
@@ -419,9 +439,9 @@ internal sealed partial class SequentialPipeline : IForgePipeline
         }
     }
 
-    private async Task FailAsync(JobRecord job, Exception ex)
+    private async Task FailAsync(JobRecord job, Exception ex, int attempts)
     {
-        await _store.MarkFailedAsync(job.Id, ex.Message, CancellationToken.None).ConfigureAwait(false);
+        await _store.MarkFailedAsync(job.Id, ex.Message, attempts, CancellationToken.None).ConfigureAwait(false);
         lock (_gate)
         {
             _failed++;
@@ -519,6 +539,9 @@ internal sealed partial class SequentialPipeline : IForgePipeline
 
     [LoggerMessage(Level = LogLevel.Error, Message = "{Path} was written but could not be recorded as done; it will be redone on the next run")]
     private partial void LogMarkDoneFailed(Exception exception, string path);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Skipping {Path}: it is no longer queued (changed by a rescan)")]
+    private partial void LogNotQueued(string path);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Job {Path} failed")]
     private partial void LogJobFailed(Exception exception, string path);

@@ -153,6 +153,32 @@ public sealed class ConsoleHostingTests : IDisposable
         Assert.Throws<CliException>(() => session.AttachLog(null, @"D:\Games\Skyrim"));
     }
 
+    [Fact]
+    public async Task RunWithViewAsync_LimitReached_StopsRunWithoutUserStop()
+    {
+        // Arrange: the fake reports one finished job, then waits for a stop.
+        var pipeline = new FakePipeline { FinishOnStop = true, DoneBeforeWaiting = 1 };
+        var view = new ForgeConsoleView(TextWriter.Null, interactive: false, readKeys: false);
+        using var cancellation = new ConsoleCancellation(TextWriter.Null, () => { }, hook: false, CancellationToken.None);
+
+        // Act
+        var outcome = await ForgeCommand.RunWithViewAsync(pipeline, view, cancellation, Serilog.Core.Logger.None, limit: 1)
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal((true, true, false), (outcome.LimitReached, outcome.Summary.Stopped, cancellation.IsCancellationRequested));
+    }
+
+    [Fact]
+    public void NormalStrengthFor_KnownAndRemovedGroups_UsesRuleOrNeutral()
+    {
+        var rules = new AetheriumForge.Core.Rules.ForgeRules { Groups = [new AetheriumForge.Core.Rules.GroupRule { Name = "Large", Model = "m", NormalStrength = 1.4 }] };
+
+        var strengths = (CompositionRoot.NormalStrengthFor(rules, "large"), CompositionRoot.NormalStrengthFor(rules, "gone"));
+
+        Assert.Equal((1.4, 1.0), strengths);
+    }
+
     private sealed class ThrowingKeys : IKeySource
     {
         public char? TryRead() => throw new InvalidOperationException("input is redirected");
@@ -178,6 +204,8 @@ public sealed class ConsoleHostingTests : IDisposable
 
         public bool FinishOnStop { get; init; }
 
+        public int DoneBeforeWaiting { get; init; }
+
         public bool Completed { get; private set; }
 
         public int Pauses => Volatile.Read(ref _pauses);
@@ -187,7 +215,7 @@ public sealed class ConsoleHostingTests : IDisposable
         public async Task<PipelineRunSummary> RunAsync(IProgress<PipelineProgress>? progress, CancellationToken stopToken)
         {
             State = PipelineState.Running;
-            progress?.Report(Snapshot(PipelineState.Running, 0));
+            progress?.Report(Snapshot(PipelineState.Running, DoneBeforeWaiting));
             using var registration = FinishOnStop ? stopToken.Register(Finish) : default;
             await _finish.Task.ConfigureAwait(false);
             State = PipelineState.Idle;
@@ -205,6 +233,6 @@ public sealed class ConsoleHostingTests : IDisposable
         }
 
         private static PipelineProgress Snapshot(PipelineState state, int done) =>
-            new(state, done, 0, 1 - done, 1, [], 0, null, TimeSpan.Zero, null);
+            new(state, done, 0, Math.Max(0, 1 - done), Math.Max(1, done), [], 0, null, TimeSpan.Zero, null);
     }
 }

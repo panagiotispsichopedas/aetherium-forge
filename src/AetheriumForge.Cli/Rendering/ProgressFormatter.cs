@@ -47,7 +47,7 @@ internal static class ProgressFormatter
         var barWidth = Math.Max(10, max - counter.Length - 2);
         lines.Add(Fit($"[{Bar(fraction, barWidth)}]{counter}", max));
 
-        lines.Add(Fit(string.Create(Invariant, $"{progress.SourceMegapixelsPerSecond:0.00} MP/s · elapsed {FormatElapsed(progress.Elapsed)} · ETA {FormatEta(progress.Eta)}"), max));
+        lines.Add(Fit(string.Create(Invariant, $"{progress.SourceMegapixelsPerSecond:0.00} MP/s · elapsed {FormatElapsed(progress.Elapsed)} · ETA {EtaFormatter.Format(progress.Eta)}"), max));
         lines.Add(Fit(progress.LastError is null ? string.Empty : $"last error: {progress.LastError}", max));
         lines.Add(Fit(KeyHint, max));
 
@@ -66,7 +66,7 @@ internal static class ProgressFormatter
         var builder = new StringBuilder();
         builder.Append(Invariant, $"[{StateLabel(progress.State)}] {progress.Done + progress.Failed}/{progress.Total} ");
         builder.Append(Invariant, $"(done {progress.Done}, failed {progress.Failed}, remaining {progress.Remaining}) ");
-        builder.Append(Invariant, $"{progress.SourceMegapixelsPerSecond:0.00} MP/s, elapsed {FormatElapsed(progress.Elapsed)}, ETA {FormatEta(progress.Eta)}");
+        builder.Append(Invariant, $"{progress.SourceMegapixelsPerSecond:0.00} MP/s, elapsed {FormatElapsed(progress.Elapsed)}, ETA {EtaFormatter.Format(progress.Eta)}");
 
         foreach (var stage in progress.Stages.Where(s => s.CurrentPath is not null))
         {
@@ -105,27 +105,6 @@ internal static class ProgressFormatter
         return elapsed.TotalHours >= 1
             ? string.Create(Invariant, $"{(int)elapsed.TotalHours}:{elapsed.Minutes:00}:{elapsed.Seconds:00}")
             : string.Create(Invariant, $"{elapsed.Minutes:00}:{elapsed.Seconds:00}");
-    }
-
-    /// <summary>Formats an ETA compactly (<c>3h 12m</c>, <c>4m 05s</c>, <c>12s</c>), or <c>--</c> when unknown.</summary>
-    /// <param name="eta">The estimate.</param>
-    /// <returns>The text.</returns>
-    public static string FormatEta(TimeSpan? eta)
-    {
-        if (eta is not { } value)
-        {
-            return "--";
-        }
-
-        if (value < TimeSpan.Zero)
-        {
-            value = TimeSpan.Zero;
-        }
-
-        return value.TotalDays >= 1 ? string.Create(Invariant, $"{(int)value.TotalDays}d {value.Hours}h")
-            : value.TotalHours >= 1 ? string.Create(Invariant, $"{(int)value.TotalHours}h {value.Minutes:00}m")
-            : value.TotalMinutes >= 1 ? string.Create(Invariant, $"{value.Minutes}m {value.Seconds:00}s")
-            : string.Create(Invariant, $"{value.Seconds}s");
     }
 
     /// <summary>Shortens <paramref name="text"/> to <paramref name="max"/> characters, keeping the end (the file name) of long paths.</summary>
