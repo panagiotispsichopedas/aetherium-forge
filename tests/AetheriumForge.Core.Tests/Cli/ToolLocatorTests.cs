@@ -59,4 +59,12 @@ public sealed class ToolLocatorTests
 
         Assert.Contains(@"tools\fetch-tools.ps1", ex.Message, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void FindRepositoryRoot_SolutionTooFarUp_IsNotUsed()
+    {
+        var root = ToolLocator.FindRepositoryRoot(ExeDir + @"\a", Exists(Solution));
+
+        Assert.Null(root);
+    }
 }

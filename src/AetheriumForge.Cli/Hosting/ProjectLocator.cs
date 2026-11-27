@@ -68,10 +68,13 @@ internal static class ProjectLocator
         }
         else
         {
-            var ranked = DriveAdvisor.Rank(drives, requiredBytes);
+            // A game installed at a drive root (D:\) owns that whole drive: never default the project onto it.
+            var ranked = DriveAdvisor.Rank(drives, requiredBytes)
+                .Where(d => !PathGuard.IsUnder(DefaultProjectFolder(d.RootPath, gameFolder), gameFolder))
+                .ToList();
             if (ranked.Count == 0)
             {
-                throw new CliException("No fixed drive is available for the project folder. Pass --project <dir>.");
+                throw new CliException("No fixed drive outside the game folder is available for the project folder. Pass --project <dir>.");
             }
 
             var best = ranked[0];
@@ -157,9 +160,7 @@ internal static class ProjectLocator
         ArgumentNullException.ThrowIfNull(layout);
         ArgumentException.ThrowIfNullOrWhiteSpace(gameFolder);
 
-        var game = Path.TrimEndingDirectorySeparator(Path.GetFullPath(gameFolder)) + Path.DirectorySeparatorChar;
-        var project = layout.Root + Path.DirectorySeparatorChar;
-        if (project.StartsWith(game, StringComparison.OrdinalIgnoreCase))
+        if (PathGuard.IsUnder(layout.Root, gameFolder))
         {
             throw new CliException($"The project folder {layout.Root} is inside the game folder {gameFolder}. Choose a folder outside the game with --project.");
         }

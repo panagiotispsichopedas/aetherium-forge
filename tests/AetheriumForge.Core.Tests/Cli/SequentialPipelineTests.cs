@@ -171,4 +171,47 @@ public sealed class SequentialPipelineTests
         // Assert
         Assert.IsType<InvalidOperationException>(second);
     }
+
+    [Fact]
+    public async Task RunAsync_LockedWorkLeftover_StillRuns()
+    {
+        // Arrange: a leftover file another process holds open cannot be deleted.
+        await using var fixture = await PipelineFixture.CreateAsync(queued: 1);
+        Directory.CreateDirectory(fixture.WorkRoot);
+        var locked = Path.Combine(fixture.WorkRoot, "locked.tmp");
+        var pipeline = fixture.CreatePipeline();
+        PipelineRunSummary summary;
+        await using (var handle = new FileStream(locked, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+        {
+            // Act
+            summary = await pipeline.RunAsync(null, TestContext.Current.CancellationToken);
+        }
+
+        // Assert
+        Assert.Equal((1, 0), (summary.Done, summary.Failed));
+    }
+
+    [Fact]
+    public async Task RunAsync_MarkDoneFailsTransiently_RetriesAndNeverMarksFailed()
+    {
+        // Arrange
+        await using var fixture = await PipelineFixture.CreateAsync(queued: 1);
+        var calls = 0;
+        var pipeline = fixture.CreatePipeline(markDone: async (id, seconds) =>
+        {
+            if (++calls < 3)
+            {
+                throw new Microsoft.Data.Sqlite.SqliteException("database is locked", 5);
+            }
+
+            await fixture.Store.MarkDoneAsync(id, seconds);
+        });
+
+        // Act
+        var summary = await pipeline.RunAsync(null, TestContext.Current.CancellationToken);
+
+        // Assert
+        var counts = await fixture.CountsAsync();
+        Assert.Equal((1, 0, 1, 0, 3, 1), (summary.Done, summary.Failed, counts[JobState.Done], counts[JobState.Failed], calls, fixture.Upscaler.Calls));
+    }
 }

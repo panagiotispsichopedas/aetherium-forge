@@ -41,6 +41,7 @@ internal sealed class ModelsCommand
 
     private int Run(ParseResult parseResult, CliSession session)
     {
+        session.AttachLog(null, null);
         var output = session.Out;
         var folder = Path.GetFullPath(parseResult.GetValue(Models) ?? ModelCatalog.DefaultModelsFolder);
         var models = ModelCatalog.Discover(folder);

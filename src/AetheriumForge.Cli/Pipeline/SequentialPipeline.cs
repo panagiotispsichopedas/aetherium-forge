@@ -22,7 +22,10 @@ namespace AetheriumForge.Cli.Pipeline;
 /// </remarks>
 internal sealed partial class SequentialPipeline : IForgePipeline
 {
+    private const int MarkDoneAttempts = 4;
+
     private static readonly PipelineStage[] AllStages = Enum.GetValues<PipelineStage>();
+    private static readonly TimeSpan MarkDoneRetryDelay = TimeSpan.FromMilliseconds(250);
 
     private readonly JobStore _store;
     private readonly TextureProcessor _processor;
@@ -31,6 +34,7 @@ internal sealed partial class SequentialPipeline : IForgePipeline
     private readonly int? _maxJobs;
     private readonly TimeProvider _time;
     private readonly ILogger<SequentialPipeline> _logger;
+    private readonly Func<long, double, Task> _markDone;
     private readonly PauseTokenSource _pause = new();
     private readonly Stopwatch _active = new();
     private readonly Lock _gate = new();
@@ -63,6 +67,28 @@ internal sealed partial class SequentialPipeline : IForgePipeline
         int? maxJobs = null,
         TimeProvider? time = null,
         ILogger<SequentialPipeline>? logger = null)
+        : this(store, processor, mapper, options, maxJobs, time, logger, markDone: null)
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="SequentialPipeline"/> class with a replaceable "mark done" step (tests).</summary>
+    /// <param name="store">The project's job store.</param>
+    /// <param name="processor">Processes one texture.</param>
+    /// <param name="mapper">Turns job rows into texture jobs.</param>
+    /// <param name="options">Work folder, attempts and progress interval.</param>
+    /// <param name="maxJobs">Process at most this many queued jobs.</param>
+    /// <param name="time">Clock for progress throttling.</param>
+    /// <param name="logger">Logger.</param>
+    /// <param name="markDone">Records a finished job; <see langword="null"/> uses <see cref="JobStore.MarkDoneAsync"/>.</param>
+    internal SequentialPipeline(
+        JobStore store,
+        TextureProcessor processor,
+        JobMapper mapper,
+        PipelineOptions options,
+        int? maxJobs,
+        TimeProvider? time,
+        ILogger<SequentialPipeline>? logger,
+        Func<long, double, Task>? markDone)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(processor);
@@ -80,6 +106,7 @@ internal sealed partial class SequentialPipeline : IForgePipeline
         _maxJobs = maxJobs;
         _time = time ?? TimeProvider.System;
         _logger = logger ?? NullLogger<SequentialPipeline>.Instance;
+        _markDone = markDone ?? ((id, seconds) => store.MarkDoneAsync(id, seconds, CancellationToken.None));
     }
 
     /// <inheritdoc />
@@ -268,17 +295,26 @@ internal sealed partial class SequentialPipeline : IForgePipeline
             LogRecovered(interrupted);
         }
 
+        // Wipe leftovers entry by entry: a file another process still holds (an antivirus scan, an orphaned texconv) is logged and left
+        // for the next start instead of blocking the run. Each job works in its own new folder, so leftovers never collide.
         if (Directory.Exists(_options.WorkRoot))
         {
             foreach (var entry in new DirectoryInfo(_options.WorkRoot).EnumerateFileSystemInfos())
             {
-                if (entry is DirectoryInfo directory)
+                try
                 {
-                    directory.Delete(recursive: true);
+                    if (entry is DirectoryInfo directory)
+                    {
+                        directory.Delete(recursive: true);
+                    }
+                    else
+                    {
+                        entry.Delete();
+                    }
                 }
-                else
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
-                    entry.Delete();
+                    LogWorkCleanupFailed(ex, entry.FullName);
                 }
             }
         }
@@ -321,19 +357,10 @@ internal sealed partial class SequentialPipeline : IForgePipeline
         {
             SetCurrent(job.Path, PipelineStage.Decode);
             var clock = Stopwatch.StartNew();
+            TextureResult result;
             try
             {
-                var result = await _processor.ProcessAsync(textureJob, tiles, _pause.Token, stopToken).ConfigureAwait(false);
-                await _store.MarkDoneAsync(job.Id, clock.Elapsed.TotalSeconds, CancellationToken.None).ConfigureAwait(false);
-                lock (_gate)
-                {
-                    _done++;
-                    _megapixels += job.SourceWidth * (double)job.SourceHeight / 1_000_000;
-                }
-
-                LogJobDone(job.Path, result.Width, result.Height, clock.Elapsed.TotalSeconds);
-                SetCurrent(null, PipelineStage.Decode);
-                return true;
+                result = await _processor.ProcessAsync(textureJob, tiles, _pause.Token, stopToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stopToken.IsCancellationRequested)
             {
@@ -344,12 +371,50 @@ internal sealed partial class SequentialPipeline : IForgePipeline
             catch (Exception ex) when (ex is not OperationCanceledException && attempt < Math.Max(1, _options.MaxAttempts))
             {
                 LogJobRetry(ex, job.Path, attempt);
+                continue;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 await FailAsync(job, ex).ConfigureAwait(false);
                 SetCurrent(null, PipelineStage.Decode);
                 return true;
+            }
+
+            // The output is committed: from here on only the database bookkeeping can fail, and that must never turn into Failed.
+            var seconds = clock.Elapsed.TotalSeconds;
+            await MarkDoneWithRetryAsync(job, seconds).ConfigureAwait(false);
+            lock (_gate)
+            {
+                _done++;
+                _megapixels += job.SourceWidth * (double)job.SourceHeight / 1_000_000;
+            }
+
+            LogJobDone(job.Path, result.Width, result.Height, seconds);
+            SetCurrent(null, PipelineStage.Decode);
+            return true;
+        }
+    }
+
+    private async Task MarkDoneWithRetryAsync(JobRecord job, double seconds)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await _markDone(job.Id, seconds).ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or IOException && attempt < MarkDoneAttempts)
+            {
+                LogMarkDoneRetry(ex, job.Path, attempt);
+                await Task.Delay(MarkDoneRetryDelay * attempt, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or IOException)
+            {
+                // The texture is in the output folder but the database could not record it. The job stays Running, so the next start
+                // requeues it and the same output is produced again; nothing is marked Failed. The run cannot go on without a database.
+                LogMarkDoneFailed(ex, job.Path);
+                throw;
             }
         }
     }
@@ -445,6 +510,15 @@ internal sealed partial class SequentialPipeline : IForgePipeline
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Attempt {Attempt} of {Path} failed; retrying")]
     private partial void LogJobRetry(Exception exception, string path, int attempt);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Could not delete work leftover {Path}; it is retried on the next start")]
+    private partial void LogWorkCleanupFailed(Exception exception, string path);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Recording {Path} as done failed (attempt {Attempt}); retrying")]
+    private partial void LogMarkDoneRetry(Exception exception, string path, int attempt);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "{Path} was written but could not be recorded as done; it will be redone on the next run")]
+    private partial void LogMarkDoneFailed(Exception exception, string path);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Job {Path} failed")]
     private partial void LogJobFailed(Exception exception, string path);

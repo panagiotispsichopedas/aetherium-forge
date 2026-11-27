@@ -2,6 +2,8 @@ using AetheriumForge.Core.Jobs;
 using AetheriumForge.Core.Pipeline;
 using AetheriumForge.Core.Rules;
 using AetheriumForge.Core.Textures;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AetheriumForge.Cli.Pipeline;
 
@@ -13,20 +15,25 @@ namespace AetheriumForge.Cli.Pipeline;
 /// <remarks>
 /// The row stores the format name, not the DXGI number, so the sRGB flag of the source is not known here and outputs are tagged UNORM.
 /// </remarks>
-internal sealed class JobMapper
+internal sealed partial class JobMapper
 {
     private readonly RuleEvaluator _evaluator;
+    private readonly ForgeRules _rules;
     private readonly string? _modelOverride;
+    private readonly ILogger _logger;
 
     /// <summary>Initializes a new instance of the <see cref="JobMapper"/> class.</summary>
     /// <param name="rules">The rules the project was scanned with.</param>
     /// <param name="modelOverride">A model that replaces every job's model (<c>--model</c>), or <see langword="null"/>.</param>
-    public JobMapper(ForgeRules rules, string? modelOverride = null)
+    /// <param name="logger">Logger; <see langword="null"/> disables logging.</param>
+    public JobMapper(ForgeRules rules, string? modelOverride = null, ILogger<JobMapper>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(rules);
 
+        _rules = rules;
         _evaluator = new RuleEvaluator(rules);
         _modelOverride = string.IsNullOrWhiteSpace(modelOverride) ? null : modelOverride;
+        _logger = (ILogger?)logger ?? NullLogger.Instance;
     }
 
     /// <summary>Gets the model used for <paramref name="job"/>.</summary>
@@ -65,7 +72,21 @@ internal sealed class JobMapper
         }
         else
         {
+            // The rules changed since the scan: the row's target wins. Keep the normal strength of a group that still matches
+            // (by evaluation, else by the row's group name); otherwise fall back to 1.0 (relief unchanged).
             (width, height) = FitToMax(job.SourceWidth, job.SourceHeight, job.Target);
+            if (!decision.IsSkipped)
+            {
+                normalStrength = decision.NormalStrength;
+            }
+            else if (job.Group is not null && _rules.Groups.FirstOrDefault(g => string.Equals(g.Name, job.Group, StringComparison.OrdinalIgnoreCase)) is { } group)
+            {
+                normalStrength = group.NormalStrength;
+            }
+            else
+            {
+                LogNoGroup(job.Path, job.Group);
+            }
         }
 
         return new TextureJob(job.Path, job.Archive, kind, width, height, ModelFor(job), normalStrength);
@@ -86,4 +107,7 @@ internal sealed class JobMapper
             ? (target, Math.Max(1, (int)Math.Round((double)height * target / width)))
             : (Math.Max(1, (int)Math.Round((double)width * target / height)), target);
     }
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "No rule group matches {Path} (scanned as {Group}) any more; using normal strength 1.0")]
+    private partial void LogNoGroup(string path, string? group);
 }

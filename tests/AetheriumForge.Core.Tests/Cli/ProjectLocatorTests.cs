@@ -98,4 +98,32 @@ public sealed class ProjectLocatorTests
             (@"D:\P\forge.db", @"D:\P\work", @"D:\P\output", @"D:\P\logs\aetherium-forge-20261127.log"),
             (layout.DatabasePath, layout.WorkRoot, layout.OutputRoot, layout.DefaultLogFile(new DateOnly(2026, 11, 27))));
     }
+
+    [Theory]
+    [InlineData(@"D:\", @"D:\AetheriumForge\Projects\x", true)]
+    [InlineData(@"D:\", @"E:\AetheriumForge\Projects\x", false)]
+    [InlineData(@"D:\Games\Skyrim", @"D:\Games\Skyrim\Data\forge", true)]
+    [InlineData(@"D:\Games\Skyrim", @"D:\Games\Skyrim", true)]
+    [InlineData(@"D:\Games\Skyrim\", @"D:\games\skyrim\work", true)]
+    [InlineData(@"D:\Games\Skyrim", @"D:\Games\SkyrimForge", false)]
+    public void IsUnder_GameAtRootOrFolder_DetectsContainment(string game, string path, bool expected)
+    {
+        var under = PathGuard.IsUnder(path, game);
+
+        Assert.Equal(expected, under);
+    }
+
+    [Fact]
+    public void EnsureOutsideGame_GameAtDriveRoot_RejectsProjectOnThatDrive()
+    {
+        Assert.Throws<CliException>(() => ProjectLocator.EnsureOutsideGame(ProjectLayout.For(@"D:\AetheriumForge\Projects\Game"), @"D:\"));
+    }
+
+    [Fact]
+    public void ResolveForScan_GameAtDriveRoot_DefaultsToAnotherDrive()
+    {
+        var (layout, _) = ProjectLocator.ResolveForScan(null, @"D:\", Drives, 0, None);
+
+        Assert.StartsWith(@"E:\", layout.Root, StringComparison.OrdinalIgnoreCase);
+    }
 }

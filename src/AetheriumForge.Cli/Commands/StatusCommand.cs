@@ -37,7 +37,13 @@ internal sealed class StatusCommand
         var ct = session.Cancellation.Token;
         var output = session.Out;
         var project = await ForgeCommand.ResolveExistingProjectAsync(parseResult.GetValue(Project), session, ct).ConfigureAwait(false);
-        session.AttachProjectLog(project);
+        var gamePath = await ProjectDatabaseReader.ReadProjectValueAsync(project.DatabasePath, ProjectKeys.GamePath, ct).ConfigureAwait(false);
+        if (gamePath is not null)
+        {
+            ProjectLocator.EnsureOutsideGame(project, gamePath);
+        }
+
+        session.AttachLog(project, gamePath);
 
         var store = await JobStore.OpenAsync(project.DatabasePath, ct).ConfigureAwait(false);
         await using (store.ConfigureAwait(false))
@@ -45,7 +51,7 @@ internal sealed class StatusCommand
             var counts = await store.CountByStateAsync(ct).ConfigureAwait(false);
             var total = counts.Values.Sum();
             output.WriteLine($"Project:  {project.Root}");
-            output.WriteLine($"Game:     {await store.GetProjectValueAsync(ProjectKeys.GamePath, ct).ConfigureAwait(false) ?? "(unknown)"}");
+            output.WriteLine($"Game:     {gamePath ?? "(unknown)"}");
             output.WriteLine($"Scanned:  {FormatTimestamp(await store.GetProjectValueAsync(ProjectKeys.ScannedAt, ct).ConfigureAwait(false))}");
             output.WriteLine();
             foreach (var state in Enum.GetValues<JobState>())
@@ -73,7 +79,7 @@ internal sealed class StatusCommand
             }
 
             output.WriteLine();
-            var runs = await RunHistoryReader.ReadLatestAsync(project.DatabasePath, RunsShown, ct).ConfigureAwait(false);
+            var runs = await ProjectDatabaseReader.ReadLatestRunsAsync(project.DatabasePath, RunsShown, ct).ConfigureAwait(false);
             if (runs.Count == 0)
             {
                 output.WriteLine("Runs:     none yet");

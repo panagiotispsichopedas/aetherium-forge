@@ -12,6 +12,9 @@ internal static class ToolLocator
     /// <summary>The solution file that marks the repository root.</summary>
     public const string SolutionFileName = "AetheriumForge.slnx";
 
+    /// <summary>How many parent folders above the executable folder are searched for the repository root (6 covers src/project/bin/config/tfm/rid).</summary>
+    public const int MaxRepositoryLevels = 6;
+
     /// <summary>
     /// Lists the texconv candidates in lookup order.
     /// </summary>
@@ -69,7 +72,10 @@ internal static class ToolLocator
         throw new CliException($"texconv.exe was not found. Tried:{Environment.NewLine}{tried}{Environment.NewLine}{hint}");
     }
 
-    /// <summary>Walks up from <paramref name="start"/> to the folder that holds <see cref="SolutionFileName"/>.</summary>
+    /// <summary>
+    /// Walks up from <paramref name="start"/>, at most <see cref="MaxRepositoryLevels"/> parents, to the folder that holds
+    /// <see cref="SolutionFileName"/>. The limit keeps an installed copy from picking up an unrelated checkout higher up the tree.
+    /// </summary>
     /// <param name="start">The first folder to look in.</param>
     /// <param name="fileExists">File existence probe.</param>
     /// <returns>The repository root, or <see langword="null"/>.</returns>
@@ -77,7 +83,8 @@ internal static class ToolLocator
     {
         ArgumentNullException.ThrowIfNull(fileExists);
 
-        for (var dir = Path.GetFullPath(start); !string.IsNullOrEmpty(dir); dir = Path.GetDirectoryName(dir))
+        var level = 0;
+        for (var dir = Path.GetFullPath(start); !string.IsNullOrEmpty(dir) && level <= MaxRepositoryLevels; dir = Path.GetDirectoryName(dir), level++)
         {
             if (fileExists(Path.Combine(dir, SolutionFileName)))
             {

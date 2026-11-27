@@ -100,20 +100,22 @@ internal sealed class ForgeCommand
         var log = session.Logging.Logger.ForContext<ForgeCommand>();
 
         var project = await ResolveProjectAsync(parseResult.GetValue(Project), session, ct).ConfigureAwait(false);
-        session.AttachProjectLog(project);
+
+        // Containment first: nothing (log, database, work files) is written until the project is known to be outside the game.
+        var gamePath = await ProjectDatabaseReader.ReadProjectValueAsync(project.DatabasePath, ProjectKeys.GamePath, ct).ConfigureAwait(false)
+            ?? throw new CliException($"The project {project.Root} has no game path. Run 'aetherium-forge scan --project \"{project.Root}\"' again.");
+        ProjectLocator.EnsureOutsideGame(project, gamePath);
+        session.AttachLog(project, gamePath);
 
         var store = await JobStore.OpenAsync(project.DatabasePath, ct).ConfigureAwait(false);
         await using (store.ConfigureAwait(false))
         {
-            var gamePath = await store.GetProjectValueAsync(ProjectKeys.GamePath, ct).ConfigureAwait(false)
-                ?? throw new CliException($"The project {project.Root} has no game path. Run 'aetherium-forge scan --project \"{project.Root}\"' again.");
             var dataFolder = Path.Combine(gamePath, GameProfileLoader.DataFolderName);
             if (!Directory.Exists(dataFolder))
             {
                 throw new CliException($"The game's Data folder {dataFolder} does not exist. Was the game moved? Run 'scan --game <dir>' again.");
             }
 
-            ProjectLocator.EnsureOutsideGame(project, gamePath);
             var rulesJson = await store.GetProjectValueAsync(ProjectKeys.RulesJson, ct).ConfigureAwait(false);
             var rules = rulesJson is null ? ForgeRules.Default : ForgeRules.FromJson(rulesJson);
 
@@ -140,6 +142,7 @@ internal sealed class ForgeCommand
             EnsureModelsInstalled(needed, models, modelsFolder);
 
             var texconv = ToolLocator.FindTexconv(parseResult.GetValue(Texconv), AppContext.BaseDirectory, File.Exists);
+            log.Information("Using texconv {TexconvPath}", texconv);
 
             output.WriteLine($"Project:  {project.Root}");
             output.WriteLine($"Output:   {project.OutputRoot}");
@@ -160,9 +163,7 @@ internal sealed class ForgeCommand
             PipelineRunSummary summary;
             using (session.Logging.QuietConsole())
             {
-                var running = pipeline.RunAsync(view, session.Cancellation.Token);
-                await view.RunAsync(pipeline, running, session.Cancellation).ConfigureAwait(false);
-                summary = await running.ConfigureAwait(false);
+                summary = await RunWithViewAsync(pipeline, view, session.Cancellation, log).ConfigureAwait(false);
             }
 
             output.WriteLine();
@@ -176,6 +177,41 @@ internal sealed class ForgeCommand
 
             return summary.Stopped ? ExitCodes.Stopped : ExitCodes.Ok;
         }
+    }
+
+    /// <summary>
+    /// Runs the pipeline under the live view. The pipeline task is always awaited before returning, so the host (GPU sessions, archive
+    /// readers, the job store) is never disposed under a running pipeline. If the view fails, the run is stopped first and the view's
+    /// error is rethrown after the pipeline has finished.
+    /// </summary>
+    /// <param name="pipeline">The pipeline.</param>
+    /// <param name="view">The view (also the progress sink).</param>
+    /// <param name="cancellation">The stop source.</param>
+    /// <param name="log">Logger.</param>
+    /// <returns>The run summary.</returns>
+    internal static async Task<PipelineRunSummary> RunWithViewAsync(IForgePipeline pipeline, ForgeConsoleView view, ConsoleCancellation cancellation, ILogger log)
+    {
+        ArgumentNullException.ThrowIfNull(pipeline);
+        ArgumentNullException.ThrowIfNull(view);
+        ArgumentNullException.ThrowIfNull(cancellation);
+        ArgumentNullException.ThrowIfNull(log);
+
+        var running = pipeline.RunAsync(view, cancellation.Token);
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? viewFailure = null;
+        try
+        {
+            await view.RunAsync(pipeline, running, cancellation).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            log.Error(ex, "The live view failed; stopping the run");
+            viewFailure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex);
+            cancellation.Cancel();
+        }
+
+        var summary = await running.ConfigureAwait(false);
+        viewFailure?.Throw();
+        return summary;
     }
 
     /// <summary>Lists the models the jobs need (parallax/height maps never run a model).</summary>

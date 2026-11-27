@@ -74,4 +74,41 @@ public sealed class JobMapperTests
 
         Assert.Contains("gh release download models-v1", ex.Message, StringComparison.Ordinal);
     }
+
+    private static ForgeRules StrongNormals() => new()
+    {
+        Groups = [new GroupRule { Name = "default", Model = "realesrgan-x4plus", NormalStrength = 1.4 }],
+    };
+
+    [Fact]
+    public void Map_RulesChangedButGroupStillMatches_KeepsGroupNormalStrength()
+    {
+        var mapper = new JobMapper(StrongNormals());
+
+        var job = mapper.Map(Job(512, 512, 999, kind: "Normal"));
+
+        Assert.Equal((999, 999, 1.4), (job.TargetWidth, job.TargetHeight, job.NormalStrength));
+    }
+
+    [Fact]
+    public void Map_RulesNoLongerMatchButGroupNameExists_UsesNamedGroupStrength()
+    {
+        var mapper = new JobMapper(StrongNormals());
+
+        // 64 px is below the rules' minimum source, so evaluation skips it; the row's group name still finds the group.
+        var job = mapper.Map(Job(64, 64, 256, kind: "Normal"));
+
+        Assert.Equal(1.4, job.NormalStrength);
+    }
+
+    [Fact]
+    public void Map_NoGroupMatches_UsesNeutralStrength()
+    {
+        var rules = new ForgeRules { Groups = [new GroupRule { Name = "other", Match = [@"textures\nothing\*"], Model = "m", NormalStrength = 1.4 }] };
+        var mapper = new JobMapper(rules);
+
+        var job = mapper.Map(Job(512, 512, 2048, kind: "Normal"));
+
+        Assert.Equal(1.0, job.NormalStrength);
+    }
 }

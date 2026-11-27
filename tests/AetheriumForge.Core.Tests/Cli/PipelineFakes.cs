@@ -103,11 +103,11 @@ internal sealed class PipelineFixture : IAsyncDisposable
     public static JobRecord Job(string path, JobState state) =>
         new(0, path, "Skyrim - Textures0.bsa", 4, 4, "BC1_UNORM", "Diffuse", "test", 16, "fake", state, 0, null, null, null);
 
-    public SequentialPipeline CreatePipeline(int? maxJobs = null, int maxAttempts = 2)
+    public SequentialPipeline CreatePipeline(int? maxJobs = null, int maxAttempts = 2, Func<long, double, Task>? markDone = null)
     {
         var processor = new TextureProcessor(new FakeTextureSource(), Codec, _ => Upscaler, OutputRoot, WorkRoot);
         var options = new PipelineOptions { WorkRoot = WorkRoot, OutputRoot = OutputRoot, MaxAttempts = maxAttempts, ProgressInterval = TimeSpan.Zero };
-        return new SequentialPipeline(Store, processor, new JobMapper(ForgeRules.Default), options, maxJobs);
+        return new SequentialPipeline(Store, processor, new JobMapper(ForgeRules.Default), options, maxJobs, null, null, markDone);
     }
 
     public async Task<Dictionary<JobState, int>> CountsAsync() => new(await Store.CountByStateAsync());

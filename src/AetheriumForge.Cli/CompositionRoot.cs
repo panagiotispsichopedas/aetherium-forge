@@ -103,7 +103,7 @@ internal static class CompositionRoot
                 forge.Project.WorkRoot,
                 sp.GetRequiredService<ILogger<TextureProcessor>>());
         });
-        services.AddSingleton(_ => new JobMapper(forge.Rules, forge.Run.ModelOverride));
+        services.AddSingleton(sp => new JobMapper(forge.Rules, forge.Run.ModelOverride, sp.GetRequiredService<ILogger<JobMapper>>()));
         services.AddSingleton(CreatePipeline);
     }
 
