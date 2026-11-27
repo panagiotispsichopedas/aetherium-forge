@@ -3,7 +3,7 @@
 AI texture forge for Skyrim Special Edition / Anniversary Edition.
 It finds every texture the game still loads from the original game archives, upscales it with an ONNX model on the GPU, and packages the result as a self-contained mod that any mod manager can install. It fills gaps only, so it never overrides textures from installed mods.
 
-Status: design approved, implementation not started.
+Status: M1 (core scan) implemented. On the reference install it queues the same 3,433 vanilla textures as the prototype, with identical targets, plus Creation Club and `_ResourcePack.bsa` textures (base tier, §5 item 3).
 Proven prototype: `TextureGapUpscale`, an unpublished local tool (Python + texconv + Real-ESRGAN ncnn). Its scan, classification, post-processing and resume logic are the reference for this guide.
 
 ---
@@ -345,7 +345,7 @@ using var session = new InferenceSession(modelPath, so);
 - Use **one GPU worker per adapter**. DirectML sessions aren't designed for parallel runs on one adapter.
 - **Pause:** a `PauseTokenSource` (an async manual-reset gate) checked by the producer, by every stage before each item, and by the upscaler between tiles. Items in progress keep their state in memory and continue after Resume.
 - **Stop:** cancel the `CancellationToken`. Each stage finishes or abandons its current item. Abandoned items go back to `Queued`. Temporary files are cleaned on the next start.
-- **Crash or power loss:** on start, anything not `Done` returns to `Queued`, and the `work\` folder is wiped.
+- **Crash or power loss:** on start, interrupted jobs (`Running`) return to `Queued`, and the `work\` folder is wiped. `Done`, `Failed` and `Skipped` keep their state; failed jobs are retried only on request (Queue screen → Retry).
 - **Progress:** each stage reports `PipelineProgress` (item, stage, percent, tiles done/total, timings) through an `IProgress<T>`/`Channel` that the UI consumes on the dispatcher (throttled to about 10 Hz).
 - **ETA:** an exponential moving average of the seconds per megapixel (source) per model, multiplied by the remaining megapixels. This is far more accurate than a per-item average, because sizes vary from 128² to 2048².
 - **GPU telemetry** (optional): DXGI `QueryVideoMemoryInfo` for video memory; NVML (NVIDIA) for load if present.
