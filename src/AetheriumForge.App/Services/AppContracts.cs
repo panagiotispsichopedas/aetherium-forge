@@ -114,3 +114,32 @@ public interface INavigationService
     /// <param name="page">The page.</param>
     void NavigateTo(AppPage page);
 }
+
+// ── Locking rules ──
+
+/// <summary>
+/// Locking rules for the app services (no members: documentation the M4 implementations follow). Multiple instances corrupt project state
+/// and skew GPU calibration, so the app enforces exclusivity at three levels, all from <c>AetheriumForge.Core.Concurrency</c>:
+/// </summary>
+/// <remarks>
+/// <list type="number">
+/// <item><description><b>One app per logon session.</b> <c>SingleInstance</c> is taken in <c>Program.Main</c> before Avalonia starts; a
+/// second launch asks the first to come to the front and exits. Services never need to handle a second app instance.</description></item>
+/// <item><description><b>One process per project.</b> <see cref="IProjectSession"/> implementations must hold a <c>ProjectLock</c>
+/// (<c>ProjectLock.Acquire(projectRoot, "Aetherium Forge")</c>) for as long as a project is open: take it before opening <c>forge.db</c>,
+/// release it (dispose) after closing the store and when switching projects or shutting down. A <c>ProjectLockedException</c> means the
+/// CLI or another tool has the project; show its message (for example "Project is open in aetherium-forge forge (PID 1234). Close it there
+/// first.") and leave no project open. The lock file <c>.aetherium.lock</c> lives in the project root; anything that enumerates the
+/// project folder skips it (<c>ProjectLock.IsLockFile</c>).</description></item>
+/// <item><description><b>One GPU job per machine.</b> <see cref="IForgeRunner"/> and GPU calibration must hold <c>GpuWorkLock</c>
+/// (<c>new GpuWorkLock("Aetherium Forge", logger).AcquireAsync("a forge run" or "a calibration", timeout, ct)</c>) for the whole run or
+/// calibration and dispose the handle when it ends, fails or is canceled. A <c>GpuBusyException</c> names the holder (for example "The GPU
+/// is busy with a forge run in aetherium-forge forge (PID 1234).") and must be shown to the user rather than queued silently.
+/// <c>GpuProfiler</c>'s in-process per-adapter semaphore stays; this lock adds the cross-process guarantee.</description></item>
+/// </list>
+/// </remarks>
+public static class LockingRules
+{
+    /// <summary>The owner description the app writes into project and GPU locks.</summary>
+    public const string AppOwnerDescription = "Aetherium Forge";
+}
