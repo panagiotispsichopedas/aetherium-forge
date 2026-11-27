@@ -22,9 +22,10 @@ public static class AppHost
     public static IHost Build()
     {
         var builder = Host.CreateApplicationBuilder();
-        builder.Services.AddSerilog((_, logger) => logger
+        builder.Services.AddSerilog((sp, logger) => logger
             .MinimumLevel.Information()
-            .WriteTo.File(Path.Combine(AppDataFolder, "logs", "app-.log"), formatProvider: System.Globalization.CultureInfo.InvariantCulture, rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14));
+            .WriteTo.File(Path.Combine(AppDataFolder, "logs", "app-.log"), formatProvider: System.Globalization.CultureInfo.InvariantCulture, rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14)
+            .WriteTo.Sink(sp.GetRequiredService<ForgeRunnerLogSink>()));
 
         var services = builder.Services;
         services.AddSingleton(TimeProvider.System);
@@ -59,7 +60,9 @@ public static class AppHost
         services.AddSingleton<QueuePagePlaceholder>(_ => new QueuePagePlaceholder(new PagePlaceholderViewModel("Queue")));
 
         // ── PAGE: Run (also owns IForgeRunner) ──
-        services.AddSingleton<RunPagePlaceholder>(_ => new RunPagePlaceholder(new PagePlaceholderViewModel("Run")));
+        // ForgeRunner (IForgeRunner), the log-tail sink (wired into the Serilog configuration above) and RunViewModel.
+        services.AddForgeRunPage();
+        services.AddSingleton<RunPagePlaceholder>(sp => new RunPagePlaceholder(sp.GetRequiredService<Pages.Run.RunViewModel>()));
 
         // ── PAGE: Models ──
         services.AddSingleton<ModelsPagePlaceholder>(_ => new ModelsPagePlaceholder(new PagePlaceholderViewModel("Models")));
