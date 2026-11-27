@@ -101,10 +101,17 @@ public sealed class DxgiAdapterProviderIntegrationTests : IDisposable
         Assert.True(memory.Budget > 0, "Budget must be non-zero.");
     }
 
+    // CI runners expose a virtual display adapter that is not flagged as software but has no usable DirectML device or local
+    // budget, so tests that need a real GPU opt in with AETHERIUM_TEST_DIRECTML=1, like the other GPU tests.
+    private const string DirectMLSkipReason = "Set AETHERIUM_TEST_DIRECTML=1 to run tests that need a real DirectX 12 GPU.";
+
+    private static bool DirectMLEnabled => Environment.GetEnvironmentVariable("AETHERIUM_TEST_DIRECTML") == "1";
+
     [Fact]
     public void QueryVideoMemory_HardwareAdapter_BudgetIsSingleNodeLocalMemory()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "DXGI is Windows only.");
+        Assert.SkipUnless(DirectMLEnabled, DirectMLSkipReason);
         var adapter = PrimaryHardwareAdapter();
         Assert.SkipWhen(adapter is null, "No hardware GPU.");
 
@@ -169,6 +176,7 @@ public sealed class DxgiAdapterProviderIntegrationTests : IDisposable
     public void DirectMLDeviceId_HardwareAdapter_RunsOnnxSessionOnThatAdapter()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "DXGI is Windows only.");
+        Assert.SkipUnless(DirectMLEnabled, DirectMLSkipReason);
         var adapter = PrimaryHardwareAdapter();
         Assert.SkipWhen(adapter is null, "No hardware GPU.");
         var path = OnnxTestModels.WriteTemp(_folder, "x2", OnnxTestModels.NearestUpscale(2));
