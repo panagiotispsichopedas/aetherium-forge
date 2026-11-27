@@ -38,6 +38,27 @@ public sealed class JobStore : IAsyncDisposable
 
     private const string JobColumns = "id, path, archive, src_w, src_h, format, kind, grp, target, model, state, attempts, error, seconds, finished_at";
 
+    private const string UpsertSql = """
+        INSERT INTO job (path, archive, src_w, src_h, format, kind, grp, target, model, state, attempts, error, seconds, finished_at)
+        VALUES ($path, $archive, $src_w, $src_h, $format, $kind, $grp, $target, $model, $state, $attempts, $error, $seconds, $finished_at)
+        ON CONFLICT(path) DO UPDATE SET
+          archive = excluded.archive,
+          src_w = excluded.src_w,
+          src_h = excluded.src_h,
+          format = excluded.format,
+          kind = excluded.kind,
+          grp = excluded.grp,
+          target = excluded.target,
+          model = excluded.model,
+          state = CASE WHEN job.state = 'Done' THEN job.state ELSE excluded.state END,
+          error = CASE WHEN job.state = 'Done' THEN job.error ELSE excluded.error END,
+          seconds = CASE WHEN job.state = 'Done' THEN job.seconds ELSE excluded.seconds END,
+          finished_at = CASE WHEN job.state = 'Done' THEN job.finished_at ELSE excluded.finished_at END;
+        """;
+
+    private const string SetProjectValueSql =
+        "INSERT INTO project (key, value) VALUES ($key, $value) ON CONFLICT(key) DO UPDATE SET value = excluded.value;";
+
     private readonly string _connectionString;
     private readonly TimeProvider _timeProvider;
     private bool _disposed;
@@ -125,7 +146,7 @@ public sealed class JobStore : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(value);
 
         await ExecuteNonQueryAsync(
-            "INSERT INTO project (key, value) VALUES ($key, $value) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+            SetProjectValueSql,
             [("$key", key), ("$value", value)],
             ct).ConfigureAwait(false);
     }
@@ -145,23 +166,41 @@ public sealed class JobStore : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(jobs);
 
-        const string sql = """
-            INSERT INTO job (path, archive, src_w, src_h, format, kind, grp, target, model, state, attempts, error, seconds, finished_at)
-            VALUES ($path, $archive, $src_w, $src_h, $format, $kind, $grp, $target, $model, $state, $attempts, $error, $seconds, $finished_at)
-            ON CONFLICT(path) DO UPDATE SET
-              archive = excluded.archive,
-              src_w = excluded.src_w,
-              src_h = excluded.src_h,
-              format = excluded.format,
-              kind = excluded.kind,
-              grp = excluded.grp,
-              target = excluded.target,
-              model = excluded.model,
-              state = CASE WHEN job.state = 'Done' THEN job.state ELSE excluded.state END,
-              error = CASE WHEN job.state = 'Done' THEN job.error ELSE excluded.error END,
-              seconds = CASE WHEN job.state = 'Done' THEN job.seconds ELSE excluded.seconds END,
-              finished_at = CASE WHEN job.state = 'Done' THEN job.finished_at ELSE excluded.finished_at END;
-            """;
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+            await using (transaction.ConfigureAwait(false))
+            {
+                var affected = await UpsertCoreAsync(connection, transaction, jobs, ct).ConfigureAwait(false);
+                await transaction.CommitAsync(ct).ConfigureAwait(false);
+                return affected;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Imports a scan in one transaction: upserts the jobs (see <see cref="UpsertJobsAsync"/>), applies the rescan (see
+    /// <see cref="ApplyRescanAsync(IReadOnlySet{string}, IReadOnlySet{string}, CancellationToken)"/>) and writes the project values.
+    /// Either everything is written or nothing is.
+    /// </summary>
+    /// <param name="jobs">The scanned jobs.</param>
+    /// <param name="currentGapPaths">The paths of the gap set.</param>
+    /// <param name="unreadableArchives">Archives the scan could not read; their jobs are left as they are.</param>
+    /// <param name="projectValues">Project values to write (for example the game path and the rules).</param>
+    /// <param name="ct">Cancels the operation; nothing is written when cancelled.</param>
+    /// <returns>The rows inserted or updated and the jobs newly skipped.</returns>
+    public async Task<(int Upserted, int NowProvidedByMod)> ImportScanAsync(
+        IEnumerable<JobRecord> jobs,
+        IReadOnlySet<string> currentGapPaths,
+        IReadOnlySet<string> unreadableArchives,
+        IReadOnlyDictionary<string, string> projectValues,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(jobs);
+        ArgumentNullException.ThrowIfNull(currentGapPaths);
+        ArgumentNullException.ThrowIfNull(unreadableArchives);
+        ArgumentNullException.ThrowIfNull(projectValues);
 
         var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using (connection.ConfigureAwait(false))
@@ -169,53 +208,23 @@ public sealed class JobStore : IAsyncDisposable
             var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
             await using (transaction.ConfigureAwait(false))
             {
-                var command = connection.CreateCommand();
-                await using (command.ConfigureAwait(false))
+                var upserted = await UpsertCoreAsync(connection, transaction, jobs, ct).ConfigureAwait(false);
+                var skipped = await ApplyRescanCoreAsync(connection, transaction, currentGapPaths, unreadableArchives, ct).ConfigureAwait(false);
+                foreach (var (key, value) in projectValues)
                 {
-                    command.Transaction = transaction;
-                    command.CommandText = sql;
-                    var path = command.Parameters.Add("$path", SqliteType.Text);
-                    var archive = command.Parameters.Add("$archive", SqliteType.Text);
-                    var sourceWidth = command.Parameters.Add("$src_w", SqliteType.Integer);
-                    var sourceHeight = command.Parameters.Add("$src_h", SqliteType.Integer);
-                    var format = command.Parameters.Add("$format", SqliteType.Text);
-                    var kind = command.Parameters.Add("$kind", SqliteType.Text);
-                    var group = command.Parameters.Add("$grp", SqliteType.Text);
-                    var target = command.Parameters.Add("$target", SqliteType.Integer);
-                    var model = command.Parameters.Add("$model", SqliteType.Text);
-                    var state = command.Parameters.Add("$state", SqliteType.Text);
-                    var attempts = command.Parameters.Add("$attempts", SqliteType.Integer);
-                    var error = command.Parameters.Add("$error", SqliteType.Text);
-                    var seconds = command.Parameters.Add("$seconds", SqliteType.Real);
-                    var finishedAt = command.Parameters.Add("$finished_at", SqliteType.Text);
-
-                    var affected = 0;
-                    foreach (var job in jobs)
+                    var command = connection.CreateCommand();
+                    await using (command.ConfigureAwait(false))
                     {
-                        ArgumentNullException.ThrowIfNull(job, nameof(jobs));
-
-                        path.Value = GamePath.Normalize(job.Path);
-                        archive.Value = job.Archive;
-                        sourceWidth.Value = job.SourceWidth;
-                        sourceHeight.Value = job.SourceHeight;
-                        format.Value = job.Format;
-                        kind.Value = job.Kind;
-                        group.Value = (object?)job.Group ?? DBNull.Value;
-                        target.Value = job.Target;
-                        model.Value = (object?)job.Model ?? DBNull.Value;
-                        state.Value = job.State.ToString();
-                        attempts.Value = job.Attempts;
-                        error.Value = (object?)job.Error ?? DBNull.Value;
-                        seconds.Value = (object?)job.Seconds ?? DBNull.Value;
-                        finishedAt.Value = job.FinishedAt is { } finished ? FormatTimestamp(finished) : DBNull.Value;
-
-                        affected += await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        command.Transaction = transaction;
+                        command.CommandText = SetProjectValueSql;
+                        command.Parameters.AddWithValue("$key", key);
+                        command.Parameters.AddWithValue("$value", value);
+                        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                     }
-
-                    await transaction.CommitAsync(ct).ConfigureAwait(false);
-
-                    return affected;
                 }
+
+                await transaction.CommitAsync(ct).ConfigureAwait(false);
+                return (upserted, skipped);
             }
         }
     }
@@ -381,15 +390,28 @@ public sealed class JobStore : IAsyncDisposable
 
     /// <summary>
     /// Applies a rescan: every job whose path is not in the new gap set becomes <see cref="JobState.Skipped"/>
-    /// with the error <see cref="ProvidedByModError"/>.
+    /// with the error <see cref="ProvidedByModError"/>. <see cref="JobState.Running"/> jobs are never touched.
     /// </summary>
     /// <param name="currentGapPaths">The paths of the recomputed gap set (normalised before comparison).</param>
     /// <param name="ct">Cancels the operation; nothing is written when cancelled.</param>
     /// <returns>The number of jobs newly skipped.</returns>
     /// <remarks>New gaps are added, as <see cref="JobState.Queued"/>, through <see cref="UpsertJobsAsync"/>.</remarks>
-    public async Task<int> ApplyRescanAsync(IReadOnlySet<string> currentGapPaths, CancellationToken ct = default)
+    public Task<int> ApplyRescanAsync(IReadOnlySet<string> currentGapPaths, CancellationToken ct = default) =>
+        ApplyRescanAsync(currentGapPaths, new HashSet<string>(), ct);
+
+    /// <summary>
+    /// Applies a rescan like <see cref="ApplyRescanAsync(IReadOnlySet{string}, CancellationToken)"/>, but leaves the jobs of
+    /// <paramref name="unreadableArchives"/> alone: a missing or unreadable base archive drops its textures from the gap set, and they are
+    /// not "provided by a mod". <see cref="JobState.Running"/> jobs are never touched.
+    /// </summary>
+    /// <param name="currentGapPaths">The paths of the recomputed gap set (normalised before comparison).</param>
+    /// <param name="unreadableArchives">Archive file names the scan could not read (compared case-insensitively).</param>
+    /// <param name="ct">Cancels the operation; nothing is written when cancelled.</param>
+    /// <returns>The number of jobs newly skipped.</returns>
+    public async Task<int> ApplyRescanAsync(IReadOnlySet<string> currentGapPaths, IReadOnlySet<string> unreadableArchives, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(currentGapPaths);
+        ArgumentNullException.ThrowIfNull(unreadableArchives);
 
         var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using (connection.ConfigureAwait(false))
@@ -397,41 +419,44 @@ public sealed class JobStore : IAsyncDisposable
             var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
             await using (transaction.ConfigureAwait(false))
             {
-                await ExecuteAsync(connection, "CREATE TEMP TABLE IF NOT EXISTS rescan_gap (path TEXT PRIMARY KEY); DELETE FROM temp.rescan_gap;", ct, transaction)
-                    .ConfigureAwait(false);
-
-                var insert = connection.CreateCommand();
-                await using (insert.ConfigureAwait(false))
-                {
-                    insert.Transaction = transaction;
-                    insert.CommandText = "INSERT OR IGNORE INTO temp.rescan_gap (path) VALUES ($path);";
-                    var path = insert.Parameters.Add("$path", SqliteType.Text);
-                    foreach (var gapPath in currentGapPaths)
-                    {
-                        path.Value = GamePath.Normalize(gapPath);
-                        await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-                    }
-                }
-
-                int skipped;
-                var update = connection.CreateCommand();
-                await using (update.ConfigureAwait(false))
-                {
-                    update.Transaction = transaction;
-                    update.CommandText = """
-                        UPDATE job SET state = 'Skipped', error = $error
-                        WHERE state <> 'Skipped' AND path NOT IN (SELECT path FROM temp.rescan_gap);
-                        """;
-                    update.Parameters.AddWithValue("$error", ProvidedByModError);
-                    skipped = await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-                }
-
-                await ExecuteAsync(connection, "DROP TABLE temp.rescan_gap;", ct, transaction).ConfigureAwait(false);
+                var skipped = await ApplyRescanCoreAsync(connection, transaction, currentGapPaths, unreadableArchives, ct).ConfigureAwait(false);
                 await transaction.CommitAsync(ct).ConfigureAwait(false);
-
                 return skipped;
             }
         }
+    }
+
+    /// <summary>
+    /// Tells which of <paramref name="archives"/> provide at least one job (compared case-insensitively).
+    /// </summary>
+    /// <param name="archives">Archive file names.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The archives that have jobs.</returns>
+    public async Task<IReadOnlySet<string>> GetArchivesWithJobsAsync(IEnumerable<string> archives, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(archives);
+
+        var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                command.CommandText = "SELECT EXISTS (SELECT 1 FROM job WHERE archive = $archive COLLATE NOCASE);";
+                var parameter = command.Parameters.Add("$archive", SqliteType.Text);
+                foreach (var archive in archives)
+                {
+                    parameter.Value = archive;
+                    if (Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture) == 1)
+                    {
+                        found.Add(archive);
+                    }
+                }
+            }
+        }
+
+        return found;
     }
 
     /// <summary>
@@ -519,6 +544,113 @@ public sealed class JobStore : IAsyncDisposable
         Error: reader.IsDBNull(12) ? null : reader.GetString(12),
         Seconds: reader.IsDBNull(13) ? null : reader.GetDouble(13),
         FinishedAt: reader.IsDBNull(14) ? null : ParseTimestamp(reader.GetString(14)));
+
+    private static async Task<int> UpsertCoreAsync(SqliteConnection connection, SqliteTransaction transaction, IEnumerable<JobRecord> jobs, CancellationToken ct)
+    {
+        var command = connection.CreateCommand();
+        await using (command.ConfigureAwait(false))
+        {
+            command.Transaction = transaction;
+            command.CommandText = UpsertSql;
+            var path = command.Parameters.Add("$path", SqliteType.Text);
+            var archive = command.Parameters.Add("$archive", SqliteType.Text);
+            var sourceWidth = command.Parameters.Add("$src_w", SqliteType.Integer);
+            var sourceHeight = command.Parameters.Add("$src_h", SqliteType.Integer);
+            var format = command.Parameters.Add("$format", SqliteType.Text);
+            var kind = command.Parameters.Add("$kind", SqliteType.Text);
+            var group = command.Parameters.Add("$grp", SqliteType.Text);
+            var target = command.Parameters.Add("$target", SqliteType.Integer);
+            var model = command.Parameters.Add("$model", SqliteType.Text);
+            var state = command.Parameters.Add("$state", SqliteType.Text);
+            var attempts = command.Parameters.Add("$attempts", SqliteType.Integer);
+            var error = command.Parameters.Add("$error", SqliteType.Text);
+            var seconds = command.Parameters.Add("$seconds", SqliteType.Real);
+            var finishedAt = command.Parameters.Add("$finished_at", SqliteType.Text);
+
+            var affected = 0;
+            foreach (var job in jobs)
+            {
+                ArgumentNullException.ThrowIfNull(job, nameof(jobs));
+
+                path.Value = GamePath.Normalize(job.Path);
+                archive.Value = job.Archive;
+                sourceWidth.Value = job.SourceWidth;
+                sourceHeight.Value = job.SourceHeight;
+                format.Value = job.Format;
+                kind.Value = job.Kind;
+                group.Value = (object?)job.Group ?? DBNull.Value;
+                target.Value = job.Target;
+                model.Value = (object?)job.Model ?? DBNull.Value;
+                state.Value = job.State.ToString();
+                attempts.Value = job.Attempts;
+                error.Value = (object?)job.Error ?? DBNull.Value;
+                seconds.Value = (object?)job.Seconds ?? DBNull.Value;
+                finishedAt.Value = job.FinishedAt is { } finished ? FormatTimestamp(finished) : DBNull.Value;
+
+                affected += await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            return affected;
+        }
+    }
+
+    private static async Task<int> ApplyRescanCoreAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlySet<string> currentGapPaths,
+        IReadOnlySet<string> unreadableArchives,
+        CancellationToken ct)
+    {
+        await ExecuteAsync(
+            connection,
+            "CREATE TEMP TABLE IF NOT EXISTS rescan_gap (path TEXT PRIMARY KEY); DELETE FROM temp.rescan_gap; "
+            + "CREATE TEMP TABLE IF NOT EXISTS rescan_keep (archive TEXT PRIMARY KEY COLLATE NOCASE); DELETE FROM temp.rescan_keep;",
+            ct,
+            transaction).ConfigureAwait(false);
+
+        var insert = connection.CreateCommand();
+        await using (insert.ConfigureAwait(false))
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = "INSERT OR IGNORE INTO temp.rescan_gap (path) VALUES ($path);";
+            var path = insert.Parameters.Add("$path", SqliteType.Text);
+            foreach (var gapPath in currentGapPaths)
+            {
+                path.Value = GamePath.Normalize(gapPath);
+                await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+        }
+
+        var keep = connection.CreateCommand();
+        await using (keep.ConfigureAwait(false))
+        {
+            keep.Transaction = transaction;
+            keep.CommandText = "INSERT OR IGNORE INTO temp.rescan_keep (archive) VALUES ($archive);";
+            var archive = keep.Parameters.Add("$archive", SqliteType.Text);
+            foreach (var name in unreadableArchives)
+            {
+                archive.Value = name;
+                await keep.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+        }
+
+        int skipped;
+        var update = connection.CreateCommand();
+        await using (update.ConfigureAwait(false))
+        {
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE job SET state = 'Skipped', error = $error
+                WHERE state NOT IN ('Skipped', 'Running')
+                  AND path NOT IN (SELECT path FROM temp.rescan_gap)
+                  AND archive COLLATE NOCASE NOT IN (SELECT archive FROM temp.rescan_keep);
+                """;
+            update.Parameters.AddWithValue("$error", ProvidedByModError);
+            skipped = await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        await ExecuteAsync(connection, "DROP TABLE temp.rescan_gap; DROP TABLE temp.rescan_keep;", ct, transaction).ConfigureAwait(false);
+        return skipped;
+    }
 
     private static async Task ExecuteAsync(SqliteConnection connection, string sql, CancellationToken ct, SqliteTransaction? transaction = null)
     {

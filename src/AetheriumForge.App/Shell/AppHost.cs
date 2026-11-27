@@ -31,7 +31,29 @@ public static class AppHost
         services.AddSingleton<INavigationService, NavigationService>();
 
         // ── PAGE: Scan (also owns IProjectSession) ──
-        services.AddSingleton<ScanPagePlaceholder>(_ => new ScanPagePlaceholder(new PagePlaceholderViewModel("Scan")));
+        services.AddSingleton(sp => new AppSettingsStore(Path.Combine(AppDataFolder, AppSettingsStore.FileName), sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<AppSettingsStore>>()));
+        services.AddSingleton<IAppSettingsStore>(sp => sp.GetRequiredService<AppSettingsStore>());
+        services.AddSingleton(sp => new ProjectSession(sp.GetRequiredService<IAppSettingsStore>(), sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ProjectSession>>()));
+        services.AddSingleton<IScanProjectSession>(sp => sp.GetRequiredService<ProjectSession>());
+        services.AddSingleton<IProjectSession>(sp => sp.GetRequiredService<ProjectSession>());
+        services.AddHostedService<ProjectSessionStartup>();
+        services.AddSingleton<Pages.Scan.IScanEnvironment>(sp => new Pages.Scan.ScanEnvironment(
+            new Core.Discovery.GameLocator(
+                new Core.Discovery.WindowsRegistryReader(),
+                new Core.Discovery.WindowsFileSystemProbe(),
+                Core.Discovery.GameLocator.DefaultEpicManifestsFolder,
+                sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Core.Discovery.GameLocator>>()),
+            new Core.Discovery.ProfileLocator(),
+            new Core.Textures.TextureScanner(sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Core.Textures.TextureScanner>>())));
+        services.AddSingleton<Pages.Scan.IFolderPicker, Pages.Scan.StorageFolderPicker>();
+        services.AddSingleton(sp => new Pages.Scan.ScanViewModel(
+            sp.GetRequiredService<Pages.Scan.IScanEnvironment>(),
+            sp.GetRequiredService<IScanProjectSession>(),
+            sp.GetRequiredService<INavigationService>(),
+            sp.GetRequiredService<Pages.Scan.IFolderPicker>(),
+            sp.GetService<IForgeRunner>(),
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Pages.Scan.ScanViewModel>>()));
+        services.AddSingleton<ScanPagePlaceholder>(sp => new ScanPagePlaceholder(sp.GetRequiredService<Pages.Scan.ScanViewModel>()));
 
         // ── PAGE: Queue ──
         services.AddSingleton<QueuePagePlaceholder>(_ => new QueuePagePlaceholder(new PagePlaceholderViewModel("Queue")));
