@@ -75,6 +75,24 @@ public sealed class TexconvIntegrationTests
     }
 
     [Fact]
+    public async Task EncodeBc7Async_FolderNamedFailed_Succeeds()
+    {
+        // Arrange: texconv echoes every path, so the folder name shows up in its output.
+        Texconv texconv = Create();
+        using var folder = new TempFolder();
+        string root = Path.Combine(folder.Path, "FAILED");
+        string output = Path.Combine(root, "textures", "result.dds");
+        string work = Path.Combine(root, "work");
+
+        // Act
+        await texconv.EncodeBc7Async(ImagingTestData.Gradient(16, 16), output, work, srgb: false, TestContext.Current.CancellationToken);
+        RgbaImage decoded = await texconv.DecodeAsync(output, work, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal((16, 16), (decoded.Width, decoded.Height));
+    }
+
+    [Fact]
     public async Task EncodeBc7Async_ExistingOutput_IsReplaced()
     {
         // Arrange

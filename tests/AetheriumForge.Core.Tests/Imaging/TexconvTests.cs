@@ -108,6 +108,11 @@ public sealed class TexconvTests
 
     [Theory]
     [InlineData("writing x.dds FAILED (80070003)", true)]
+    [InlineData(@"reading C:\work\bad.dds FAILED (80004005: Unspecified error )", true)]
+    [InlineData(@"writing C:\out\good.png FAILED (80070003: The system cannot find the path specified. )", true)]
+    [InlineData("reading x.dds (16x16 BC7_UNORM 2D)\r\n FAILED [resize] (80070057: The parameter is incorrect. )", true)]
+    [InlineData("reading D:\\FAILED\\work\\good.dds (16x16,5 BC7_UNORM 2D) as (16x16 R8G8B8A8_UNORM 2D a:NonPM)\r\nwriting D:\\FAILED\\out\\good.png", false)]
+    [InlineData(@"writing D:\mods\FAILED_textures\x.dds", false)]
     [InlineData("ERROR: Invalid GPU adapter index (99)!\nwriting x.dds", false)]
     [InlineData("writing x.dds", false)]
     public void ReportsFailure_Output_DetectsFailedMarker(string output, bool expected)
