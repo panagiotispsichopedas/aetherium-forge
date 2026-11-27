@@ -42,12 +42,20 @@ public static class AppHost
         // ── PAGE: Models ──
         services.AddSingleton<ModelsPagePlaceholder>(_ => new ModelsPagePlaceholder(new PagePlaceholderViewModel("Models")));
 
+        // ── PAGE: Rules (M5) ──
+        services.AddSingleton<RulesPagePlaceholder>(_ => new RulesPagePlaceholder(new PagePlaceholderViewModel("Rules")));
+
+        // ── PAGE: Compare (M5) ──
+        services.AddSingleton<ComparePagePlaceholder>(_ => new ComparePagePlaceholder(new PagePlaceholderViewModel("Compare")));
+
         services.AddSingleton<IReadOnlyDictionary<AppPage, object>>(sp => new Dictionary<AppPage, object>
         {
             [AppPage.Scan] = sp.GetRequiredService<ScanPagePlaceholder>().ViewModel,
             [AppPage.Queue] = sp.GetRequiredService<QueuePagePlaceholder>().ViewModel,
             [AppPage.Run] = sp.GetRequiredService<RunPagePlaceholder>().ViewModel,
             [AppPage.Models] = sp.GetRequiredService<ModelsPagePlaceholder>().ViewModel,
+            [AppPage.Rules] = sp.GetRequiredService<RulesPagePlaceholder>().ViewModel,
+            [AppPage.Compare] = sp.GetRequiredService<ComparePagePlaceholder>().ViewModel,
         });
         services.AddSingleton<MainWindowViewModel>();
         services.AddSingleton<MainWindow>();
@@ -63,4 +71,8 @@ public static class AppHost
     internal sealed record RunPagePlaceholder(object ViewModel);
 
     internal sealed record ModelsPagePlaceholder(object ViewModel);
+
+    internal sealed record RulesPagePlaceholder(object ViewModel);
+
+    internal sealed record ComparePagePlaceholder(object ViewModel);
 }

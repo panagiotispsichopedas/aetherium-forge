@@ -41,6 +41,12 @@ public sealed record GroupRule
     /// <summary>Gets the normal-map strength multiplier applied when renormalising normal maps. Defaults to 1.0.</summary>
     public double NormalStrength { get; init; } = 1.0;
 
+    /// <summary>
+    /// Gets the group's artistic look (§8), or <see langword="null"/> for neutral. JSON persistence and the <see cref="NormalStrength"/>
+    /// alias are wired by the M5 look work.
+    /// </summary>
+    public LookSettings? Look { get; init; }
+
     /// <summary>Determines whether two rules have equal values, comparing <see cref="Match"/> and <see cref="Kinds"/> element by element.</summary>
     /// <param name="other">The rule to compare with.</param>
     /// <returns><see langword="true"/> when all values are equal.</returns>
@@ -54,7 +60,8 @@ public sealed record GroupRule
         && Cap == other.Cap
         && MaxFactor == other.MaxFactor
         && Model == other.Model
-        && NormalStrength.Equals(other.NormalStrength);
+        && NormalStrength.Equals(other.NormalStrength)
+        && Equals(Look, other.Look);
 
     /// <inheritdoc/>
     public override int GetHashCode()
@@ -73,6 +80,7 @@ public sealed record GroupRule
         hash.Add(MaxFactor);
         hash.Add(Model);
         hash.Add(NormalStrength);
+        hash.Add(Look);
         return hash.ToHashCode();
     }
 }
