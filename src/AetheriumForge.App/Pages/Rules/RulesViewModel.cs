@@ -167,7 +167,7 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
     /// Loads the project's rules (the stored <c>rulesJson</c>, else the session's), its job rows, the model list and the GPU timings, and
     /// recounts. Unsaved edits are replaced.
     /// </summary>
-    /// <returns>A task that completes when loaded and recounted.</returns>
+    /// <returns>A task that completes when loaded; the recount follows after <see cref="RecomputeDelay"/>.</returns>
     public async Task LoadAsync()
     {
         var project = _session.Current;
@@ -206,8 +206,6 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
         {
             IsBusy = false;
         }
-
-        await PendingRecompute.ConfigureAwait(true);
     }
 
     /// <summary>Releases event subscriptions and cancels a pending recount.</summary>
@@ -648,7 +646,6 @@ public sealed partial class RulesViewModel : ObservableObject, IDisposable
             _rows = await ReadRowsAsync(store).ConfigureAwait(true);
             _rowsStale = false;
             ScheduleRecompute();
-            await PendingRecompute.ConfigureAwait(true);
         }
         catch (SqliteException ex)
         {
