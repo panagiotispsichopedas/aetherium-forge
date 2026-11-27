@@ -60,6 +60,13 @@ try {
     }
 
     Move-Item -LiteralPath $temp -Destination $target -Force
+
+    # The temp file could have been swapped between the check and the move; verify what actually landed.
+    if (-not (Test-Hash $target)) {
+        Remove-Item -LiteralPath $target -Force
+        throw "Installed texconv.exe failed hash verification after the move. Expected $TexconvSha256 (DirectXTex $TexconvTag). Removed $target."
+    }
+
     Write-Host "Installed $target"
 }
 finally {
