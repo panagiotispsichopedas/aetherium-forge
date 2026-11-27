@@ -17,11 +17,15 @@ namespace AetheriumForge.Core.Gpu;
 /// <para>The precision is chosen once, at the reference tile (<see cref="CalibrationOptions.PrecisionTileSize"/>), and then used at the
 /// final tile. The FP16/FP32 ratio barely depends on the tile size, and benchmarking both precisions at every probed size would double
 /// the calibration time.</para>
-/// <para>Memory: each probe runner is created, warmed up once at the smallest tile, and then the baseline is read. During the probe run
-/// <see cref="IGpuAdapterProvider.QueryVideoMemory"/> is sampled every <see cref="CalibrationOptions.MemorySampleInterval"/>; the tile
-/// fits when the peak usage above that baseline stays within <see cref="CalibrationOptions.BudgetFraction"/> of the baseline's
-/// <see cref="VideoMemoryInfo.Available"/>. After a tile is rejected the runner is recreated (and the baseline re-read), so cached
-/// buffers of the rejected size do not count against the next, smaller size.</para>
+/// <para>Memory: every probed tile gets a fresh runner, which is warmed up once at the smallest tile before the baseline is read. During
+/// the probe run <see cref="IGpuAdapterProvider.QueryVideoMemory"/> is sampled every <see cref="CalibrationOptions.MemorySampleInterval"/>;
+/// the tile fits when the peak usage above that baseline stays within <see cref="CalibrationOptions.BudgetFraction"/> of the baseline's
+/// <see cref="VideoMemoryInfo.Available"/>. A runner is never reused for a second tile size: DirectML keeps the buffers of every input
+/// size a session has run, so a reused runner would charge the previous probe's buffers to the next tile and make its first run pay for
+/// allocating next to them. Each probe therefore measures what a pipeline session that runs only that tile needs.</para>
+/// <para>Speed: a probe whose first run is more than <see cref="CalibrationOptions.MaxProbeSlowdown"/> times slower per pixel than the
+/// reference runs once more, and is rejected only when that warm run is too slow as well. A first run at a new size includes shader
+/// compilation and buffer allocation; paging to shared memory slows every run.</para>
 /// </remarks>
 public sealed partial class GpuProfiler
 {
@@ -342,11 +346,11 @@ public sealed partial class GpuProfiler
         var reference = ChoosePrecision(run, fp32, fp16, estimate);
         var precision = string.Equals(reference.Model.Precision, Fp16, StringComparison.OrdinalIgnoreCase) ? Fp16 : Fp32;
 
-        var (runner, tileSize, warm) = FindTileSize(run, reference, estimate);
+        var (runner, tileSize, warmRuns) = FindTileSize(run, reference, estimate);
         double secondsPerTile;
         using (runner)
         {
-            var warmups = warm ? Math.Max(0, options.WarmupRuns - 1) : options.WarmupRuns;
+            var warmups = Math.Max(0, options.WarmupRuns - warmRuns);
             var input = CreateInput(tileSize + (2 * options.Overlap));
             secondsPerTile = Benchmark(run, runner, input, warmups, ThroughputStep);
         }
@@ -476,14 +480,15 @@ public sealed partial class GpuProfiler
         return elapsed.TotalSeconds / count;
     }
 
-    private (IModelRunner Runner, int TileSize, bool Warm) FindTileSize(CalibrationRun run, Reference reference, int estimate)
+    private (IModelRunner Runner, int TileSize, int WarmRuns) FindTileSize(CalibrationRun run, Reference reference, int estimate)
     {
         var options = run.Options;
         int? largestFit = null;
         int? smallestFailure = null;
         var lastFailure = ProbeOutcome.Fits;
         var fitDuration = TimeSpan.Zero;
-        var warm = false;
+        var setupDuration = TimeSpan.Zero;
+        var warmRuns = 0;
         var tile = estimate;
         ProbeRunner? probeRunner = null;
         try
@@ -491,31 +496,27 @@ public sealed partial class GpuProfiler
             for (var probe = 1; ; probe++)
             {
                 run.CancellationToken.ThrowIfCancellationRequested();
-                var outcome = ProbeOutcome.OutOfMemory;
-                var duration = TimeSpan.Zero;
-                probeRunner ??= CreateProbeRunner(run, reference.Model, tile);
-                if (probeRunner is not null)
-                {
-                    (outcome, duration) = Probe(run, probeRunner, tile);
-                    if (outcome == ProbeOutcome.Fits && IsTooSlow(run, tile, duration, reference))
-                    {
-                        outcome = ProbeOutcome.TooSlow;
-                    }
-                }
 
-                if (outcome == ProbeOutcome.Fits)
+                // Every tile gets a fresh runner (see the class remarks): the previous probe's buffers must not count against this one.
+                probeRunner?.Runner.Dispose();
+                probeRunner = null;
+                var setupStarted = _timeProvider.GetTimestamp();
+                probeRunner = CreateProbeRunner(run, reference.Model, tile);
+                setupDuration = _timeProvider.GetElapsedTime(setupStarted);
+                var result = probeRunner is null ? new ProbeResult(ProbeOutcome.OutOfMemory, TimeSpan.Zero, 0) : Probe(run, probeRunner, tile, reference);
+                if (result.Outcome == ProbeOutcome.Fits)
                 {
                     largestFit = tile;
-                    fitDuration = duration;
-                    warm = true;
+                    fitDuration = result.Duration;
+                    warmRuns = result.Runs;
                 }
                 else
                 {
                     smallestFailure = tile;
-                    lastFailure = outcome;
+                    lastFailure = result.Outcome;
                     probeRunner?.Runner.Dispose();
                     probeRunner = null;
-                    warm = false;
+                    warmRuns = 0;
                 }
 
                 run.Report(TileStep, probe, options.MaxTileProbes);
@@ -531,10 +532,10 @@ public sealed partial class GpuProfiler
                         break;
                     }
 
-                    // Growing costs the probe plus the throughput runs (warm-ups after the probe and at least one timed run) at the
-                    // next size, each about duration × (input area ratio).
+                    // Growing costs a new runner (load and warm-up), the probe, and the throughput runs (warm-ups after the probe and at
+                    // least one timed run) at the next size, each about duration × (input area ratio).
                     var ratio = Math.Pow((next + (2.0 * options.Overlap)) / (fit + (2.0 * options.Overlap)), 2);
-                    var predicted = fitDuration * ratio * (Math.Max(1, options.WarmupRuns) + 1);
+                    var predicted = setupDuration + (fitDuration * ratio * (Math.Max(1, options.WarmupRuns) + 1));
                     if (run.Elapsed(_timeProvider) + predicted > options.TimeBudget)
                     {
                         LogTileSearchOutOfTime(_logger, fit, next);
@@ -553,15 +554,18 @@ public sealed partial class GpuProfiler
                 throw new VideoMemoryExhaustedException($"Even a {options.MinTileSize}-pixel tile {reason} on {run.Adapter.Name}.");
             }
 
-            var runner = probeRunner?.Runner;
+            // Keep the runner only when it belongs to the chosen tile; a runner that ran another size would carry that size's buffers.
+            var runner = tile == chosen ? probeRunner?.Runner : null;
             if (runner is null)
             {
+                probeRunner?.Runner.Dispose();
+                probeRunner = null;
                 runner = CreateRunner(run, reference.Model);
-                warm = false;
+                warmRuns = 0;
             }
 
             LogTileChosen(_logger, chosen, smallestFailure ?? 0);
-            return (runner, chosen, warm);
+            return (runner, chosen, warmRuns);
         }
         catch
         {
@@ -589,6 +593,7 @@ public sealed partial class GpuProfiler
         {
             runner?.Dispose();
             LogProbeOutOfMemory(_logger, tile, exception.Message);
+            LogProbeTrace(_logger, tile, null, null, null, null, 0, ProbeOutcome.OutOfMemory, "out of memory while loading or warming up the probe runner");
             return null;
         }
         catch
@@ -598,33 +603,35 @@ public sealed partial class GpuProfiler
         }
     }
 
-    private bool IsTooSlow(CalibrationRun run, int tile, TimeSpan duration, Reference reference)
+    /// <summary>
+    /// Returns how many times slower per input pixel a run at <paramref name="tile"/> is than the reference benchmark, or
+    /// <see langword="null"/> when the slowdown rule does not apply (below the reference tile, or no usable reference).
+    /// </summary>
+    private static double? Slowdown(CalibrationRun run, int tile, TimeSpan duration, Reference reference)
     {
         // Without a memory reading (or when the driver pages video memory out to shared memory instead of failing), a tile that is too
-        // big shows up as a run that is several times slower per pixel than the reference benchmark. Smaller tiles than the reference are
+        // big shows up as runs that are several times slower per pixel than the reference benchmark. Smaller tiles than the reference are
         // naturally less efficient, so the rule only applies at or above the reference size.
         if (tile < reference.TileSize || reference.SecondsPerInputPixel <= 0)
         {
-            return false;
+            return null;
         }
 
         var side = tile + (2.0 * run.Options.Overlap);
         var slowdown = duration.TotalSeconds / (side * side) / reference.SecondsPerInputPixel;
-        if (double.IsNaN(slowdown) || slowdown <= run.Options.MaxProbeSlowdown)
-        {
-            return false;
-        }
-
-        LogProbeTooSlow(_logger, tile, slowdown, run.Options.MaxProbeSlowdown);
-        return true;
+        return double.IsNaN(slowdown) ? null : slowdown;
     }
 
-    private (ProbeOutcome Outcome, TimeSpan Duration) Probe(CalibrationRun run, ProbeRunner probeRunner, int tile)
+    private static ulong? ToMiB(ulong? bytes) => bytes / (1024 * 1024);
+
+    private ProbeResult Probe(CalibrationRun run, ProbeRunner probeRunner, int tile, Reference reference)
     {
-        var input = CreateInput(tile + (2 * run.Options.Overlap));
+        var options = run.Options;
+        var input = CreateInput(tile + (2 * options.Overlap));
+        var baselineMiB = ToMiB(probeRunner.Baseline?.CurrentUsage);
         ulong? peak;
         TimeSpan duration;
-        using (var sampler = new MemorySampler(_adapterProvider, run.Adapter.Luid, _timeProvider, run.Options.MemorySampleInterval))
+        using (var sampler = new MemorySampler(_adapterProvider, run.Adapter.Luid, _timeProvider, options.MemorySampleInterval))
         {
             var started = _timeProvider.GetTimestamp();
             try
@@ -633,25 +640,67 @@ public sealed partial class GpuProfiler
             }
             catch (Exception exception) when (VideoMemoryErrors.IsOutOfMemory(exception))
             {
+                var failed = _timeProvider.GetElapsedTime(started);
                 LogProbeOutOfMemory(_logger, tile, exception.Message);
-                return (ProbeOutcome.OutOfMemory, _timeProvider.GetElapsedTime(started));
+                LogProbeTrace(_logger, tile, baselineMiB, null, null, null, failed.TotalMilliseconds, ProbeOutcome.OutOfMemory, "out of memory during the probe run");
+                return new ProbeResult(ProbeOutcome.OutOfMemory, failed, 1);
             }
 
             duration = _timeProvider.GetElapsedTime(started);
             peak = sampler.Stop();
         }
 
-        if (peak is not { } peakUsage || probeRunner.Baseline is not { } baseline)
+        ulong? used = null;
+        ulong? allowance = null;
+        if (peak is { } peakUsage && probeRunner.Baseline is { } baseline)
         {
-            LogProbeUnmeasured(_logger, tile, duration.TotalMilliseconds);
-            return (ProbeOutcome.Fits, duration);
+            used = peakUsage > baseline.CurrentUsage ? peakUsage - baseline.CurrentUsage : 0;
+            allowance = (ulong)(baseline.Available * options.BudgetFraction);
         }
 
-        var used = peakUsage > baseline.CurrentUsage ? peakUsage - baseline.CurrentUsage : 0;
-        var allowance = (ulong)(baseline.Available * run.Options.BudgetFraction);
-        var fits = used <= allowance;
-        LogProbe(_logger, tile, used / (1024 * 1024), allowance / (1024 * 1024), duration.TotalMilliseconds, fits);
-        return (fits ? ProbeOutcome.Fits : ProbeOutcome.OverBudget, duration);
+        var peakMiB = ToMiB(peak);
+        var usedMiB = ToMiB(used);
+        var allowanceMiB = ToMiB(allowance);
+        if (used > allowance)
+        {
+            LogProbeTrace(_logger, tile, baselineMiB, peakMiB, usedMiB, allowanceMiB, duration.TotalMilliseconds, ProbeOutcome.OverBudget, "peak above baseline exceeds the allowance");
+            return new ProbeResult(ProbeOutcome.OverBudget, duration, 1);
+        }
+
+        var memory = used is null ? "video memory not reported" : "peak within the allowance";
+        if (Slowdown(run, tile, duration, reference) is not { } first || first <= options.MaxProbeSlowdown)
+        {
+            LogProbeTrace(_logger, tile, baselineMiB, peakMiB, usedMiB, allowanceMiB, duration.TotalMilliseconds, ProbeOutcome.Fits, memory);
+            return new ProbeResult(ProbeOutcome.Fits, duration, 1);
+        }
+
+        // The first run at a new size also compiles shaders and allocates buffers; only a warm run that is still too slow means paging.
+        run.CancellationToken.ThrowIfCancellationRequested();
+        var warmStarted = _timeProvider.GetTimestamp();
+        try
+        {
+            probeRunner.Runner.Run(input);
+        }
+        catch (Exception exception) when (VideoMemoryErrors.IsOutOfMemory(exception))
+        {
+            var failed = _timeProvider.GetElapsedTime(warmStarted);
+            LogProbeOutOfMemory(_logger, tile, exception.Message);
+            LogProbeTrace(_logger, tile, baselineMiB, peakMiB, usedMiB, allowanceMiB, failed.TotalMilliseconds, ProbeOutcome.OutOfMemory, "out of memory during the warm run");
+            return new ProbeResult(ProbeOutcome.OutOfMemory, failed, 2);
+        }
+
+        var warmDuration = _timeProvider.GetElapsedTime(warmStarted);
+        var warm = Slowdown(run, tile, warmDuration, reference) ?? 0;
+        var detail = $"{memory}; first run {first:0.00}× and warm run {warm:0.00}× slower per pixel than the reference (limit {options.MaxProbeSlowdown:0.00}×)";
+        if (warm > options.MaxProbeSlowdown)
+        {
+            LogProbeTooSlow(_logger, tile, warm, options.MaxProbeSlowdown);
+            LogProbeTrace(_logger, tile, baselineMiB, peakMiB, usedMiB, allowanceMiB, warmDuration.TotalMilliseconds, ProbeOutcome.TooSlow, detail);
+            return new ProbeResult(ProbeOutcome.TooSlow, warmDuration, 2);
+        }
+
+        LogProbeTrace(_logger, tile, baselineMiB, peakMiB, usedMiB, allowanceMiB, warmDuration.TotalMilliseconds, ProbeOutcome.Fits, detail);
+        return new ProbeResult(ProbeOutcome.Fits, warmDuration, 2);
     }
 
     [LoggerMessage(EventId = 1, Level = LogLevel.Warning, Message = "No usable GPU adapter among {Count} reported adapters")]
@@ -678,14 +727,14 @@ public sealed partial class GpuProfiler
     [LoggerMessage(EventId = 8, Level = LogLevel.Warning, Message = "Out of video memory in the precision benchmark at tile {Tile}; retrying at {Smaller}")]
     private static partial void LogPrecisionOutOfMemory(ILogger logger, int tile, int smaller);
 
-    [LoggerMessage(EventId = 9, Level = LogLevel.Debug, Message = "Tile {Tile}: peak {UsedMiB} MiB above baseline, allowance {AllowanceMiB} MiB, {Ms:F0} ms, fits {Fits}")]
-    private static partial void LogProbe(ILogger logger, int tile, ulong usedMiB, ulong allowanceMiB, double ms, bool fits);
+    [LoggerMessage(
+        EventId = 9,
+        Level = LogLevel.Debug,
+        Message = "Probe tile {Tile}: baseline {BaselineMiB} MiB, peak {PeakMiB} MiB, peak - baseline {UsedMiB} MiB, allowance {AllowanceMiB} MiB, {Ms:F0} ms; {Decision}: {Reason}")]
+    private static partial void LogProbeTrace(ILogger logger, int tile, ulong? baselineMiB, ulong? peakMiB, ulong? usedMiB, ulong? allowanceMiB, double ms, ProbeOutcome decision, string reason);
 
     [LoggerMessage(EventId = 10, Level = LogLevel.Debug, Message = "Tile {Tile}: out of video memory ({Reason})")]
     private static partial void LogProbeOutOfMemory(ILogger logger, int tile, string reason);
-
-    [LoggerMessage(EventId = 11, Level = LogLevel.Debug, Message = "Tile {Tile}: ran in {Ms:F0} ms; video memory not reported, only out-of-memory and slowdown limit the tile")]
-    private static partial void LogProbeUnmeasured(ILogger logger, int tile, double ms);
 
     [LoggerMessage(EventId = 12, Level = LogLevel.Information, Message = "Tile search stops at {Tile}: trying {Next} would exceed the time budget")]
     private static partial void LogTileSearchOutOfTime(ILogger logger, int tile, int next);
@@ -702,7 +751,7 @@ public sealed partial class GpuProfiler
     [LoggerMessage(EventId = 16, Level = LogLevel.Information, Message = "Reference benchmark at tile {Tile} ({Precision}): {Ms:F1} ms")]
     private static partial void LogReference(ILogger logger, int tile, string precision, double ms);
 
-    [LoggerMessage(EventId = 17, Level = LogLevel.Information, Message = "Tile {Tile}: run {Slowdown:F2}× slower per pixel than the reference (limit {Limit:F2}×); treating it as too big")]
+    [LoggerMessage(EventId = 17, Level = LogLevel.Information, Message = "Tile {Tile}: warm run {Slowdown:F2}× slower per pixel than the reference (limit {Limit:F2}×); treating it as too big")]
     private static partial void LogProbeTooSlow(ILogger logger, int tile, double slowdown, double limit);
 
     private enum ProbeOutcome
@@ -731,6 +780,9 @@ public sealed partial class GpuProfiler
 
     /// <summary>A warmed-up probe runner and the memory reading taken after its warm-up.</summary>
     private sealed record ProbeRunner(IModelRunner Runner, VideoMemoryInfo? Baseline);
+
+    /// <summary>A probe's decision, the run duration it is based on, and how many runs it made at the probed size.</summary>
+    private readonly record struct ProbeResult(ProbeOutcome Outcome, TimeSpan Duration, int Runs);
 
     /// <summary>
     /// Samples the adapter's current usage on a timer while a probe runs and keeps the peak (IMPLEMENTATION_GUIDE §9, step 4).
