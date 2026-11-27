@@ -249,6 +249,34 @@ public sealed class JobStoreQueryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SetStateReturningIdsAsync_FromStates_ReturnsOnlyChangedIds()
+    {
+        // Arrange
+        var ids = (await QueryAsync(JobQuery.All)).Select(job => job.Id).ToList();
+        var doneId = await IdOfAsync(@"textures\clutter\bucket01_n.dds");
+
+        // Act
+        var changed = await _store.SetStateReturningIdsAsync(ids, JobState.Queued, null, [JobState.Done], Ct);
+
+        // Assert
+        Assert.Equal([doneId], changed);
+    }
+
+    [Fact]
+    public async Task SetStateReturningIdsAsync_JobAlreadyMoved_ReturnsEmpty()
+    {
+        // Arrange: the job left Done before the caller's update ran.
+        var doneId = await IdOfAsync(@"textures\clutter\bucket01_n.dds");
+        await _store.SetStateAsync([doneId], JobState.Skipped, null, Ct);
+
+        // Act
+        var changed = await _store.SetStateReturningIdsAsync([doneId], JobState.Queued, null, [JobState.Done], Ct);
+
+        // Assert
+        Assert.Empty(changed);
+    }
+
+    [Fact]
     public async Task SetStateAsync_ToQueued_ClearsErrorTimeAndFinishKeepsAttempts()
     {
         // Arrange

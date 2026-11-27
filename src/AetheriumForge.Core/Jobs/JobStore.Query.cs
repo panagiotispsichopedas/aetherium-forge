@@ -148,6 +148,26 @@ public sealed partial class JobStore
         JobState state,
         string? error,
         IReadOnlyCollection<JobState>? fromStates,
+        CancellationToken ct = default) =>
+        (await SetStateReturningIdsAsync(ids, state, error, fromStates, ct).ConfigureAwait(false)).Count;
+
+    /// <summary>
+    /// Same as <see cref="SetStateAsync(IReadOnlyCollection{long}, JobState, string?, IReadOnlyCollection{JobState}?, CancellationToken)"/>,
+    /// but returns the ids of the jobs that were actually changed, so a caller can act only on those (for example delete the
+    /// outputs of exactly the jobs that left Done).
+    /// </summary>
+    /// <param name="ids">The job ids; unknown ids are ignored.</param>
+    /// <param name="state">The new state; not <see cref="JobState.Running"/> (only the pipeline takes jobs).</param>
+    /// <param name="error">The new error, or <see langword="null"/> to clear it.</param>
+    /// <param name="fromStates">Only change jobs in these states; <see langword="null"/> allows any state except Running.</param>
+    /// <param name="ct">Cancels the operation; nothing is written when cancelled.</param>
+    /// <returns>The ids of the jobs changed, in the order given (duplicates removed).</returns>
+    /// <exception cref="ArgumentException"><paramref name="state"/> is <see cref="JobState.Running"/>.</exception>
+    public async Task<IReadOnlyList<long>> SetStateReturningIdsAsync(
+        IReadOnlyCollection<long> ids,
+        JobState state,
+        string? error,
+        IReadOnlyCollection<JobState>? fromStates,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(ids);
@@ -163,7 +183,7 @@ public sealed partial class JobStore
         {
             if (fromStates.Count == 0)
             {
-                return 0;
+                return [];
             }
 
             sql.Append(" AND state IN (");
@@ -179,7 +199,7 @@ public sealed partial class JobStore
             sql.Append(')');
         }
 
-        return await UpdateManyAsync(ids, sql.Append(';').ToString(), parameters, ct).ConfigureAwait(false);
+        return await UpdateManyReturningIdsAsync(ids, sql.Append(';').ToString(), parameters, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -194,8 +214,8 @@ public sealed partial class JobStore
         ArgumentNullException.ThrowIfNull(ids);
         ArgumentException.ThrowIfNullOrWhiteSpace(model);
 
-        return await UpdateManyAsync(ids, "UPDATE job SET model = $model WHERE id = $id AND state <> 'Running';", [("$model", model)], ct)
-            .ConfigureAwait(false);
+        return (await UpdateManyReturningIdsAsync(ids, "UPDATE job SET model = $model WHERE id = $id AND state <> 'Running';", [("$model", model)], ct)
+            .ConfigureAwait(false)).Count;
     }
 
     /// <summary>
@@ -300,11 +320,15 @@ public sealed partial class JobStore
         }
     }
 
-    private async Task<int> UpdateManyAsync(IReadOnlyCollection<long> ids, string sql, IReadOnlyList<(string Name, object Value)> parameters, CancellationToken ct)
+    private async Task<IReadOnlyList<long>> UpdateManyReturningIdsAsync(
+        IReadOnlyCollection<long> ids,
+        string sql,
+        IReadOnlyList<(string Name, object Value)> parameters,
+        CancellationToken ct)
     {
         if (ids.Count == 0)
         {
-            return 0;
+            return [];
         }
 
         var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
@@ -324,11 +348,14 @@ public sealed partial class JobStore
                     }
 
                     var id = command.Parameters.Add("$id", SqliteType.Integer);
-                    var affected = 0;
+                    var affected = new List<long>();
                     foreach (var jobId in ids.Distinct())
                     {
                         id.Value = jobId;
-                        affected += await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        if (await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false) > 0)
+                        {
+                            affected.Add(jobId);
+                        }
                     }
 
                     await transaction.CommitAsync(ct).ConfigureAwait(false);

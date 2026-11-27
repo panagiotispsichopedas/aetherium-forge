@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using AetheriumForge.Core.Jobs;
+using Avalonia;
 using Avalonia.Controls;
 
 namespace AetheriumForge.App.Pages.Queue;
@@ -13,6 +14,7 @@ public sealed partial class QueueView : UserControl
     private readonly Dictionary<DataGridColumn, string> _headers = [];
     private QueueViewModel? _viewModel;
     private bool _restoringSelection;
+    private bool _subscribed;
 
     /// <summary>Initialises the view.</summary>
     public QueueView()
@@ -30,22 +32,57 @@ public sealed partial class QueueView : UserControl
     /// <inheritdoc />
     protected override void OnDataContextChanged(EventArgs e)
     {
-        if (_viewModel is not null)
-        {
-            _viewModel.SelectionRestoreRequested -= OnSelectionRestoreRequested;
-            _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
-        }
-
+        DetachViewModel();
         _viewModel = DataContext as QueueViewModel;
-        if (_viewModel is not null)
+        if (IsInWindow())
         {
-            _viewModel.SelectionRestoreRequested += OnSelectionRestoreRequested;
-            _viewModel.PropertyChanged += OnViewModelPropertyChanged;
-            UpdateSortGlyphs();
+            AttachViewModel();
         }
 
         base.OnDataContextChanged(e);
     }
+
+    /// <inheritdoc />
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        AttachViewModel();
+    }
+
+    /// <inheritdoc />
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        // The view model is a singleton that outlives this view: drop its references to us so a detached view can be collected.
+        DetachViewModel();
+        base.OnDetachedFromVisualTree(e);
+    }
+
+    private void AttachViewModel()
+    {
+        if (_viewModel is null || _subscribed)
+        {
+            return;
+        }
+
+        _viewModel.SelectionRestoreRequested += OnSelectionRestoreRequested;
+        _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        _subscribed = true;
+        UpdateSortGlyphs();
+    }
+
+    private void DetachViewModel()
+    {
+        if (_viewModel is null || !_subscribed)
+        {
+            return;
+        }
+
+        _viewModel.SelectionRestoreRequested -= OnSelectionRestoreRequested;
+        _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        _subscribed = false;
+    }
+
+    private bool IsInWindow() => TopLevel.GetTopLevel(this) is not null;
 
     private void OnSorting(object? sender, DataGridColumnEventArgs e)
     {

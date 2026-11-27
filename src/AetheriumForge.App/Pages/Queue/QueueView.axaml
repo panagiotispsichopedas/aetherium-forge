@@ -36,6 +36,8 @@
         <Button Content="Skip" Command="{Binding SkipCommand}" ToolTip.Tip="Queued or Failed → Skipped" />
         <Button Content="Re-queue…" Command="{Binding RequeueCommand}" ToolTip.Tip="Done → Queued; deletes the output file" />
         <Button Content="Change model…" Command="{Binding ChangeModelCommand}" />
+        <TextBlock Text="{Binding LockReason}" IsVisible="{Binding IsLocked}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="8,0,0,0"
+                   Foreground="{DynamicResource SystemControlErrorTextForegroundBrush}" />
       </StackPanel>
       <TextBlock Text="{Binding Summary}" Opacity="0.7" VerticalAlignment="Center" HorizontalAlignment="Right" />
     </DockPanel>

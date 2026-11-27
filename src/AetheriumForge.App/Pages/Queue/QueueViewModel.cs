@@ -31,6 +31,9 @@ public sealed partial class QueueViewModel : ObservableObject, IDisposable
     /// <summary>The label of the "any group" and "any kind" filter entries.</summary>
     public const string AnyValue = "(all)";
 
+    /// <summary>The reason shown next to the actions while a run is active.</summary>
+    public const string RunLockReason = "Locked while forging";
+
     /// <summary>The text-search debounce.</summary>
     public static readonly TimeSpan SearchDebounce = TimeSpan.FromMilliseconds(250);
 
@@ -59,6 +62,7 @@ public sealed partial class QueueViewModel : ObservableObject, IDisposable
     private long _loadVersion;
     private bool _disposed;
     private bool _suppressFilterEvents;
+    private bool _swappingRows;
     private IReadOnlyList<long> _pendingRequeueIds = [];
 
     /// <summary>Initialises the view model.</summary>
@@ -164,7 +168,14 @@ public sealed partial class QueueViewModel : ObservableObject, IDisposable
 
     /// <summary>Gets a value indicating whether a run is active (any runner state but Idle); state-changing actions are disabled.</summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(LockReason), nameof(IsLocked))]
     public partial bool IsRunActive { get; private set; }
+
+    /// <summary>Gets why the actions are disabled (<see cref="RunLockReason"/> during a run), or an empty string.</summary>
+    public string LockReason => IsRunActive ? RunLockReason : string.Empty;
+
+    /// <summary>Gets a value indicating whether <see cref="LockReason"/> is shown.</summary>
+    public bool IsLocked => IsRunActive;
 
     /// <summary>Gets a value indicating whether an action is being applied.</summary>
     [ObservableProperty]
@@ -215,7 +226,7 @@ public sealed partial class QueueViewModel : ObservableObject, IDisposable
     /// <summary>Gets the summary line, for example <c>5,402 jobs · 3 selected · loaded in 41 ms</c>.</summary>
     public string Summary => string.Create(
         CultureInfo.CurrentCulture,
-        $"{RowCount:N0} jobs · {SelectedCount:N0} selected · loaded in {LastLoadMilliseconds:0} ms{(IsRunActive ? " · run active: actions disabled" : string.Empty)}");
+        $"{RowCount:N0} jobs · {SelectedCount:N0} selected · loaded in {LastLoadMilliseconds:0} ms");
 
     /// <summary>Gets the task of the latest load (tests await it).</summary>
     internal Task LoadTask { get; private set; } = Task.CompletedTask;
@@ -228,6 +239,12 @@ public sealed partial class QueueViewModel : ObservableObject, IDisposable
     public void UpdateSelection(IEnumerable<JobRowViewModel> rows)
     {
         ArgumentNullException.ThrowIfNull(rows);
+
+        // Swapping Rows makes the grid drop its selection and report an empty one; that is not the user's choice.
+        if (_swappingRows)
+        {
+            return;
+        }
 
         _selectedIds.Clear();
         foreach (var row in rows)
@@ -368,7 +385,8 @@ public sealed partial class QueueViewModel : ObservableObject, IDisposable
         IsBusy = true;
         try
         {
-            var rows = Rows.Where(row => ids.Contains(row.Id)).ToList();
+            // Only rows that are still Done: a row may have changed state since the prompt was shown.
+            var rows = Rows.Where(row => ids.Contains(row.Id) && row.State == JobState.Done).ToList();
             var accepted = new List<(long Id, string File)>();
             var rejected = 0;
             foreach (var row in rows)
@@ -386,12 +404,15 @@ public sealed partial class QueueViewModel : ObservableObject, IDisposable
 
             // State first: a Queued job whose old output survives is simply overwritten by the next run, whereas a Done job
             // whose output was deleted would never be redone.
-            var changed = await Task.Run(() => store.SetStateAsync([.. accepted.Select(item => item.Id)], JobState.Queued, null, _requeueFrom)).ConfigureAwait(true);
-            var deleteFailures = await Task.Run(() => DeleteOutputs(accepted.Select(item => item.File))).ConfigureAwait(true);
+            // The store re-checks Done inside its transaction and reports which jobs it changed; only their outputs are deleted.
+            var changedIds = (await Task.Run(() => store.SetStateReturningIdsAsync([.. accepted.Select(item => item.Id)], JobState.Queued, null, _requeueFrom)).ConfigureAwait(true))
+                .ToHashSet();
+            var outputRoot = project.OutputRoot;
+            var deleteFailures = await Task.Run(() => DeleteOutputs(outputRoot, accepted.Where(item => changedIds.Contains(item.Id)).Select(item => item.File))).ConfigureAwait(true);
 
             StatusMessage = string.Create(
                 CultureInfo.CurrentCulture,
-                $"Re-queue: {changed:N0} job(s) queued{(rejected > 0 ? $", {rejected:N0} rejected (output path outside {OutputTexturesFolder()})" : string.Empty)}{(deleteFailures > 0 ? $", {deleteFailures:N0} output file(s) could not be deleted (see log)" : string.Empty)}.");
+                $"Re-queue: {changedIds.Count:N0} job(s) queued{(rejected > 0 ? $", {rejected:N0} rejected (output path outside {OutputTexturesFolder()})" : string.Empty)}{(deleteFailures > 0 ? $", {deleteFailures:N0} output file(s) not deleted (see log)" : string.Empty)}.");
             _session.NotifyJobsChanged();
         }
         catch (Exception ex) when (ex is DbException or IOException or InvalidOperationException)
@@ -405,9 +426,30 @@ public sealed partial class QueueViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand(CanExecute = nameof(CanChangeModel))]
-    private void ChangeModel()
+    private async Task ChangeModelAsync()
     {
-        var models = _modelSource().Select(model => model.Name).ToList();
+        // Discovery reads the models folder: keep that I/O off the UI thread.
+        List<string> models;
+        IsBusy = true;
+        try
+        {
+            models = await Task.Run(() => _modelSource().Select(model => model.Name).ToList()).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            ReportActionFailure("Change model", ex);
+            return;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+
+        if (IsRunActive)
+        {
+            return;
+        }
+
         AvailableModels = models;
         SelectedModel = models.Count > 0 ? models[0] : null;
         if (models.Count == 0)
@@ -484,13 +526,20 @@ public sealed partial class QueueViewModel : ObservableObject, IDisposable
         StatusMessage = $"{action} failed: {ex.Message}";
     }
 
-    private int DeleteOutputs(IEnumerable<string> files)
+    private int DeleteOutputs(string outputRoot, IEnumerable<string> files)
     {
         var failures = 0;
         foreach (var file in files)
         {
             try
             {
+                if (!QueueOutputPaths.IsFreeOfLinks(outputRoot, file))
+                {
+                    failures++;
+                    LogLinkedOutputSkipped(file);
+                    continue;
+                }
+
                 File.Delete(file);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -753,8 +802,21 @@ public sealed partial class QueueViewModel : ObservableObject, IDisposable
             rows.Add(byId.TryGetValue(record.Id, out var row) ? row.Update(record) : new JobRowViewModel(record));
         }
 
-        Rows = new ObservableCollection<JobRowViewModel>(rows);
+        // Work out what to keep before the swap: the grid clears its selection when ItemsSource changes, and that report is ignored.
         var keep = rows.Where(row => _selectedIds.Contains(row.Id)).ToList();
+        _swappingRows = true;
+        try
+        {
+            Rows = new ObservableCollection<JobRowViewModel>(rows);
+        }
+        finally
+        {
+            _swappingRows = false;
+        }
+
+        // Rows filtered out are no longer selected; the count must match what the grid shows.
+        _selectedIds.IntersectWith(keep.Select(row => row.Id));
+        SelectedCount = _selectedIds.Count;
         if (keep.Count > 0)
         {
             SelectionRestoreRequested?.Invoke(this, keep);
@@ -824,6 +886,9 @@ public sealed partial class QueueViewModel : ObservableObject, IDisposable
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Re-queue rejected {JobPath}: its output would be outside {OutputRoot}\\textures")]
     private partial void LogRejectedOutputPath(string jobPath, string outputRoot);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Re-queue did not delete {OutputFile}: a junction or symbolic link lies on its path")]
+    private partial void LogLinkedOutputSkipped(string outputFile);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Re-queue could not delete {OutputFile}")]
     private partial void LogDeleteFailed(Exception exception, string outputFile);

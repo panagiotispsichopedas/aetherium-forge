@@ -504,6 +504,45 @@ public sealed class QueueViewModelTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ConfirmRequeueCommand_JobLeftDoneAfterPrompt_KeepsOutput()
+    {
+        // Arrange: the job is skipped elsewhere between the prompt and the confirmation (the page has not refreshed yet).
+        var viewModel = await OpenAsync();
+        Directory.CreateDirectory(Path.GetDirectoryName(OutputFile(DonePath))!);
+        await File.WriteAllTextAsync(OutputFile(DonePath), "dds", Ct);
+        Select(viewModel, DonePath);
+        viewModel.RequeueCommand.Execute(null);
+        await _store.SetStateAsync([Row(viewModel, DonePath).Id], JobState.Skipped, null, Ct);
+
+        // Act
+        await viewModel.ConfirmRequeueCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal((true, JobState.Skipped), (File.Exists(OutputFile(DonePath)), (await StoredAsync(DonePath)).State));
+    }
+
+    [Fact]
+    public async Task ConfirmRequeueCommand_RowRefreshedOutOfDone_KeepsOutput()
+    {
+        // Arrange: the job moved to Failed and the page refreshed before the confirmation.
+        var viewModel = await OpenAsync();
+        Directory.CreateDirectory(Path.GetDirectoryName(OutputFile(DonePath))!);
+        await File.WriteAllTextAsync(OutputFile(DonePath), "dds", Ct);
+        Select(viewModel, DonePath);
+        viewModel.RequeueCommand.Execute(null);
+        await _store.SetStateAsync([Row(viewModel, DonePath).Id], JobState.Failed, "later", Ct);
+        _session.NotifyJobsChanged();
+        _time.Advance(QueueViewModel.RefreshInterval);
+        await viewModel.LoadTask;
+
+        // Act
+        await viewModel.ConfirmRequeueCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal((true, JobState.Failed), (File.Exists(OutputFile(DonePath)), (await StoredAsync(DonePath)).State));
+    }
+
+    [Fact]
     public async Task ConfirmRequeueCommand_MissingOutputFile_StillQueues()
     {
         // Arrange
@@ -526,10 +565,50 @@ public sealed class QueueViewModelTests : IAsyncLifetime
         Select(viewModel, QueuedPath);
 
         // Act
-        viewModel.ChangeModelCommand.Execute(null);
+        await viewModel.ChangeModelCommand.ExecuteAsync(null);
 
         // Assert
         Assert.Equal((true, "model-a,model-b"), (viewModel.IsModelPickerOpen, string.Join(',', viewModel.AvailableModels)));
+    }
+
+    [Fact]
+    public async Task ChangeModelCommand_ModelsFolderUnreadable_ReportsErrorAndKeepsPickerClosed()
+    {
+        // Arrange
+        _session.Open(_root, _store);
+        _viewModel = new QueueViewModel(
+            _session, _runner, _navigation, _time, new InlineUiDispatcher(), () => throw new UnauthorizedAccessException("denied"), NullLogger<QueueViewModel>.Instance);
+        await _viewModel.LoadTask;
+        Select(_viewModel, QueuedPath);
+
+        // Act
+        await _viewModel.ChangeModelCommand.ExecuteAsync(null);
+
+        // Assert
+        Assert.Equal((false, "Change model failed: denied"), (_viewModel.IsModelPickerOpen, _viewModel.StatusMessage));
+    }
+
+    [Fact]
+    public async Task LockReason_RunActive_ShowsLockedWhileForging()
+    {
+        // Arrange
+        var viewModel = await OpenAsync();
+
+        // Act
+        _runner.SetState(PipelineState.Running);
+
+        // Assert
+        Assert.Equal((true, QueueViewModel.RunLockReason), (viewModel.IsLocked, viewModel.LockReason));
+    }
+
+    [Fact]
+    public async Task LockReason_Idle_IsEmpty()
+    {
+        // Act
+        var viewModel = await OpenAsync();
+
+        // Assert
+        Assert.Equal((false, string.Empty), (viewModel.IsLocked, viewModel.LockReason));
     }
 
     [Fact]
@@ -541,7 +620,7 @@ public sealed class QueueViewModelTests : IAsyncLifetime
         Select(viewModel, QueuedPath);
 
         // Act
-        viewModel.ChangeModelCommand.Execute(null);
+        await viewModel.ChangeModelCommand.ExecuteAsync(null);
 
         // Assert
         Assert.Equal((false, true), (viewModel.IsModelPickerOpen, viewModel.StatusMessage.StartsWith("No models", StringComparison.Ordinal)));
@@ -553,7 +632,7 @@ public sealed class QueueViewModelTests : IAsyncLifetime
         // Arrange
         var viewModel = await OpenAsync();
         Select(viewModel, QueuedPath, DonePath);
-        viewModel.ChangeModelCommand.Execute(null);
+        await viewModel.ChangeModelCommand.ExecuteAsync(null);
         viewModel.SelectedModel = "model-b";
 
         // Act
@@ -679,6 +758,45 @@ public sealed class QueueViewModelTests : IAsyncLifetime
 
         // Assert
         Assert.Equal([DonePath], restored!.Select(row => row.Path));
+    }
+
+    [Fact]
+    public async Task SortBy_GridClearsSelectionOnSwap_KeepsSelection()
+    {
+        // Arrange: like the DataGrid, report an empty selection whenever Rows is replaced.
+        var viewModel = await OpenAsync();
+        Select(viewModel, DonePath, FailedPath);
+        viewModel.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(QueueViewModel.Rows))
+            {
+                viewModel.UpdateSelection([]);
+            }
+        };
+        IReadOnlyList<JobRowViewModel>? restored = null;
+        viewModel.SelectionRestoreRequested += (_, rows) => restored = rows;
+
+        // Act
+        viewModel.SortBy(JobSortColumn.Path);
+        await viewModel.LoadTask;
+
+        // Assert
+        Assert.Equal((2, $"{FailedPath},{DonePath}"), (viewModel.SelectedCount, string.Join(',', restored!.Select(row => row.Path))));
+    }
+
+    [Fact]
+    public async Task FilterChange_SelectedRowFilteredOut_DropsItFromSelection()
+    {
+        // Arrange
+        var viewModel = await OpenAsync();
+        Select(viewModel, DonePath, FailedPath);
+
+        // Act
+        viewModel.StateFilters.Single(option => option.State == JobState.Done).IsSelected = false;
+        await viewModel.LoadTask;
+
+        // Assert
+        Assert.Equal(1, viewModel.SelectedCount);
     }
 
     [Fact]
