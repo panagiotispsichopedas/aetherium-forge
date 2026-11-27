@@ -280,6 +280,34 @@ Also skip cubemaps (caps2 `0x200`).
 
 **Automatic small/large separation:** besides path patterns, a rule can match on source size (`sourceMax <= 512`) or kind. The Rules screen shows live counts per group before any processing.
 
+### Look (artistic direction per group)
+
+Each group can carry an optional `look` block that steers how the output looks. Every value defaults to neutral, which gives the plain model output (current behaviour).
+
+```json
+"look": {
+  "aiStrength": 1.0,
+  "sharpen": { "amount": 0.0, "radius": 1.0 },
+  "denoise": null,
+  "brightness": 0.0, "contrast": 1.0, "gamma": 1.0, "saturation": 1.0, "temperature": 0.0,
+  "normalStrength": 1.0,
+  "specularScale": 1.0
+}
+```
+
+| Control | Applies to | Effect |
+|---|---|---|
+| `aiStrength` (0–1) | all kinds that use the model | Blends the AI output with a plain Lanczos upscale of the source. Below 1, it tames over-sharpened, "painted" AI detail. |
+| `sharpen.amount`, `sharpen.radius` | diffuse, glow, backlight | Unsharp mask after resizing. 0 = off. |
+| `denoise` (0–1 or null) | models that support it | Denoise strength for models published with a denoise variant (for example `realesr-general-wdn-x4v3`, blended by weight interpolation at load time). Null = the model's default. |
+| `brightness` (−1–1), `contrast` (0.5–2), `gamma` (0.5–2), `saturation` (0–2), `temperature` (−1–1, cool to warm) | diffuse, glow, backlight only | Colour grading in linear light after resizing. Never applied to normal, specular, mask or parallax maps, which encode data, not colour. |
+| `normalStrength` | normal maps | "How 3D": scales the XY of tangent-space normals before renormalising (§10 step 6). Replaces the group-level `normalStrength`, which stays as an alias for compatibility. |
+| `specularScale` (0–2) | specular maps and the specular alpha of normal maps | "How shiny": scales specular intensity, clamped to 0–1. |
+
+Order in §10: upscale → AI-strength blend → resize → sharpen → colour grading (colour kinds) → normal strength (normals) → specular scale → merge alpha → encode.
+
+The look block is part of the rules JSON, so it is saved with the project and exported with the rules. The job store records a hash of the effective look per job. Changing a group's look re-queues its finished jobs only when the user confirms ("Apply to finished textures?").
+
 ---
 
 ## 9. Upscaling with ONNX Runtime + DirectML
@@ -348,6 +376,7 @@ DXGI interop lives in a separate `AetheriumForge.Native` project that uses `Libr
 4. **Upscale** RGB with the group's model (tiled, DirectML).
 5. **Resize** to the target size (Lanczos/Mitchell) and keep the aspect ratio.
 6. **Normal maps:** convert RGB to a vector `v = rgb/127.5 − 1`, multiply XY by the group's normal strength, clamp Z to at least 0.05, normalise, and convert back. Never feed alpha (specular) through the AI; upscale it with bicubic.
+   - **Look** (§8): apply the group's look controls in the order given there (AI-strength blend, sharpen, colour grading, specular scale). With the neutral defaults this step changes nothing.
 7. **Merge alpha** (resized with bicubic) if it was kept.
 8. **Encode:** `texconv -nologo -y -f BC7_UNORM -m 0 -o <tmpOut> <file.png>` (BC7 is GPU-accelerated by default; `-gpu N` selects the adapter, `-nogpu` is the fallback).
 9. **Commit atomically:** move the finished DDS from `tmpOut` to `output\textures\...`, then mark the job **Done** in the database. **Only this step makes an item count as finished.**
@@ -423,7 +452,7 @@ CREATE TABLE run (id INTEGER PRIMARY KEY, started TEXT, ended TEXT, done INT, fa
 | **Rules** | Group list (pattern, size range, kind, cap, max factor, model, normal strength), exclusions, minimum source size | Live counts and estimated output size and time per group; reset to defaults; import/export JSON |
 | **Queue** | Virtualised `DataGrid` of jobs: path, kind, group, source → target, model, state, time, error | Filter (state, group, kind, text), sort, multi-select → Retry / Skip / Re-queue / change model |
 | **Run** | Start / Pause / Resume / Stop; overall bar + ETA; per-stage lanes (decode, upscale, post, encode) with the current item and tile progress; throughput; GPU load and video memory; live log tail | Buttons enabled by state machine (Idle → Running ⇄ Paused → Stopping → Idle) |
-| **Compare** | Before/after slider for any finished job; zoom 100–400%; channel view (RGB, alpha, normal) | Pick the model per group by testing on samples (a "Preview 10 random from group" button) |
+| **Compare** | Before/after slider for any finished job; zoom 100–400%; channel view (RGB, alpha, normal) | Pick the model per group by testing on samples (a "Preview 10 random from group" button). **Look panel:** sliders for every §8 look control, with a live preview on the sample textures (rendered from a cached upscale, so slider changes don't re-run the AI) and presets (Neutral, Crisp, Soft, Vivid, Deep relief). "Apply to group" writes the look into the rules. |
 | **Package** | Archive plan (archives, sizes, plugins), output path, build button, result | Shows the load-order note and the PGPatcher/DynDOLOD reminder |
 | **Settings** | GPU adapter and its auto profile (precision, tile, throughput), tile overlap, worker counts, texconv path, models folder, log level | Recalibrate GPU; manual overrides for the profile |
 | **Models** (in Settings, and a first-run prompt) | Installed models (size, precision, licence, recommended tier) and models available from the manifest | Download with progress, Pause/Cancel and resume; hash check; delete; add a custom `.onnx` |
@@ -459,7 +488,7 @@ CREATE TABLE run (id INTEGER PRIMARY KEY, started TEXT, ended TEXT, done INT, fa
 | M2b | GPU auto profile (§9): DXGI adapters and memory budget (`AetheriumForge.Native`), precision benchmark, tile calibration, throughput, default model tier; model manifest and download service (hash-verified, resumable) | On the reference GTX 1080 the profile picks an adapter, precision and tile without manual settings; a model downloads, verifies and loads |
 | M3 | Pipeline: channels, Pause/Resume/Stop, ETA, crash recovery | A 30-minute run interrupted 3 ways resumes with no corruption |
 | M4 | UI: Scan, Queue, Run | Full run controllable from the UI |
-| M5 | Rules editor + Compare | Per-group model choice works end to end |
+| M5 | Rules editor + Compare, including per-group **look** controls (§8) with live preview | Per-group model choice and look (AI strength, sharpen, colour grading, normal strength, specular scale) work end to end, and neutral looks reproduce the M2 output exactly |
 | M6 | Packaging: BSA/ESL/FOMOD/zip | The mod installs in Vortex, the game loads it, and xEdit opens the plugins cleanly |
 | M7 | Import from prototype, rescan, settings, polish | The prototype's finished textures aren't redone |
 
