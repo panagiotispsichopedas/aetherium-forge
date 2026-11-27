@@ -464,7 +464,10 @@ The app follows the workflow, not the build order. The left rail is a **stepper*
 - The primary action sits bottom-right in an `ActionBar`. Destructive choices are never the accent or the default.
 - Errors, warnings and info use one `StatusBanner` pattern. Blocked actions always say why and offer the fix.
 - While forging, Scan, Rescan, Open project and Apply are locked, with a banner. Leaving a page with unsaved changes asks first.
-- **Design system:** one `Theme/AetheriumTheme.axaml` resource dictionary (Light and Dark `ThemeDictionaries`; follows the OS, tuned dark-first).
+- **Theme:** follows the OS by default. The user can override it in Models & GPU → Settings (or the rail menu): **System / Light / Dark**, applied instantly through `RequestedThemeVariant`.
+  - The choice is stored in the app-level settings database `%LOCALAPPDATA%\AetheriumForge\app.db` (SQLite, table `setting(key TEXT PRIMARY KEY, value TEXT)`), not in a project.
+  - App preferences that were in `app-settings.json` (recent projects, last project, first-run dismissal) move to the same database, with a one-time import of the old file.
+- **Design system:** one `Theme/AetheriumTheme.axaml` resource dictionary (Light and Dark `ThemeDictionaries`, tuned dark-first).
   - Semantic brushes Success, Warning, Danger and Info, kept separate from the ember accent.
   - Type ramp 28/20/15/13/11.
   - Spacing 4/8/12/16/24/32.
