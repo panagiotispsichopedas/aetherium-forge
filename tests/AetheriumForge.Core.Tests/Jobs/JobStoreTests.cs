@@ -250,6 +250,84 @@ public sealed class JobStoreTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MarkRunningAsync_SkippedJob_ThrowsInvalidOperationException()
+    {
+        // Arrange
+        await _store.UpsertJobsAsync([Job(@"textures\a.dds", JobState.Skipped)], Ct);
+        var id = (await SingleJobAsync(@"textures\a.dds")).Id;
+
+        // Act
+        var act = () => _store.MarkRunningAsync(id, Ct);
+
+        // Assert
+        await Assert.ThrowsAsync<InvalidOperationException>(act);
+    }
+
+    [Theory]
+    [InlineData(JobState.Skipped)]
+    [InlineData(JobState.Done)]
+    [InlineData(JobState.Running)]
+    [InlineData(JobState.Failed)]
+    public async Task TryMarkRunningAsync_NotQueued_ReturnsFalseAndKeepsState(JobState state)
+    {
+        // Arrange
+        await _store.UpsertJobsAsync([Job(@"textures\a.dds", state)], Ct);
+        var id = (await SingleJobAsync(@"textures\a.dds")).Id;
+
+        // Act
+        var taken = await _store.TryMarkRunningAsync(id, Ct);
+
+        // Assert
+        Assert.Equal((false, state), (taken, (await SingleJobAsync(@"textures\a.dds")).State));
+    }
+
+    [Fact]
+    public async Task TryMarkRunningAsync_Queued_ReturnsTrue()
+    {
+        // Arrange
+        await _store.UpsertJobsAsync([Job(@"textures\a.dds")], Ct);
+        var id = (await SingleJobAsync(@"textures\a.dds")).Id;
+
+        // Act
+        var taken = await _store.TryMarkRunningAsync(id, Ct);
+
+        // Assert
+        Assert.Equal((true, JobState.Running), (taken, (await SingleJobAsync(@"textures\a.dds")).State));
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(3, 3)]
+    public async Task MarkFailedAsync_WithAttempts_AddsAttemptsMade(int attempts, int expected)
+    {
+        // Arrange
+        await _store.UpsertJobsAsync([Job(@"textures\a.dds")], Ct);
+        var id = (await SingleJobAsync(@"textures\a.dds")).Id;
+
+        // Act
+        await _store.MarkFailedAsync(id, "boom", attempts, Ct);
+
+        // Assert
+        Assert.Equal(expected, (await SingleJobAsync(@"textures\a.dds")).Attempts);
+    }
+
+    [Fact]
+    public async Task MarkFailedAsync_NegativeAttempts_ThrowsArgumentOutOfRange()
+    {
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => _store.MarkFailedAsync(1, "boom", -1, Ct));
+    }
+
+    [Fact]
+    public async Task GetBusyTimeoutAsync_AnyConnection_UsesConfiguredTimeout()
+    {
+        // Act
+        var timeout = await _store.GetBusyTimeoutAsync(Ct);
+
+        // Assert
+        Assert.Equal(JobStore.BusyTimeoutMilliseconds, timeout);
+    }
+
+    [Fact]
     public async Task RequeueInterruptedAsync_MixedStates_RequeuesOnlyRunning()
     {
         // Arrange
