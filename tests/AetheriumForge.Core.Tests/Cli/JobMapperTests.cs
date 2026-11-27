@@ -111,4 +111,36 @@ public sealed class JobMapperTests
 
         Assert.Equal(1.0, job.NormalStrength);
     }
+
+    [Fact]
+    public void Map_TextureOverride_WinsOverGroupAndGlobalLooks()
+    {
+        // Arrange
+        var rules = StrongNormals() with { Look = new LookOverrides { NormalStrength = 0.5, Saturation = 1.2 } };
+        var mapper = new JobMapper(rules);
+
+        // Act
+        var job = mapper.Map(Job(512, 512, 2048, kind: "Normal"), new LookOverrides { NormalStrength = 2.5 });
+
+        // Assert
+        Assert.Equal((2.5, 1.2), (job.NormalStrength, job.EffectiveLook.Saturation));
+    }
+
+    [Fact]
+    public void Map_NoGroupMatchesWithGlobalLook_UsesGlobalLook()
+    {
+        // Arrange
+        var rules = new ForgeRules
+        {
+            Look = new LookOverrides { NormalStrength = 1.7 },
+            Groups = [new GroupRule { Name = "other", Match = [@"textures\nothing\*"], Model = "m", NormalStrength = 1.4 }],
+        };
+        var mapper = new JobMapper(rules);
+
+        // Act
+        var job = mapper.Map(Job(512, 512, 2048, kind: "Normal"));
+
+        // Assert
+        Assert.Equal(1.7, job.NormalStrength);
+    }
 }

@@ -1,7 +1,9 @@
 using System.Diagnostics;
+using AetheriumForge.Core.Common;
 using AetheriumForge.Core.Imaging;
 using AetheriumForge.Core.Jobs;
 using AetheriumForge.Core.Pipeline;
+using AetheriumForge.Core.Rules;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -34,7 +36,8 @@ internal sealed partial class SequentialPipeline : IForgePipeline
     private readonly int? _maxJobs;
     private readonly TimeProvider _time;
     private readonly ILogger<SequentialPipeline> _logger;
-    private readonly Func<long, double, Task> _markDone;
+    private readonly Func<long, double, string?, Task> _markDone;
+    private Dictionary<string, LookOverrides>? _textureLooks;
     private readonly PauseTokenSource _pause = new();
     private readonly Stopwatch _active = new();
     private readonly Lock _gate = new();
@@ -79,7 +82,7 @@ internal sealed partial class SequentialPipeline : IForgePipeline
     /// <param name="maxJobs">Process at most this many queued jobs.</param>
     /// <param name="time">Clock for progress throttling.</param>
     /// <param name="logger">Logger.</param>
-    /// <param name="markDone">Records a finished job; <see langword="null"/> uses <see cref="JobStore.MarkDoneAsync"/>.</param>
+    /// <param name="markDone">Records a finished job with its look hash; <see langword="null"/> uses <see cref="JobStore.MarkDoneAsync(long, double, string?, CancellationToken)"/>.</param>
     internal SequentialPipeline(
         JobStore store,
         TextureProcessor processor,
@@ -88,7 +91,7 @@ internal sealed partial class SequentialPipeline : IForgePipeline
         int? maxJobs,
         TimeProvider? time,
         ILogger<SequentialPipeline>? logger,
-        Func<long, double, Task>? markDone)
+        Func<long, double, string?, Task>? markDone)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(processor);
@@ -106,7 +109,7 @@ internal sealed partial class SequentialPipeline : IForgePipeline
         _maxJobs = maxJobs;
         _time = time ?? TimeProvider.System;
         _logger = logger ?? NullLogger<SequentialPipeline>.Instance;
-        _markDone = markDone ?? ((id, seconds) => store.MarkDoneAsync(id, seconds, CancellationToken.None));
+        _markDone = markDone ?? ((id, seconds, lookHash) => store.MarkDoneAsync(id, seconds, lookHash, CancellationToken.None));
     }
 
     /// <inheritdoc />
@@ -333,6 +336,9 @@ internal sealed partial class SequentialPipeline : IForgePipeline
 
     private async Task<List<JobRecord>> LoadQueuedAsync()
     {
+        _textureLooks = (await _store.ListTextureLooksAsync(CancellationToken.None).ConfigureAwait(false))
+            .ToDictionary(l => l.Path, l => l.Look, StringComparer.Ordinal);
+
         var jobs = new List<JobRecord>();
         await foreach (var job in _store.GetJobsAsync(JobState.Queued, CancellationToken.None).ConfigureAwait(false))
         {
@@ -352,7 +358,7 @@ internal sealed partial class SequentialPipeline : IForgePipeline
         TextureJob textureJob;
         try
         {
-            textureJob = _mapper.Map(job);
+            textureJob = _mapper.Map(job, _textureLooks?.GetValueOrDefault(GamePath.Normalize(job.Path)));
         }
         catch (InvalidOperationException ex)
         {
@@ -402,7 +408,7 @@ internal sealed partial class SequentialPipeline : IForgePipeline
 
             // The output is committed: from here on only the database bookkeeping can fail, and that must never turn into Failed.
             var seconds = clock.Elapsed.TotalSeconds;
-            await MarkDoneWithRetryAsync(job, seconds).ConfigureAwait(false);
+            await MarkDoneWithRetryAsync(job, seconds, textureJob.EffectiveLook.GetStableHash(textureJob.Kind)).ConfigureAwait(false);
             lock (_gate)
             {
                 _done++;
@@ -415,13 +421,13 @@ internal sealed partial class SequentialPipeline : IForgePipeline
         }
     }
 
-    private async Task MarkDoneWithRetryAsync(JobRecord job, double seconds)
+    private async Task MarkDoneWithRetryAsync(JobRecord job, double seconds, string lookHash)
     {
         for (var attempt = 1; ; attempt++)
         {
             try
             {
-                await _markDone(job.Id, seconds).ConfigureAwait(false);
+                await _markDone(job.Id, seconds, lookHash).ConfigureAwait(false);
                 return;
             }
             catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or IOException && attempt < MarkDoneAttempts)

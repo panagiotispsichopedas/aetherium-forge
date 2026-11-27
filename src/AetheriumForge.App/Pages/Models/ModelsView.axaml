@@ -1,0 +1,198 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:AetheriumForge.App.Pages.Models"
+             x:Class="AetheriumForge.App.Pages.Models.ModelsView"
+             x:DataType="vm:ModelsViewModel">
+  <UserControl.Styles>
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Padding" Value="12,10" />
+    </Style>
+    <Style Selector="Border.warning">
+      <Setter Property="Background" Value="#33E0A030" />
+      <Setter Property="BorderBrush" Value="#C08020" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Padding" Value="12,8" />
+    </Style>
+    <Style Selector="TextBlock.header">
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Opacity" Value="0.65" />
+    </Style>
+    <Style Selector="TextBlock.section">
+      <Setter Property="FontSize" Value="20" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+  </UserControl.Styles>
+
+  <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+    <StackPanel Spacing="14" Margin="0,0,12,16">
+
+      <!-- ── Models ── -->
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8">
+          <Button Content="Recommended models…" Command="{Binding OfferRecommendedModelsCommand}" IsVisible="{Binding CanOfferRecommended}" />
+          <Button Content="Add custom .onnx…" Command="{Binding AddCustomModelCommand}" />
+          <Button Content="Refresh" Command="{Binding RefreshCommand}" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="12">
+          <TextBlock Text="Models" FontSize="24" FontWeight="SemiBold" VerticalAlignment="Center" />
+          <ProgressBar IsIndeterminate="True" Width="80" IsVisible="{Binding IsLoading}" VerticalAlignment="Center" />
+        </StackPanel>
+      </DockPanel>
+
+      <Border Classes="warning" IsVisible="{Binding IsManifestWarning}">
+        <TextBlock Text="{Binding ManifestStatus}" TextWrapping="Wrap" />
+      </Border>
+      <TextBlock Text="{Binding ManifestStatus}" Opacity="0.65" IsVisible="{Binding !IsManifestWarning}" />
+      <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" IsVisible="{Binding StatusMessage, Converter={x:Static ObjectConverters.IsNotNull}}" />
+
+      <!-- Custom model form -->
+      <Border Classes="card" IsVisible="{Binding IsCustomFormOpen}">
+        <StackPanel Spacing="8">
+          <TextBlock Text="Add a custom model" FontWeight="SemiBold" />
+          <TextBlock Text="{Binding CustomSourcePath}" Opacity="0.7" TextWrapping="Wrap" />
+          <Grid ColumnDefinitions="110,*" RowDefinitions="Auto,Auto,Auto" RowSpacing="6">
+            <TextBlock Grid.Row="0" Text="Display name" VerticalAlignment="Center" />
+            <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding CustomDisplayName}" MaxWidth="420" HorizontalAlignment="Left" Width="420" />
+            <TextBlock Grid.Row="1" Text="Scale" VerticalAlignment="Center" />
+            <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding CustomScale}" Minimum="1" Maximum="16" Increment="1" FormatString="0" Width="140" HorizontalAlignment="Left" />
+            <TextBlock Grid.Row="2" Text="Precision" VerticalAlignment="Center" />
+            <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding AvailablePrecisions}" SelectedItem="{Binding CustomPrecision}" Width="140" />
+          </Grid>
+          <TextBlock Text="{Binding CustomError}" Foreground="#E05050" TextWrapping="Wrap" IsVisible="{Binding CustomError, Converter={x:Static ObjectConverters.IsNotNull}}" />
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Classes="accent" Content="Add model" Command="{Binding SaveCustomModelCommand}" />
+            <Button Content="Cancel" Command="{Binding CancelCustomModelCommand}" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <Grid ColumnDefinitions="2.2*,90,70,80,120,130,*" Margin="12,0">
+        <TextBlock Grid.Column="0" Classes="header" Text="Model" />
+        <TextBlock Grid.Column="1" Classes="header" Text="Size" />
+        <TextBlock Grid.Column="2" Classes="header" Text="Precision" />
+        <TextBlock Grid.Column="3" Classes="header" Text="Tier" />
+        <TextBlock Grid.Column="4" Classes="header" Text="Licence" />
+        <TextBlock Grid.Column="5" Classes="header" Text="State" />
+      </Grid>
+
+      <ItemsControl ItemsSource="{Binding Models}">
+        <ItemsControl.ItemsPanel>
+          <ItemsPanelTemplate>
+            <StackPanel Spacing="6" />
+          </ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="vm:ModelRowViewModel">
+            <Border Classes="card">
+              <StackPanel Spacing="6">
+                <Grid ColumnDefinitions="2.2*,90,70,80,120,130,*">
+                  <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding Name}" Opacity="0.6" FontSize="12" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1" Text="{Binding SizeText}" VerticalAlignment="Center" />
+                  <TextBlock Grid.Column="2" Text="{Binding Precision}" VerticalAlignment="Center" />
+                  <TextBlock Grid.Column="3" Text="{Binding Tier}" VerticalAlignment="Center" />
+                  <Panel Grid.Column="4" VerticalAlignment="Center">
+                    <HyperlinkButton Content="{Binding Licence}" NavigateUri="{Binding LicenceUrl}" IsVisible="{Binding HasLicenceUrl}" Padding="0" />
+                    <TextBlock Text="{Binding Licence}" IsVisible="{Binding !HasLicenceUrl}" />
+                  </Panel>
+                  <TextBlock Grid.Column="5" Text="{Binding StateText}" VerticalAlignment="Center" />
+                  <StackPanel Grid.Column="6" Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right">
+                    <Button Classes="accent" Content="{Binding DownloadLabel}" Command="{Binding DownloadCommand}" IsVisible="{Binding CanDownload}" />
+                    <Button Content="Pause" Command="{Binding PauseCommand}" IsVisible="{Binding IsDownloading}" />
+                    <Button Content="Resume" Command="{Binding ResumeCommand}" IsVisible="{Binding IsPaused}" />
+                    <Button Content="Cancel" Command="{Binding CancelCommand}" IsVisible="{Binding IsTransferActive}" />
+                    <Button Content="Discard partial" Command="{Binding DiscardPartialCommand}" IsVisible="{Binding CanDiscardPartial}" />
+                    <Button Content="Verify" Command="{Binding VerifyCommand}" IsVisible="{Binding IsInstalled}" />
+                    <Button Content="Delete" Command="{Binding DeleteCommand}" IsVisible="{Binding IsInstalled}" />
+                  </StackPanel>
+                </Grid>
+                <DockPanel IsVisible="{Binding IsTransferActive}">
+                  <TextBlock DockPanel.Dock="Right" Text="{Binding ProgressText}" Margin="12,0,0,0" FontSize="12" VerticalAlignment="Center" />
+                  <ProgressBar Value="{Binding ProgressPercent}" Minimum="0" Maximum="100" VerticalAlignment="Center" />
+                </DockPanel>
+                <TextBlock Text="{Binding Message}" FontSize="12" Opacity="0.8" TextWrapping="Wrap" IsVisible="{Binding Message, Converter={x:Static ObjectConverters.IsNotNull}}" />
+              </StackPanel>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+
+      <!-- ── GPU ── -->
+      <TextBlock Classes="section" Text="GPU" Margin="0,12,0,0" />
+
+      <Border Classes="warning" IsVisible="{Binding HasVramWarning}">
+        <TextBlock Text="{Binding VramWarning}" TextWrapping="Wrap" />
+      </Border>
+
+      <Grid ColumnDefinitions="140,*" RowDefinitions="Auto,Auto" RowSpacing="4">
+        <TextBlock Text="Selected adapter" Opacity="0.65" />
+        <TextBlock Grid.Column="1" Text="{Binding SelectedAdapterText}" FontWeight="SemiBold" />
+        <TextBlock Grid.Row="1" Text="Tier" Opacity="0.65" />
+        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding TierText}" />
+      </Grid>
+
+      <Grid ColumnDefinitions="2*,100,100,160,*" Margin="12,0">
+        <TextBlock Grid.Column="0" Classes="header" Text="Adapter" />
+        <TextBlock Grid.Column="1" Classes="header" Text="Dedicated" />
+        <TextBlock Grid.Column="2" Classes="header" Text="Kind" />
+        <TextBlock Grid.Column="3" Classes="header" Text="Driver" />
+      </Grid>
+      <ItemsControl ItemsSource="{Binding Adapters}">
+        <ItemsControl.ItemsPanel>
+          <ItemsPanelTemplate>
+            <StackPanel Spacing="4" />
+          </ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="vm:GpuAdapterRow">
+            <Border Classes="card" Padding="12,6">
+              <Grid ColumnDefinitions="2*,100,100,160,*">
+                <TextBlock Grid.Column="0" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Column="1" Text="{Binding MemoryText}" />
+                <TextBlock Grid.Column="2" Text="{Binding KindText}" />
+                <TextBlock Grid.Column="3" Text="{Binding DriverText}" />
+                <TextBlock Grid.Column="4" Text="{Binding SelectedText}" FontWeight="SemiBold" HorizontalAlignment="Right" />
+              </Grid>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+
+      <TextBlock Text="Calibration per installed model family" FontWeight="SemiBold" Margin="0,6,0,0" />
+      <TextBlock Text="A pipeline run is active: calibration is disabled until it ends." Opacity="0.75" IsVisible="{Binding IsRunActive}" />
+      <ItemsControl ItemsSource="{Binding Families}">
+        <ItemsControl.ItemsPanel>
+          <ItemsPanelTemplate>
+            <StackPanel Spacing="4" />
+          </ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="vm:GpuFamilyRow">
+            <Border Classes="card" Padding="12,8">
+              <Grid ColumnDefinitions="2*,110,3*,Auto">
+                <TextBlock Grid.Column="0" Text="{Binding Family}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1" Text="{Binding VariantsText}" Opacity="0.7" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="2" Text="{Binding ProfileText}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                <Button Grid.Column="3" Content="{Binding CalibrateLabel}" Command="{Binding CalibrateCommand}" />
+              </Grid>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+
+      <StackPanel Spacing="6" IsVisible="{Binding CalibrationStatus, Converter={x:Static ObjectConverters.IsNotNull}}">
+        <TextBlock Text="{Binding CalibrationStatus}" TextWrapping="Wrap" />
+        <DockPanel IsVisible="{Binding IsCalibrating}">
+          <Button DockPanel.Dock="Right" Content="Cancel" Command="{Binding CancelCalibrationCommand}" Margin="12,0,0,0" />
+          <ProgressBar Value="{Binding CalibrationPercent}" Minimum="0" Maximum="100" VerticalAlignment="Center" />
+        </DockPanel>
+      </StackPanel>
+
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

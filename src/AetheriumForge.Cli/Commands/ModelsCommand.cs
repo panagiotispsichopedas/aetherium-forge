@@ -1,6 +1,7 @@
 using System.CommandLine;
 using AetheriumForge.Cli.Hosting;
 using AetheriumForge.Core.Imaging;
+using AetheriumForge.Core.Projects;
 
 namespace AetheriumForge.Cli.Commands;
 
