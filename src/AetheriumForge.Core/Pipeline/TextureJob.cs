@@ -1,3 +1,4 @@
+using AetheriumForge.Core.Rules;
 using AetheriumForge.Core.Textures;
 
 namespace AetheriumForge.Core.Pipeline;
@@ -11,8 +12,9 @@ namespace AetheriumForge.Core.Pipeline;
 /// <param name="TargetWidth">Output width in pixels.</param>
 /// <param name="TargetHeight">Output height in pixels.</param>
 /// <param name="Model">Upscaling model name.</param>
-/// <param name="NormalStrength">Normal-map XY strength; 1.0 keeps the relief unchanged.</param>
+/// <param name="NormalStrength">Normal-map XY strength; 1.0 keeps the relief unchanged. Used only when <paramref name="Look"/> is <see langword="null"/>.</param>
 /// <param name="SourceDxgiFormat">DXGI format of the source when it has a DX10 header; used to keep sRGB tagging.</param>
+/// <param name="Look">The group's look (§8); when set, its <see cref="LookSettings.NormalStrength"/> wins over <paramref name="NormalStrength"/>.</param>
 public sealed record TextureJob(
     string Path,
     string SourceArchive,
@@ -21,7 +23,14 @@ public sealed record TextureJob(
     int TargetHeight,
     string Model,
     double NormalStrength,
-    int? SourceDxgiFormat = null);
+    int? SourceDxgiFormat = null,
+    LookSettings? Look = null)
+{
+    /// <summary>
+    /// Gets the look the processor applies: <see cref="Look"/> when set, otherwise the neutral look with <see cref="NormalStrength"/>.
+    /// </summary>
+    public LookSettings EffectiveLook => Look ?? new LookSettings { NormalStrength = NormalStrength };
+}
 
 /// <summary>
 /// Outcome of <see cref="TextureProcessor.ProcessAsync"/>.

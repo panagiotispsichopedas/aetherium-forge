@@ -145,6 +145,7 @@ internal static class CompositionRoot
             services.GetRequiredService<ILogger<ForgePipeline>>())
         {
             NormalStrengthForGroup = group => NormalStrengthFor(forge.Rules, group),
+            LookForGroup = group => LookFor(forge.Rules, group),
         };
     }
 
@@ -152,8 +153,14 @@ internal static class CompositionRoot
     /// <param name="rules">The project's rules.</param>
     /// <param name="group">The group name stored on the job.</param>
     /// <returns>The strength.</returns>
-    internal static double NormalStrengthFor(ForgeRules rules, string group) =>
-        rules.Groups.FirstOrDefault(g => string.Equals(g.Name, group, StringComparison.OrdinalIgnoreCase))?.NormalStrength ?? 1.0;
+    internal static double NormalStrengthFor(ForgeRules rules, string group) => LookFor(rules, group)?.NormalStrength ?? 1.0;
+
+    /// <summary>Gets the effective look of a rule group by name (§8); <see langword="null"/> when the group no longer exists.</summary>
+    /// <param name="rules">The project's rules.</param>
+    /// <param name="group">The group name stored on the job.</param>
+    /// <returns>The look, or <see langword="null"/>.</returns>
+    internal static LookSettings? LookFor(ForgeRules rules, string group) =>
+        rules.Groups.FirstOrDefault(g => string.Equals(g.Name, group, StringComparison.OrdinalIgnoreCase))?.EffectiveLook;
 
     private static SequentialPipeline CreateSequentialPipeline(IServiceProvider services)
     {

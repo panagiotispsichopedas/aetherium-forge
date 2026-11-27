@@ -1,5 +1,6 @@
 using AetheriumForge.Core.Jobs;
 using AetheriumForge.Core.Pipeline;
+using AetheriumForge.Core.Rules;
 using AetheriumForge.Core.Textures;
 using Microsoft.Data.Sqlite;
 
@@ -495,6 +496,56 @@ public sealed class ForgePipelineTests : IAsyncLifetime
 
         // Assert
         Assert.Equal((2048, 1024, TextureKind.Normal, 1.4, (int?)null), (job.TargetWidth, job.TargetHeight, job.Kind, job.NormalStrength, job.SourceDxgiFormat));
+    }
+
+    [Fact]
+    public void ToTextureJob_LookForGroup_SetsLookAndItsNormalStrength()
+    {
+        // Arrange
+        var look = LookSettings.Neutral with { NormalStrength = 2.2, Saturation = 1.3 };
+        var record = Record(@"textures\t\look.dds") with { Kind = "normal", Group = "Clutter" };
+
+        // Act
+        var job = ForgePipeline.ToTextureJob(record, _ => 1.4, group => group == "Clutter" ? look : null);
+
+        // Assert
+        Assert.Equal((2.2, look), (job.NormalStrength, job.EffectiveLook));
+    }
+
+    [Fact]
+    public void ToTextureJob_LookForGroupReturnsNull_FallsBackToNormalStrength()
+    {
+        // Arrange
+        var record = Record(@"textures\t\look.dds") with { Group = "Clutter" };
+
+        // Act
+        var job = ForgePipeline.ToTextureJob(record, _ => 1.4, _ => null);
+
+        // Assert
+        Assert.Equal(LookSettings.Neutral with { NormalStrength = 1.4 }, job.EffectiveLook);
+    }
+
+    [Fact]
+    public async Task RunAsync_LookForGroup_StoresEffectiveLookHashOnDoneJobs()
+    {
+        // Arrange
+        var look = LookSettings.Neutral with { Contrast = 1.2 };
+        await _store.UpsertJobsAsync(
+            [Record(@"textures\t\a.dds") with { Group = "Clutter" }, Record(@"textures\t\b.dds") with { Group = "Large" }],
+            Ct);
+        var processor = new TextureProcessor(new PipelineFakeSource(), new PipelineFakeCodec(), _ => new PipelineFakeUpscaler(), OutputRoot, WorkRoot);
+        var pipeline = new ForgePipeline(_store, processor, new FakeEtaEstimator(), Options())
+        {
+            NormalStrengthForGroup = _ => 1.0,
+            LookForGroup = group => group == "Clutter" ? look : null,
+        };
+
+        // Act
+        await pipeline.RunAsync(null, Ct);
+
+        // Assert
+        var hashes = (await AllJobsAsync()).OrderBy(j => j.Path).Select(j => j.LookHash);
+        Assert.Equal([look.GetStableHash(), LookSettings.Neutral.GetStableHash()], hashes);
     }
 
     [Fact]

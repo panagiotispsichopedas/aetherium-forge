@@ -30,13 +30,14 @@ public sealed class JobStore : IAsyncDisposable
           grp TEXT, target INT, model TEXT,
           state TEXT NOT NULL,
           attempts INT DEFAULT 0, error TEXT,
-          seconds REAL, finished_at TEXT
+          seconds REAL, finished_at TEXT,
+          look_hash TEXT
         );
         CREATE INDEX IF NOT EXISTS job_state ON job(state);
         CREATE TABLE IF NOT EXISTS run (id INTEGER PRIMARY KEY, started TEXT, ended TEXT, done INT, failed INT);
         """;
 
-    private const string JobColumns = "id, path, archive, src_w, src_h, format, kind, grp, target, model, state, attempts, error, seconds, finished_at";
+    private const string JobColumns = "id, path, archive, src_w, src_h, format, kind, grp, target, model, state, attempts, error, seconds, finished_at, look_hash";
 
     private readonly string _connectionString;
     private readonly TimeProvider _timeProvider;
@@ -82,6 +83,7 @@ public sealed class JobStore : IAsyncDisposable
         {
             await ExecuteAsync(connection, "PRAGMA journal_mode=WAL;", ct).ConfigureAwait(false);
             await ExecuteAsync(connection, SchemaSql, ct).ConfigureAwait(false);
+            await MigrateAsync(connection, ct).ConfigureAwait(false);
         }
 
         return store;
@@ -321,19 +323,71 @@ public sealed class JobStore : IAsyncDisposable
         await ExecuteNonQueryAsync("UPDATE job SET state = 'Running' WHERE id = $id AND state = 'Queued';", [("$id", id)], ct).ConfigureAwait(false) == 1;
 
     /// <summary>
-    /// Marks a job as finished successfully and clears its error.
+    /// Marks a job as finished successfully and clears its error and its look hash (the look is unknown).
     /// </summary>
     /// <param name="id">The job id.</param>
     /// <param name="seconds">Processing time in seconds.</param>
     /// <param name="ct">Cancels the operation.</param>
     /// <returns>A task that completes when the state is stored.</returns>
     /// <exception cref="KeyNotFoundException">No job has this id.</exception>
-    public Task MarkDoneAsync(long id, double seconds, CancellationToken ct = default) =>
+    public Task MarkDoneAsync(long id, double seconds, CancellationToken ct = default) => MarkDoneAsync(id, seconds, null, ct);
+
+    /// <summary>
+    /// Marks a job as finished successfully, clears its error and records the hash of the look it was finished with (§8).
+    /// </summary>
+    /// <param name="id">The job id.</param>
+    /// <param name="seconds">Processing time in seconds.</param>
+    /// <param name="lookHash">The stable hash of the effective look (<see cref="Rules.LookSettings.GetStableHash"/>), or <see langword="null"/> when unknown.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>A task that completes when the state is stored.</returns>
+    /// <exception cref="KeyNotFoundException">No job has this id.</exception>
+    public Task MarkDoneAsync(long id, double seconds, string? lookHash, CancellationToken ct) =>
         UpdateJobAsync(
             id,
-            "UPDATE job SET state = 'Done', error = NULL, seconds = $seconds, finished_at = $finished_at WHERE id = $id;",
-            [("$seconds", seconds), ("$finished_at", FormatTimestamp(_timeProvider.GetUtcNow()))],
+            "UPDATE job SET state = 'Done', error = NULL, seconds = $seconds, finished_at = $finished_at, look_hash = $look_hash WHERE id = $id;",
+            [("$seconds", seconds), ("$finished_at", FormatTimestamp(_timeProvider.GetUtcNow())), ("$look_hash", (object?)lookHash ?? DBNull.Value)],
             ct);
+
+    /// <summary>
+    /// Finds the <see cref="JobState.Done"/> jobs of a group that were finished with a different look than <paramref name="lookHash"/>,
+    /// for the "Apply to finished textures?" flow (§8). Jobs with no recorded look (finished before looks were recorded) count as different.
+    /// </summary>
+    /// <param name="group">The group name, compared case-insensitively.</param>
+    /// <param name="lookHash">The stable hash of the group's current effective look.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The jobs in id order.</returns>
+    public async Task<IReadOnlyList<JobRecord>> FindDoneWithDifferentLookAsync(string group, string lookHash, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        ArgumentNullException.ThrowIfNull(lookHash);
+
+        var jobs = new List<JobRecord>();
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                command.CommandText = $"""
+                    SELECT {JobColumns} FROM job
+                    WHERE state = 'Done' AND grp = $grp COLLATE NOCASE AND (look_hash IS NULL OR look_hash <> $look_hash)
+                    ORDER BY id;
+                    """;
+                command.Parameters.AddWithValue("$grp", group);
+                command.Parameters.AddWithValue("$look_hash", lookHash);
+                var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                await using (reader.ConfigureAwait(false))
+                {
+                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        jobs.Add(ReadJob(reader));
+                    }
+                }
+            }
+        }
+
+        return jobs;
+    }
 
     /// <summary>
     /// Marks a job as failed, records the error and increments its attempt count.
@@ -518,7 +572,35 @@ public sealed class JobStore : IAsyncDisposable
         Attempts: reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
         Error: reader.IsDBNull(12) ? null : reader.GetString(12),
         Seconds: reader.IsDBNull(13) ? null : reader.GetDouble(13),
-        FinishedAt: reader.IsDBNull(14) ? null : ParseTimestamp(reader.GetString(14)));
+        FinishedAt: reader.IsDBNull(14) ? null : ParseTimestamp(reader.GetString(14)),
+        LookHash: reader.IsDBNull(15) ? null : reader.GetString(15));
+
+    /// <summary>Upgrades a database created by an older version: adds the <c>look_hash</c> column (M5) when it is missing.</summary>
+    private static async Task MigrateAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        var hasLookHash = false;
+        var command = connection.CreateCommand();
+        await using (command.ConfigureAwait(false))
+        {
+            command.CommandText = "SELECT name FROM pragma_table_info('job');";
+            var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            await using (reader.ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    if (string.Equals(reader.GetString(0), "look_hash", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasLookHash = true;
+                    }
+                }
+            }
+        }
+
+        if (!hasLookHash)
+        {
+            await ExecuteAsync(connection, "ALTER TABLE job ADD COLUMN look_hash TEXT;", ct).ConfigureAwait(false);
+        }
+    }
 
     private static async Task ExecuteAsync(SqliteConnection connection, string sql, CancellationToken ct, SqliteTransaction? transaction = null)
     {

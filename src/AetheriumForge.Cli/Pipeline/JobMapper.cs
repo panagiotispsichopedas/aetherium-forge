@@ -9,7 +9,7 @@ namespace AetheriumForge.Cli.Pipeline;
 
 /// <summary>
 /// Turns a stored <see cref="JobRecord"/> into a <see cref="TextureJob"/>. The job row keeps only the target's larger side, so the exact
-/// target size and the normal strength come from re-evaluating the project's rules against the stored source size; when the rules no longer
+/// target size, the look and the normal strength come from re-evaluating the project's rules against the stored source size; when the rules no longer
 /// agree with the row, the row's target wins and the other side follows the source aspect ratio.
 /// </summary>
 /// <remarks>
@@ -66,22 +66,24 @@ internal sealed partial class JobMapper
         int width;
         int height;
         var normalStrength = 1.0;
+        LookSettings? look = null;
         if (!decision.IsSkipped && Math.Max(decision.TargetWidth, decision.TargetHeight) == job.Target)
         {
-            (width, height, normalStrength) = (decision.TargetWidth, decision.TargetHeight, decision.NormalStrength);
+            (width, height, normalStrength, look) = (decision.TargetWidth, decision.TargetHeight, decision.NormalStrength, decision.Look);
         }
         else
         {
-            // The rules changed since the scan: the row's target wins. Keep the normal strength of a group that still matches
-            // (by evaluation, else by the row's group name); otherwise fall back to 1.0 (relief unchanged).
+            // The rules changed since the scan: the row's target wins. Keep the look (and normal strength) of a group that still
+            // matches (by evaluation, else by the row's group name); otherwise fall back to neutral (relief unchanged).
             (width, height) = FitToMax(job.SourceWidth, job.SourceHeight, job.Target);
             if (!decision.IsSkipped)
             {
-                normalStrength = decision.NormalStrength;
+                (normalStrength, look) = (decision.NormalStrength, decision.Look);
             }
             else if (job.Group is not null && _rules.Groups.FirstOrDefault(g => string.Equals(g.Name, job.Group, StringComparison.OrdinalIgnoreCase)) is { } group)
             {
-                normalStrength = group.NormalStrength;
+                look = group.EffectiveLook;
+                normalStrength = look.NormalStrength;
             }
             else
             {
@@ -89,7 +91,7 @@ internal sealed partial class JobMapper
             }
         }
 
-        return new TextureJob(job.Path, job.Archive, kind, width, height, ModelFor(job), normalStrength);
+        return new TextureJob(job.Path, job.Archive, kind, width, height, ModelFor(job), normalStrength, Look: look);
     }
 
     /// <summary>Scales a size so that its larger side equals <paramref name="target"/>, keeping the aspect ratio.</summary>

@@ -79,7 +79,7 @@ internal sealed partial class SequentialPipeline : IForgePipeline
     /// <param name="maxJobs">Process at most this many queued jobs.</param>
     /// <param name="time">Clock for progress throttling.</param>
     /// <param name="logger">Logger.</param>
-    /// <param name="markDone">Records a finished job; <see langword="null"/> uses <see cref="JobStore.MarkDoneAsync"/>.</param>
+    /// <param name="markDone">Records a finished job; <see langword="null"/> uses <see cref="JobStore.MarkDoneAsync(long, double, CancellationToken)"/>.</param>
     internal SequentialPipeline(
         JobStore store,
         TextureProcessor processor,

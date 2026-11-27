@@ -18,6 +18,10 @@ namespace AetheriumForge.Core.Jobs;
 /// <param name="Error">Last error message, or <see langword="null"/>.</param>
 /// <param name="Seconds">Processing time of the successful run, or <see langword="null"/>.</param>
 /// <param name="FinishedAt">When the job last finished (done or failed), or <see langword="null"/>.</param>
+/// <param name="LookHash">
+/// Stable hash of the effective look (§8, <see cref="Rules.LookSettings.GetStableHash"/>) the job was finished with, or
+/// <see langword="null"/> when unknown (not finished, or finished before looks were recorded).
+/// </param>
 public sealed record JobRecord(
     long Id,
     string Path,
@@ -33,4 +37,5 @@ public sealed record JobRecord(
     int Attempts,
     string? Error,
     double? Seconds,
-    DateTimeOffset? FinishedAt);
+    DateTimeOffset? FinishedAt,
+    string? LookHash = null);
