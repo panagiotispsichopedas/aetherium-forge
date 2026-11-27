@@ -20,7 +20,7 @@ namespace AetheriumForge.Core.Imaging;
 /// </para>
 /// <para>Each call works in its own unique subfolder of the given work folder, so calls may run concurrently.</para>
 /// </remarks>
-public sealed partial class Texconv
+public sealed partial class Texconv : ITextureCodec
 {
     private const int OutputTailLength = 4000;
     private const string DecodeFormat = "R8G8B8A8_UNORM";
