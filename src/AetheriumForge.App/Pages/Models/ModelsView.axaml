@@ -32,6 +32,7 @@
       <!-- ── Models ── -->
       <DockPanel>
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8">
+          <Button Content="Recommended models…" Command="{Binding OfferRecommendedModelsCommand}" IsVisible="{Binding CanOfferRecommended}" />
           <Button Content="Add custom .onnx…" Command="{Binding AddCustomModelCommand}" />
           <Button Content="Refresh" Command="{Binding RefreshCommand}" />
         </StackPanel>
@@ -106,7 +107,7 @@
                     <Button Content="Resume" Command="{Binding ResumeCommand}" IsVisible="{Binding IsPaused}" />
                     <Button Content="Cancel" Command="{Binding CancelCommand}" IsVisible="{Binding IsTransferActive}" />
                     <Button Content="Discard partial" Command="{Binding DiscardPartialCommand}" IsVisible="{Binding CanDiscardPartial}" />
-                    <Button Content="Verify" Command="{Binding VerifyCommand}" IsVisible="{Binding IsInstalled}" IsEnabled="{Binding !IsVerifying}" />
+                    <Button Content="Verify" Command="{Binding VerifyCommand}" IsVisible="{Binding IsInstalled}" />
                     <Button Content="Delete" Command="{Binding DeleteCommand}" IsVisible="{Binding IsInstalled}" />
                   </StackPanel>
                 </Grid>

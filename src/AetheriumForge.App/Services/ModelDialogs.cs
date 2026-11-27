@@ -47,8 +47,15 @@ public interface IModelDialogs
 
     /// <summary>Asks the user to confirm deleting a model.</summary>
     /// <param name="displayName">The model's display name.</param>
+    /// <param name="partialBytes">The size of a partial download that is deleted too, or <see langword="null"/> when there is none.</param>
     /// <returns><see langword="true"/> to delete.</returns>
-    Task<bool> ConfirmDeleteAsync(string displayName);
+    Task<bool> ConfirmDeleteAsync(string displayName, long? partialBytes);
+
+    /// <summary>Asks the user to confirm discarding an interrupted download.</summary>
+    /// <param name="displayName">The model's display name.</param>
+    /// <param name="partialBytes">The size of the partial file.</param>
+    /// <returns><see langword="true"/> to discard it.</returns>
+    Task<bool> ConfirmDiscardPartialAsync(string displayName, long partialBytes);
 
     /// <summary>Shows the first-run prompt.</summary>
     /// <param name="recommendation">The recommendation.</param>

@@ -38,6 +38,7 @@ public sealed partial class ModelsViewModel : ObservableObject
     private readonly GpuProfiler _profiler;
     private readonly GpuProfileStore _profileStore;
     private readonly IModelDialogs _dialogs;
+    private readonly IModelsPageSettings _settings;
     private readonly INavigationService? _navigation;
     private readonly IForgeRunner? _runner;
     private readonly Action<Action> _post;
@@ -124,6 +125,19 @@ public sealed partial class ModelsViewModel : ObservableObject
     [ObservableProperty]
     private string? _customError;
 
+    /// <summary>Gets or sets a value indicating whether a custom model is being copied (the form's commands are disabled meanwhile).</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(AddCustomModelCommand), nameof(SaveCustomModelCommand))]
+    private bool _isSavingCustom;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the page offers the recommended models again: the list is loaded, nothing is installed and
+    /// nothing downloads. This is how the first-run prompt comes back after "Later".
+    /// </summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(OfferRecommendedModelsCommand))]
+    private bool _canOfferRecommended;
+
     /// <summary>
     /// Initializes a new instance of the <see cref="ModelsViewModel"/> class.
     /// </summary>
@@ -133,6 +147,7 @@ public sealed partial class ModelsViewModel : ObservableObject
     /// <param name="profiler">Selects, classifies and calibrates adapters.</param>
     /// <param name="profileStore">Stores calibration profiles.</param>
     /// <param name="dialogs">Shows confirmations and prompts.</param>
+    /// <param name="settings">Stores page preferences (the dismissed first-run prompt).</param>
     /// <param name="navigation">Page navigation, or <see langword="null"/>.</param>
     /// <param name="runner">The pipeline runner, or <see langword="null"/> when none is registered.</param>
     /// <param name="post">Runs an action on the UI thread; defaults to running it inline.</param>
@@ -144,6 +159,7 @@ public sealed partial class ModelsViewModel : ObservableObject
         GpuProfiler profiler,
         GpuProfileStore profileStore,
         IModelDialogs dialogs,
+        IModelsPageSettings settings,
         INavigationService? navigation = null,
         IForgeRunner? runner = null,
         Action<Action>? post = null,
@@ -155,6 +171,7 @@ public sealed partial class ModelsViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(profiler);
         ArgumentNullException.ThrowIfNull(profileStore);
         ArgumentNullException.ThrowIfNull(dialogs);
+        ArgumentNullException.ThrowIfNull(settings);
 
         _libraryFactory = libraryFactory;
         _downloads = downloads;
@@ -162,6 +179,7 @@ public sealed partial class ModelsViewModel : ObservableObject
         _profiler = profiler;
         _profileStore = profileStore;
         _dialogs = dialogs;
+        _settings = settings;
         _navigation = navigation;
         _runner = runner;
         _post = post ?? (action => action());
@@ -246,6 +264,7 @@ public sealed partial class ModelsViewModel : ObservableObject
 
             await RefreshGpuAsync();
             _loaded = true;
+            UpdateCanOfferRecommended();
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -263,6 +282,8 @@ public sealed partial class ModelsViewModel : ObservableObject
 
     /// <summary>
     /// Shows the first-run prompt once per session when no model is installed: it recommends the model family for this GPU's tier.
+    /// After the user chose "Later" the prompt no longer appears on its own; the page's <see cref="OfferRecommendedModelsCommand"/>
+    /// offers it again.
     /// </summary>
     /// <returns>A task that completes when the prompt was answered (or not needed).</returns>
     public async Task RunFirstRunCheckAsync()
@@ -273,11 +294,26 @@ public sealed partial class ModelsViewModel : ObservableObject
         }
 
         _firstRunChecked = true;
+        if (await _settings.IsFirstRunPromptDismissedAsync(CancellationToken.None))
+        {
+            return;
+        }
+
         if (!_loaded)
         {
             await RefreshAsync();
         }
 
+        await OfferRecommendedAsync(fromPage: false);
+    }
+
+    /// <summary>Shows the recommendation again from the Models page (also after "Later").</summary>
+    /// <returns>A task that completes when the prompt was answered.</returns>
+    [RelayCommand(CanExecute = nameof(CanOfferRecommended))]
+    private Task OfferRecommendedModelsAsync() => OfferRecommendedAsync(fromPage: true);
+
+    private async Task OfferRecommendedAsync(bool fromPage)
+    {
         if (Models.Any(row => row.IsInstalled) || _downloads.HasActiveDownloads)
         {
             return;
@@ -305,10 +341,16 @@ public sealed partial class ModelsViewModel : ObservableObject
                 StatusMessage = $"Downloading {family}.";
                 break;
             case ModelFirstRunChoice.Choose:
-                _navigation?.NavigateTo(AppPage.Models);
+                if (!fromPage)
+                {
+                    _navigation?.NavigateTo(AppPage.Models);
+                }
+
                 break;
             default:
-                StatusMessage = "No model is installed yet. Download one before running the pipeline.";
+                // Remember "Later" so the prompt stops appearing at startup; "Recommended models…" on this page brings it back.
+                await _settings.SetFirstRunPromptDismissedAsync(true, CancellationToken.None);
+                StatusMessage = "No model is installed yet. Download one before running the pipeline, or use Recommended models… on this page.";
                 break;
         }
     }
@@ -319,12 +361,15 @@ public sealed partial class ModelsViewModel : ObservableObject
     internal async Task CalibrateAsync(GpuFamilyRow row)
     {
         ArgumentNullException.ThrowIfNull(row);
-        if (!CanCalibrate || _selectedAdapter is not { } adapter)
+
+        // TODO(GpuWorkLock): the IForgeRunner check only sees runs of this process, and the runner contract cannot stop a run from starting
+        // while a calibration runs. When the cross-process GpuWorkLock (Core/Concurrency) merges, acquire it here for the whole calibration
+        // (fail fast with a "GPU busy" status when another process holds it) and release it in the finally block below.
+        if (!CanCalibrate || IsRunnerBusy || _selectedAdapter is not { } adapter)
         {
             return;
         }
 
-        UpdateVramWarning();
         using var cancellation = new CancellationTokenSource();
         _calibrationCts = cancellation;
         IsCalibrating = true;
@@ -334,6 +379,14 @@ public sealed partial class ModelsViewModel : ObservableObject
         var progress = new CalibrationProgressSink(report => _post(() => ApplyCalibrationProgress(row.Family, report)));
         try
         {
+            await UpdateVramWarningAsync();
+            if (IsRunnerBusy)
+            {
+                // A run started while the video memory was queried.
+                CalibrationStatus = "A pipeline run started; calibrate after it ends.";
+                return;
+            }
+
             var profile = await _profiler.CalibrateAsync(adapter, row.Variants, null, progress, cancellation.Token);
             var saved = await _profileStore.SaveAsync(profile, CancellationToken.None);
             var summary = $"{row.Family}: {ModelFormatting.Precision(profile.Precision)}, tile {profile.TileSize}, {ModelFormatting.Number(profile.SecondsPerMegapixel, "0.00")} s/MP";
@@ -377,6 +430,13 @@ public sealed partial class ModelsViewModel : ObservableObject
             return;
         }
 
+        if (row.IsVerifying)
+        {
+            // An update replaces the file the verification is hashing.
+            row.Message = "Wait for the verification to finish, then download.";
+            return;
+        }
+
         row.Message = null;
         StartDownload(model);
     }
@@ -389,6 +449,13 @@ public sealed partial class ModelsViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(row);
         if (!row.IsInstalled || row.IsVerifying)
         {
+            return;
+        }
+
+        if (IsTransferActive(row))
+        {
+            // The transfer moves a new file over the one being hashed: the result would describe neither file.
+            row.Message = "Verify after the download ends.";
             return;
         }
 
@@ -429,33 +496,50 @@ public sealed partial class ModelsViewModel : ObservableObject
             return;
         }
 
-        if (row.IsTransferActive)
+        if (DeleteBlockedReason(row) is { } blocked)
         {
-            row.Message = "Cancel the download before deleting the model.";
+            row.Message = blocked;
             return;
         }
 
-        if (IsRunActive || IsCalibrating)
+        if (!await _dialogs.ConfirmDeleteAsync(row.DisplayName, PartialSize(row)))
         {
-            row.Message = "A run or calibration is using the models; delete it after it ends.";
             return;
         }
 
-        if (!await _dialogs.ConfirmDeleteAsync(row.DisplayName))
+        // The dialog may have stayed open while a download, run, calibration or verification started.
+        if (DeleteBlockedReason(row) is { } blockedNow)
         {
+            row.Message = blockedNow;
             return;
         }
 
         await DeleteFilesAsync(row, $"Deleted {row.DisplayName}.");
     }
 
-    /// <summary>Deletes a leftover partial download.</summary>
+    /// <summary>Deletes a leftover partial download after a confirmation that shows its size.</summary>
     /// <param name="row">The model.</param>
-    /// <returns>A task that completes when deleted.</returns>
-    internal Task DiscardPartialAsync(ModelRowViewModel row)
+    /// <returns>A task that completes when deleted or declined.</returns>
+    internal async Task DiscardPartialAsync(ModelRowViewModel row)
     {
         ArgumentNullException.ThrowIfNull(row);
-        return row.CanDiscardPartial ? DeleteFilesAsync(row, $"Discarded the partial download of {row.DisplayName}.") : Task.CompletedTask;
+        if (!row.CanDiscardPartial || PartialSize(row) is not { } size)
+        {
+            return;
+        }
+
+        if (!await _dialogs.ConfirmDiscardPartialAsync(row.DisplayName, size))
+        {
+            return;
+        }
+
+        if (IsTransferActive(row))
+        {
+            row.Message = "The download was resumed meanwhile; cancel it before discarding the partial file.";
+            return;
+        }
+
+        await DeleteFilesAsync(row, $"Discarded the partial download of {row.DisplayName}.");
     }
 
     /// <summary>Opens the custom-model form for a picked file.</summary>
@@ -521,57 +605,89 @@ public sealed partial class ModelsViewModel : ObservableObject
 
     /// <summary>Lets the user pick a custom <c>.onnx</c> file and opens the form.</summary>
     /// <returns>A task that completes when the file was picked or the picker was cancelled.</returns>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEditCustomModel))]
     private async Task AddCustomModelAsync()
     {
+        if (IsSavingCustom)
+        {
+            return;
+        }
+
         var path = await _dialogs.PickModelFileAsync();
-        if (path is not null)
+        if (path is not null && !IsSavingCustom)
         {
             OpenCustomForm(path);
         }
     }
 
-    /// <summary>Copies the custom model into the models folder and writes its sidecar.</summary>
+    /// <summary>
+    /// Copies the custom model into the models folder and writes its sidecar. The <c>.onnx</c> is moved into place first, without
+    /// overwriting; the sidecar is then written to a temporary file and moved next to it. If the sidecar fails, the copied model is removed
+    /// again, so a model never appears with a missing or half-written sidecar.
+    /// </summary>
     /// <returns>A task that completes when the model was added or the form shows an error.</returns>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEditCustomModel))]
     private async Task SaveCustomModelAsync()
     {
+        if (IsSavingCustom)
+        {
+            return;
+        }
+
         CustomError = ValidateCustomModel();
         if (CustomError is not null)
         {
             return;
         }
 
-        var name = Path.GetFileNameWithoutExtension(CustomSourcePath);
-        var target = Path.Combine(ModelsFolder, name + ".onnx");
+        // Read the form once: it must not change what is written while the copy runs.
+        var source = CustomSourcePath;
+        var displayName = CustomDisplayName.Trim();
+        var scale = (int)CustomScale!.Value;
+        var precision = CustomPrecision;
+        var name = Path.GetFileNameWithoutExtension(source);
+        var folder = ModelsFolder;
+        var target = Path.Combine(folder, name + ".onnx");
         var temporary = target + ".copying";
+        var sidecar = Path.ChangeExtension(target, ".json");
+        var sidecarTemporary = sidecar + ".writing";
+        var modelMoved = false;
+        IsSavingCustom = true;
         try
         {
-            Directory.CreateDirectory(ModelsFolder);
-            await CopyFileAsync(CustomSourcePath, temporary);
-            await WriteSidecarAsync(Path.ChangeExtension(target, ".json"), CustomDisplayName.Trim(), (int)CustomScale!.Value, CustomPrecision);
-            File.Move(temporary, target);
+            Directory.CreateDirectory(folder);
+            await CopyFileAsync(source, temporary);
+            File.Move(temporary, target, overwrite: false);
+            modelMoved = true;
+            await WriteSidecarAsync(sidecarTemporary, displayName, scale, precision);
+            File.Move(sidecarTemporary, sidecar, overwrite: true);
             LogCustomAdded(_logger, name);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             LogCustomFailed(_logger, exception, name);
-            CustomError = $"The model could not be copied: {exception.Message}";
-            DeleteOrphanSidecar(target);
+            CustomError = $"The model could not be added: {exception.Message}";
+            if (modelMoved)
+            {
+                // Roll back: without its sidecar the model would load with a guessed scale and precision.
+                DeleteFileLogged(target);
+            }
+
             return;
         }
         finally
         {
-            if (File.Exists(temporary))
-            {
-                File.Delete(temporary);
-            }
+            DeleteFileLogged(temporary);
+            DeleteFileLogged(sidecarTemporary);
+            IsSavingCustom = false;
         }
 
         IsCustomFormOpen = false;
-        StatusMessage = $"Added custom model {CustomDisplayName.Trim()}.";
+        StatusMessage = $"Added custom model {displayName}.";
         await RefreshAsync();
     }
+
+    private bool CanEditCustomModel() => !IsSavingCustom;
 
     /// <summary>Closes the custom-model form.</summary>
     [RelayCommand]
@@ -619,12 +735,19 @@ public sealed partial class ModelsViewModel : ObservableObject
         }
     }
 
-    private static void DeleteOrphanSidecar(string modelPath)
+    private void DeleteFileLogged(string path)
     {
-        var sidecar = Path.ChangeExtension(modelPath, ".json");
-        if (!File.Exists(modelPath) && File.Exists(sidecar))
+        try
         {
-            File.Delete(sidecar);
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Cleanup only: the add already reported its result. Log the leftover so it can be found.
+            LogCleanupFailed(_logger, exception, path);
         }
     }
 
@@ -675,6 +798,7 @@ public sealed partial class ModelsViewModel : ObservableObject
             };
         }
 
+        UpdateCanOfferRecommended();
         switch (operation.Status)
         {
             case ModelDownloadStatus.Completed:
@@ -729,7 +853,8 @@ public sealed partial class ModelsViewModel : ObservableObject
 
     private async Task RefreshGpuAsync()
     {
-        var adapters = _adapterProvider.GetAdapters();
+        // DXGI enumeration can take a while (driver calls, a waking dGPU): never on the UI thread.
+        var adapters = await Task.Run(_adapterProvider.GetAdapters);
         _selectedAdapter = _profiler.SelectAdapter(adapters);
         Adapters.Clear();
         foreach (var adapter in adapters)
@@ -751,7 +876,7 @@ public sealed partial class ModelsViewModel : ObservableObject
         }
 
         OnPropertyChanged(nameof(Tier));
-        UpdateVramWarning();
+        await UpdateVramWarningAsync();
 
         Families.Clear();
         foreach (var group in Models.Where(model => model.Entry.Installed is not null).GroupBy(model => model.Family, StringComparer.OrdinalIgnoreCase))
@@ -777,11 +902,17 @@ public sealed partial class ModelsViewModel : ObservableObject
         UpdateCanCalibrate();
     }
 
-    private void UpdateVramWarning()
+    private async Task UpdateVramWarningAsync()
     {
-        if (_selectedAdapter is not { IsIntegrated: false, DedicatedVideoMemory: > 0 } adapter
-            || _adapterProvider.QueryVideoMemory(adapter.Luid) is not { } memory
-            || memory.Available >= adapter.DedicatedVideoMemory * VramWarningFraction)
+        if (_selectedAdapter is not { IsIntegrated: false, DedicatedVideoMemory: > 0 } adapter)
+        {
+            VramWarning = null;
+            return;
+        }
+
+        // QueryVideoMemoryInfo is a DXGI call: never on the UI thread.
+        var memory = await Task.Run(() => _adapterProvider.QueryVideoMemory(adapter.Luid));
+        if (memory is null || memory.Available >= adapter.DedicatedVideoMemory * VramWarningFraction)
         {
             VramWarning = null;
             return;
@@ -790,6 +921,32 @@ public sealed partial class ModelsViewModel : ObservableObject
         VramWarning = $"Only {ModelFormatting.Bytes(memory.Available)} of {ModelFormatting.Bytes(adapter.DedicatedVideoMemory)} video memory is available: other "
             + "processes are using the GPU. Close games or GPU-heavy apps first, or calibration picks a tile that is too small.";
     }
+
+    /// <summary>Gets a value indicating whether the runner is not idle right now (read directly, not from the posted <see cref="IsRunActive"/>).</summary>
+    private bool IsRunnerBusy => _runner is not null && _runner.State != PipelineState.Idle;
+
+    private bool IsTransferActive(ModelRowViewModel row) => row.IsTransferActive || _downloads.Find(row.Name)?.IsActive == true;
+
+    private string? DeleteBlockedReason(ModelRowViewModel row) =>
+        IsTransferActive(row) ? "Cancel the download before deleting the model."
+        : IsRunActive || IsRunnerBusy || IsCalibrating ? "A run or calibration is using the models; delete it after it ends."
+        : row.IsVerifying ? "Wait for the verification to finish, then delete the model."
+        : null;
+
+    private long? PartialSize(ModelRowViewModel row)
+    {
+        if (!row.HasPartialDownload)
+        {
+            return null;
+        }
+
+        var fileName = row.Entry.Available?.FileName ?? row.Name + ".onnx";
+        var partial = new FileInfo(Path.Combine(ModelsFolder, fileName + ModelDownloader.PartialSuffix));
+        return partial.Exists ? partial.Length : null;
+    }
+
+    private void UpdateCanOfferRecommended() =>
+        CanOfferRecommended = _loaded && !Models.Any(row => row.IsInstalled) && !_downloads.HasActiveDownloads;
 
     private void UpdateRunState()
     {
@@ -891,6 +1048,9 @@ public sealed partial class ModelsViewModel : ObservableObject
 
     [LoggerMessage(EventId = 416, Level = LogLevel.Error, Message = "Models page background work failed")]
     private static partial void LogBackgroundFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 417, Level = LogLevel.Warning, Message = "Removing the leftover file {Path} failed")]
+    private static partial void LogCleanupFailed(ILogger logger, Exception exception, string path);
 
     /// <summary>A synchronous progress sink (System.Progress would capture a context the calibration thread does not need).</summary>
     private sealed class CalibrationProgressSink(Action<CalibrationProgress> report) : IProgress<CalibrationProgress>

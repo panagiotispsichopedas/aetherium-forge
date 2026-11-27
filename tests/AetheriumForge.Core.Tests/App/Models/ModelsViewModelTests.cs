@@ -585,6 +585,212 @@ public sealed class ModelsViewModelTests
         Assert.Empty(gpu.Runs);
     }
 
+    [Fact]
+    public async Task CalibrateAsync_RunStartsWhileVideoMemoryIsQueried_DoesNotCalibrate()
+    {
+        // Arrange
+        using var fixture = SimulatedModelsPage.Create(out var gpu);
+        fixture.Install(ModelsPageFixture.General);
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RefreshAsync());
+        var started = false;
+        gpu.OnQueryVideoMemory = () =>
+        {
+            if (!started)
+            {
+                started = true;
+                fixture.Runner.SetState(PipelineState.Running);
+            }
+        };
+
+        // Act
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.CalibrateAsync(Assert.Single(fixture.ViewModel.Families)));
+
+        // Assert
+        Assert.Equal((0, "A pipeline run started; calibrate after it ends.", false), (gpu.Runs.Count, fixture.ViewModel.CalibrationStatus, fixture.ViewModel.IsCalibrating));
+    }
+
+    [Fact]
+    public async Task RunFirstRunCheckAsync_LaterChosen_DoesNotPromptInTheNextSession()
+    {
+        // Arrange
+        using var fixture = new ModelsPageFixture();
+        fixture.Dialogs.FirstRunChoice = ModelFirstRunChoice.Later;
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RunFirstRunCheckAsync());
+        var nextSession = fixture.NewViewModel();
+
+        // Act
+        await fixture.Ui.RunAsync(() => nextSession.RunFirstRunCheckAsync());
+
+        // Assert
+        Assert.Single(fixture.Dialogs.FirstRunPrompts);
+    }
+
+    [Fact]
+    public async Task OfferRecommendedModelsCommand_AfterLater_PromptsAgain()
+    {
+        // Arrange
+        using var fixture = new ModelsPageFixture();
+        fixture.Dialogs.FirstRunChoice = ModelFirstRunChoice.Later;
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RunFirstRunCheckAsync());
+        var canOffer = await fixture.Ui.ReadAsync(() => fixture.ViewModel.OfferRecommendedModelsCommand.CanExecute(null));
+
+        // Act
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.OfferRecommendedModelsCommand.ExecuteAsync(null));
+
+        // Assert
+        Assert.Equal((true, 2), (canOffer, fixture.Dialogs.FirstRunPrompts.Count));
+    }
+
+    [Fact]
+    public async Task VerifyCommand_DuringUpdateDownload_IsDisabledAndRefuses()
+    {
+        // Arrange
+        using var fixture = new ModelsPageFixture();
+        fixture.Install(ModelsPageFixture.General, ModelTestDataBytes(1000));
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RefreshAsync());
+        var row = fixture.Row(ModelsPageFixture.General);
+        var paused = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Downloads.OperationChanged += (_, operation) =>
+        {
+            if (operation.Status == ModelDownloadStatus.Downloading && operation.Progress is { BytesDone: > 0 } && !paused.Task.IsCompleted)
+            {
+                operation.Pause();
+                paused.TrySetResult();
+            }
+        };
+        await fixture.Ui.RunAsync(() => row.DownloadCommand.ExecuteAsync(null));
+        await paused.Task.WaitAsync(_timeout, Ct);
+
+        // Act
+        var canVerify = await fixture.Ui.ReadAsync(() => row.VerifyCommand.CanExecute(null));
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.VerifyAsync(row));
+        var message = await fixture.Ui.ReadAsync(() => row.Message);
+        fixture.Downloads.Find(ModelsPageFixture.General)!.Unpause();
+        await WaitForDownloadAsync(fixture, ModelsPageFixture.General);
+
+        // Assert
+        Assert.Equal((false, "Verify after the download ends."), (canVerify, message));
+    }
+
+    [Fact]
+    public async Task DeleteCommand_RunStartsWhileConfirming_KeepsModel()
+    {
+        // Arrange
+        using var fixture = new ModelsPageFixture();
+        fixture.Install(ModelsPageFixture.General);
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RefreshAsync());
+        fixture.Dialogs.DuringConfirmDelete = () => fixture.Runner.SetState(PipelineState.Running);
+
+        // Act
+        await fixture.Ui.RunAsync(() => fixture.Row(ModelsPageFixture.General).DeleteCommand.ExecuteAsync(null));
+
+        // Assert
+        Assert.Equal(
+            (true, "A run or calibration is using the models; delete it after it ends."),
+            (File.Exists(fixture.ModelPath(ModelsPageFixture.General)), fixture.Row(ModelsPageFixture.General).Message));
+    }
+
+    [Fact]
+    public async Task DiscardPartialCommand_Declined_ShowsSizeAndKeepsPartial()
+    {
+        // Arrange
+        using var fixture = new ModelsPageFixture();
+        var partial = fixture.ModelPath(ModelsPageFixture.General) + ModelDownloader.PartialSuffix;
+        File.WriteAllBytes(partial, ModelTestDataBytes(1000));
+        fixture.Dialogs.ConfirmDiscard = false;
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RefreshAsync());
+
+        // Act
+        await fixture.Ui.RunAsync(() => fixture.Row(ModelsPageFixture.General).DiscardPartialCommand.ExecuteAsync(null));
+
+        // Assert
+        var shown = Assert.Single(fixture.Dialogs.DiscardConfirmations);
+        Assert.Equal(($"{ModelsPageFixture.General} display", 1000L, true), (shown.DisplayName, shown.PartialBytes, File.Exists(partial)));
+    }
+
+    [Fact]
+    public async Task DiscardPartialCommand_Confirmed_RemovesPartial()
+    {
+        // Arrange
+        using var fixture = new ModelsPageFixture();
+        var partial = fixture.ModelPath(ModelsPageFixture.General) + ModelDownloader.PartialSuffix;
+        File.WriteAllBytes(partial, ModelTestDataBytes(1000));
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RefreshAsync());
+
+        // Act
+        await fixture.Ui.RunAsync(() => fixture.Row(ModelsPageFixture.General).DiscardPartialCommand.ExecuteAsync(null));
+
+        // Assert
+        Assert.Equal((false, false), (File.Exists(partial), fixture.Row(ModelsPageFixture.General).HasPartialDownload));
+    }
+
+    [Fact]
+    public async Task DeleteCommand_WithPartialUpdate_ConfirmationShowsPartialSize()
+    {
+        // Arrange
+        using var fixture = new ModelsPageFixture();
+        fixture.Install(ModelsPageFixture.General, ModelTestDataBytes(1000));
+        File.WriteAllBytes(fixture.ModelPath(ModelsPageFixture.General) + ModelDownloader.PartialSuffix, ModelTestDataBytes(700));
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RefreshAsync());
+
+        // Act
+        await fixture.Ui.RunAsync(() => fixture.Row(ModelsPageFixture.General).DeleteCommand.ExecuteAsync(null));
+
+        // Assert
+        Assert.Equal(700L, Assert.Single(fixture.Dialogs.DeletePartialBytes));
+    }
+
+    [Fact]
+    public async Task SaveCustomModelCommand_WhileSaving_IsDisabledAndCopiesNothing()
+    {
+        // Arrange
+        using var fixture = new ModelsPageFixture();
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RefreshAsync());
+        fixture.ViewModel.OpenCustomForm(CustomSource(fixture, "busy-model.onnx"));
+        fixture.ViewModel.IsSavingCustom = true;
+        var commands = (fixture.ViewModel.AddCustomModelCommand.CanExecute(null), fixture.ViewModel.SaveCustomModelCommand.CanExecute(null));
+
+        // Act
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.SaveCustomModelCommand.ExecuteAsync(null));
+
+        // Assert
+        Assert.Equal(((false, false), false), (commands, File.Exists(fixture.ModelPath("busy-model"))));
+    }
+
+    [Fact]
+    public async Task SaveCustomModelCommand_SidecarCannotBeWritten_RemovesCopiedModel()
+    {
+        // Arrange
+        using var fixture = new ModelsPageFixture();
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RefreshAsync());
+        fixture.ViewModel.OpenCustomForm(CustomSource(fixture, "broken-sidecar.onnx"));
+
+        // A folder where the temporary sidecar goes: creating the file fails.
+        Directory.CreateDirectory(Path.ChangeExtension(fixture.ModelPath("broken-sidecar"), ".json") + ".writing");
+
+        // Act
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.SaveCustomModelCommand.ExecuteAsync(null));
+
+        // Assert
+        Assert.Equal(
+            (true, false, false, false),
+            (fixture.ViewModel.CustomError is not null, File.Exists(fixture.ModelPath("broken-sidecar")), File.Exists(fixture.ModelPath("broken-sidecar") + ".copying"), fixture.ViewModel.IsSavingCustom));
+    }
+
+    [Fact]
+    public async Task RefreshAsync_Always_QueriesDxgiOffTheUiThread()
+    {
+        // Arrange
+        var adapters = new FakeAdapterProvider(FakeAdapterProvider.Discrete(8));
+        using var fixture = new ModelsPageFixture(adapters);
+
+        // Act
+        await fixture.Ui.RunAsync(() => fixture.ViewModel.RefreshAsync());
+
+        // Assert
+        Assert.Equal((true, false), (adapters.CallingThreads.Count >= 2, adapters.CallingThreads.Contains(fixture.Ui.ManagedThreadId)));
+    }
+
     private static string CustomSource(ModelsPageFixture fixture, string fileName)
     {
         var folder = Path.Combine(fixture.Folder.Root, "import");

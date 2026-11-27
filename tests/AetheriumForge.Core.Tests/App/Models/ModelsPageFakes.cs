@@ -29,6 +29,15 @@ internal sealed class FakeModelDialogs : IModelDialogs
 
     public List<string> DeleteConfirmations { get; } = [];
 
+    public List<long?> DeletePartialBytes { get; } = [];
+
+    /// <summary>Gets or sets an action run while the delete confirmation is "open" (before it returns).</summary>
+    public Action? DuringConfirmDelete { get; set; }
+
+    public bool ConfirmDiscard { get; set; } = true;
+
+    public List<(string DisplayName, long PartialBytes)> DiscardConfirmations { get; } = [];
+
     public List<ModelFirstRunRecommendation> FirstRunPrompts { get; } = [];
 
     public List<string> CalibrationOffers { get; } = [];
@@ -39,10 +48,18 @@ internal sealed class FakeModelDialogs : IModelDialogs
         return Task.FromResult(ConfirmDownload);
     }
 
-    public Task<bool> ConfirmDeleteAsync(string displayName)
+    public Task<bool> ConfirmDeleteAsync(string displayName, long? partialBytes)
     {
         DeleteConfirmations.Add(displayName);
+        DeletePartialBytes.Add(partialBytes);
+        DuringConfirmDelete?.Invoke();
         return Task.FromResult(ConfirmDelete);
+    }
+
+    public Task<bool> ConfirmDiscardPartialAsync(string displayName, long partialBytes)
+    {
+        DiscardConfirmations.Add((displayName, partialBytes));
+        return Task.FromResult(ConfirmDiscard);
     }
 
     public Task<ModelFirstRunChoice> ShowFirstRunAsync(ModelFirstRunRecommendation recommendation)
@@ -101,14 +118,25 @@ internal sealed class FakeAdapterProvider(params GpuAdapterInfo[] adapters) : IG
 {
     public VideoMemoryInfo? Memory { get; set; }
 
+    /// <summary>Gets the managed thread ids that called <see cref="GetAdapters"/> or <see cref="QueryVideoMemory"/>.</summary>
+    public ConcurrentBag<int> CallingThreads { get; } = [];
+
     public static GpuAdapterInfo Discrete(ulong dedicatedGiB, string driver = "32.0.15.8266") =>
         new(0x42, 0, $"Test GPU {dedicatedGiB}GB", 0x10DE, 0x1B80, dedicatedGiB << 30, 16UL << 30, false, false, driver);
 
     public static GpuAdapterInfo Integrated() => new(0x43, 1, "Test iGPU", 0x8086, 0x3E92, 128UL << 20, 8UL << 30, true, false, "31.0.101.2111");
 
-    public IReadOnlyList<GpuAdapterInfo> GetAdapters() => adapters;
+    public IReadOnlyList<GpuAdapterInfo> GetAdapters()
+    {
+        CallingThreads.Add(Environment.CurrentManagedThreadId);
+        return adapters;
+    }
 
-    public VideoMemoryInfo? QueryVideoMemory(long luid) => Memory;
+    public VideoMemoryInfo? QueryVideoMemory(long luid)
+    {
+        CallingThreads.Add(Environment.CurrentManagedThreadId);
+        return Memory;
+    }
 }
 
 /// <summary>
@@ -132,8 +160,12 @@ internal sealed class ModelsPageFixture : IDisposable
         Profiler = profiler ?? new GpuProfiler(Adapters);
         Store = new GpuProfileStore(Path.Combine(Folder.Root, "gpu-profiles.json"));
         Downloads = new ModelDownloadCoordinator(CreateLibrary);
-        ViewModel = new ModelsViewModel(CreateLibrary, Downloads, Adapters, Profiler, Store, Dialogs, null, Runner, Ui.Post);
+        Settings = new JsonModelsPageSettings(Path.Combine(Folder.Root, "models-page.json"));
+        ViewModel = NewViewModel();
     }
+
+    /// <summary>Gets the page settings (a real file in the temporary folder, so a second view model sees what the first stored).</summary>
+    public IModelsPageSettings Settings { get; }
 
     public TempModelsFolder Folder { get; } = new();
 
@@ -175,6 +207,9 @@ internal sealed class ModelsPageFixture : IDisposable
         new(Folder.ModelsFolder, new ModelManifestClient(_http, Options), new ModelDownloader(_http, Folder.ModelsFolder, Options));
 
     public ModelRowViewModel Row(string name) => ViewModel.Models.Single(row => row.Name == name);
+
+    /// <summary>Creates another page over the same folder, coordinator and settings: the app's next session.</summary>
+    public ModelsViewModel NewViewModel() => new(CreateLibrary, Downloads, Adapters, Profiler, Store, Dialogs, Settings, null, Runner, Ui.Post);
 
     public string ModelPath(string name) => Path.Combine(Folder.ModelsFolder, name + ".onnx");
 
@@ -282,6 +317,8 @@ internal sealed class TestUiThread : IDisposable
         _thread = new Thread(Loop) { IsBackground = true, Name = "Test UI thread" };
         _thread.Start();
     }
+
+    public int ManagedThreadId => _thread.ManagedThreadId;
 
     public void Post(Action action)
     {

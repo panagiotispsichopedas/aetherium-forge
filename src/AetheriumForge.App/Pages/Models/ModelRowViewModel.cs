@@ -14,12 +14,14 @@ public sealed partial class ModelRowViewModel : ObservableObject
 
     /// <summary>Gets or sets the library entry.</summary>
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(State), nameof(DisplayName), nameof(SizeText), nameof(Precision), nameof(Tier), nameof(Licence), nameof(LicenceUrl), nameof(HasLicenceUrl), nameof(IsInstalled), nameof(CanDownload), nameof(DownloadLabel), nameof(StateText), nameof(HasPartialDownload), nameof(CanDiscardPartial))]
+    [NotifyPropertyChangedFor(nameof(State), nameof(DisplayName), nameof(SizeText), nameof(Precision), nameof(Tier), nameof(Licence), nameof(LicenceUrl), nameof(HasLicenceUrl), nameof(IsInstalled), nameof(CanDownload), nameof(DownloadLabel), nameof(StateText), nameof(HasPartialDownload), nameof(CanDiscardPartial), nameof(CanVerify))]
+    [NotifyCanExecuteChangedFor(nameof(VerifyCommand))]
     private ModelEntry _entry;
 
     /// <summary>Gets or sets the latest download of this model, or <see langword="null"/>.</summary>
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsDownloading), nameof(IsPaused), nameof(IsTransferActive), nameof(CanDownload), nameof(StateText), nameof(ProgressPercent), nameof(ProgressText), nameof(CanDiscardPartial))]
+    [NotifyPropertyChangedFor(nameof(IsDownloading), nameof(IsPaused), nameof(IsTransferActive), nameof(CanDownload), nameof(StateText), nameof(ProgressPercent), nameof(ProgressText), nameof(CanDiscardPartial), nameof(CanVerify))]
+    [NotifyCanExecuteChangedFor(nameof(VerifyCommand))]
     private ModelDownloadOperation? _download;
 
     /// <summary>Gets or sets the result of the last action on this row (verification, failure), or <see langword="null"/>.</summary>
@@ -28,6 +30,8 @@ public sealed partial class ModelRowViewModel : ObservableObject
 
     /// <summary>Gets or sets a value indicating whether a verification is running.</summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanVerify))]
+    [NotifyCanExecuteChangedFor(nameof(VerifyCommand))]
     private bool _isVerifying;
 
     /// <summary>
@@ -92,6 +96,12 @@ public sealed partial class ModelRowViewModel : ObservableObject
     /// <summary>Gets a value indicating whether Download (or Update / Resume) is offered.</summary>
     public bool CanDownload => Entry.Available is not null && Entry.State is ModelState.NotInstalled or ModelState.UpdateAvailable && !IsTransferActive;
 
+    /// <summary>
+    /// Gets a value indicating whether Verify is offered: the model is installed, no verification runs, and no download or update of it is
+    /// active (the transfer replaces the file being hashed).
+    /// </summary>
+    public bool CanVerify => IsInstalled && !IsVerifying && !IsTransferActive;
+
     /// <summary>Gets a value indicating whether a leftover partial file can be discarded.</summary>
     public bool CanDiscardPartial => HasPartialDownload && Entry.Installed is null && !IsTransferActive;
 
@@ -153,7 +163,7 @@ public sealed partial class ModelRowViewModel : ObservableObject
 
     /// <summary>Re-hashes the installed file.</summary>
     /// <returns>A task that completes when verified.</returns>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanVerify))]
     private Task VerifyAsync() => _owner.VerifyAsync(this);
 
     /// <summary>Deletes the model after confirmation.</summary>
@@ -174,6 +184,8 @@ public sealed partial class ModelRowViewModel : ObservableObject
         OnPropertyChanged(nameof(IsTransferActive));
         OnPropertyChanged(nameof(CanDownload));
         OnPropertyChanged(nameof(CanDiscardPartial));
+        OnPropertyChanged(nameof(CanVerify));
+        VerifyCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(StateText));
         OnPropertyChanged(nameof(ProgressPercent));
         OnPropertyChanged(nameof(ProgressText));

@@ -17,8 +17,8 @@ public static class ModelsPageServiceCollectionExtensions
     /// <summary>
     /// Registers model downloads (<see cref="ModelDownloadsServiceCollectionExtensions.AddModelDownloads"/>), the DXGI
     /// <see cref="IGpuAdapterProvider"/>, <see cref="GpuProfiler"/> and <see cref="GpuProfileStore"/> (with <c>TryAdd</c>, because the Run
-    /// page registers them too), the <see cref="ModelDownloadCoordinator"/>, the dialogs, <see cref="ModelsViewModel"/> and the first-run
-    /// prompt.
+    /// page registers them too), the <see cref="ModelDownloadCoordinator"/>, the dialogs, the page settings
+    /// (<c>%LOCALAPPDATA%\AetheriumForge\models-page.json</c>), <see cref="ModelsViewModel"/> and the first-run prompt.
     /// </summary>
     /// <param name="services">The service collection.</param>
     /// <returns><paramref name="services"/>.</returns>
@@ -31,6 +31,9 @@ public static class ModelsPageServiceCollectionExtensions
         services.TryAddSingleton(sp => new GpuProfileStore(null, sp.GetService<ILogger<GpuProfileStore>>()));
         services.TryAddSingleton(sp => new ModelDownloadCoordinator(sp.GetRequiredService<ModelLibrary>, sp.GetService<ILogger<ModelDownloadCoordinator>>()));
         services.TryAddSingleton<IModelDialogs, AvaloniaModelDialogs>();
+        services.TryAddSingleton<IModelsPageSettings>(sp => new JsonModelsPageSettings(
+            Path.Combine(Shell.AppHost.AppDataFolder, "models-page.json"),
+            sp.GetService<ILogger<JsonModelsPageSettings>>()));
         services.TryAddSingleton(sp => new ModelsViewModel(
             sp.GetRequiredService<ModelLibrary>,
             sp.GetRequiredService<ModelDownloadCoordinator>(),
@@ -38,6 +41,7 @@ public static class ModelsPageServiceCollectionExtensions
             sp.GetRequiredService<GpuProfiler>(),
             sp.GetRequiredService<GpuProfileStore>(),
             sp.GetRequiredService<IModelDialogs>(),
+            sp.GetRequiredService<IModelsPageSettings>(),
             sp.GetService<INavigationService>(),
             sp.GetService<IForgeRunner>(),
             action => Dispatcher.UIThread.Post(action),

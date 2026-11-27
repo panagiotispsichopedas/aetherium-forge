@@ -26,10 +26,19 @@ public sealed class AvaloniaModelDialogs : IModelDialogs
     }
 
     /// <inheritdoc />
-    public async Task<bool> ConfirmDeleteAsync(string displayName)
+    public async Task<bool> ConfirmDeleteAsync(string displayName, long? partialBytes)
     {
-        var body = Text($"Delete {displayName}? Its .onnx file and sidecar are removed from the models folder.");
+        var body = Text(partialBytes is { } partial
+            ? $"Delete {displayName}? Its .onnx file, sidecar and partial download ({ModelFormatting.Bytes(partial)}) are removed from the models folder."
+            : $"Delete {displayName}? Its .onnx file and sidecar are removed from the models folder.");
         return await ShowAsync("Delete model", body, ("Delete", true), ("Cancel", false));
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> ConfirmDiscardPartialAsync(string displayName, long partialBytes)
+    {
+        var body = Text($"Discard the partial download of {displayName} ({ModelFormatting.Bytes(partialBytes)})? The next download starts from the beginning.");
+        return await ShowAsync("Discard partial download", body, ("Discard", true), ("Cancel", false));
     }
 
     /// <inheritdoc />
