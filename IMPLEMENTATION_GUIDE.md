@@ -49,8 +49,9 @@ Check every package version on NuGet at implementation time and pin it in `Direc
 
 ```
 Aetherium Forge/
-├─ AetheriumForge.sln
-├─ Directory.Build.props          (net10.0, nullable, LangVersion latest, TreatWarningsAsErrors)
+├─ AetheriumForge.slnx
+├─ global.json                    (SDK pin; Microsoft.Testing.Platform test runner)
+├─ Directory.Build.props          (net10.0-windows, win-x64, nullable, TreatWarningsAsErrors, MinVer)
 ├─ Directory.Packages.props       (central package versions)
 ├─ assets/                        (icon sources: SVG, ICO, PNG)
 ├─ tools/                         (texconv.exe; not committed, fetched by a script)

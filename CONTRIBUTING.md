@@ -19,6 +19,21 @@ git merge --no-ff feature/my-change
 
 On GitHub, complete pull requests with **Create a merge commit**. Do not squash, rebase-merge or cherry-pick as the integration method.
 
+## CI and releases
+
+- `CI` workflow: builds and tests every push and pull request on `main` and `develop`. It produces no packages.
+- `Release` workflow: runs only on a version tag `vX.Y.Z` (for example `v0.1.0`) whose commit is on `main`. It builds, tests, packages the app and creates a draft GitHub release.
+- The version comes from the tag through [MinVer](https://github.com/adamralph/minver). Never hard-code `<Version>`.
+
+To release, merge `develop` into `main` with a merge-commit PR, then tag the merge commit on `main`:
+
+```powershell
+git switch main
+git pull
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
 ## Commit messages
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):
