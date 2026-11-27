@@ -86,11 +86,35 @@ public sealed class ProjectSessionTests : IDisposable
     public async Task OpenAsync_ScannedProject_LoadsGameAndRules()
     {
         await ScanIntoAsync(ProjectFolder());
+        _session.Dispose(); // releases the project lock, like closing the app
         using var reopened = new ProjectSession(_settings, TimeProvider.System, postToUi: action => action());
 
         await reopened.OpenAsync(ProjectFolder(), Ct);
 
         Assert.Equal((_gameFolder, ForgeRules.Default.MinSource), (reopened.Current?.GameFolder, reopened.Current?.Rules.MinSource));
+    }
+
+    [Fact]
+    public async Task OpenAsync_ProjectOpenInAnotherSession_ThrowsProjectLockedException()
+    {
+        // Arrange: _session holds the project's lock (as the desktop app or the CLI would).
+        await ScanIntoAsync(ProjectFolder());
+        using var second = new ProjectSession(_settings, TimeProvider.System, postToUi: action => action());
+
+        // Act + Assert
+        await Assert.ThrowsAsync<AetheriumForge.Core.Concurrency.ProjectLockedException>(() => second.OpenAsync(ProjectFolder(), Ct));
+    }
+
+    [Fact]
+    public async Task OpenAsync_AfterOwnerCloses_Succeeds()
+    {
+        await ScanIntoAsync(ProjectFolder());
+        _session.Dispose();
+        using var second = new ProjectSession(_settings, TimeProvider.System, postToUi: action => action());
+
+        await second.OpenAsync(ProjectFolder(), Ct);
+
+        Assert.NotNull(second.Store);
     }
 
     [Fact]
@@ -129,6 +153,7 @@ public sealed class ProjectSessionTests : IDisposable
     {
         await ScanIntoAsync(ProjectFolder("a"));
         await ScanIntoAsync(ProjectFolder("b"));
+        _session.Dispose(); // a restart: the first app's project lock is gone
         using var restarted = new ProjectSession(_settings, TimeProvider.System, postToUi: action => action());
 
         var opened = await restarted.ReopenLastAsync(Ct);
@@ -193,6 +218,7 @@ public sealed class ProjectSessionTests : IDisposable
     public async Task OpenAsync_SettingsCannotBeSaved_StillOpensAndRaisesChanged()
     {
         await ScanIntoAsync(ProjectFolder());
+        _session.Dispose(); // release the project lock before another session opens it
         using var session = new ProjectSession(new FailingSettings(), TimeProvider.System, postToUi: action => action());
         var changed = 0;
         session.Changed += (_, _) => changed++;
@@ -236,6 +262,7 @@ public sealed class ProjectSessionTests : IDisposable
     public async Task ReopenLastAsync_InvalidRecentEntryFirst_OpensTheNextProject()
     {
         await ScanIntoAsync(ProjectFolder("a"));
+        _session.Dispose(); // release the project lock before another session opens it
         using var session = new ProjectSession(new FixedSettings(["bad\0path|", ProjectFolder("a")]), TimeProvider.System, postToUi: action => action());
 
         var opened = await session.ReopenLastAsync(Ct);
