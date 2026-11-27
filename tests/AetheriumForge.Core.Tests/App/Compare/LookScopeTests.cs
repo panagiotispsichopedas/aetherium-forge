@@ -377,8 +377,7 @@ public sealed class LookScopeTests : IDisposable
         await viewModel.ApplyAsync();
 
         // Assert
-        var stored = await new ProjectLookScopeStore(_data).GetAsync(LookScope.All, null, null, TestContext.Current.CancellationToken);
-        Assert.Equal((1.3, 2), (stored.Values[LookControl.Saturation], _data.Requeued.Count));
+        Assert.Equal((1.3, 2), (_data.Rules.Look!.Saturation, _data.Requeued.Count));
     }
 
     [Fact]
@@ -410,8 +409,7 @@ public sealed class LookScopeTests : IDisposable
         await viewModel.ApplyAsync();
 
         // Assert
-        var stored = await new ProjectLookScopeStore(_data).GetAsync(LookScope.Texture, null, path, TestContext.Current.CancellationToken);
-        Assert.Equal((0.8, viewModel.SelectedSample.Job.Id, 1, (LookSettings?)null), (stored.Values[LookControl.Gamma], _data.Requeued.Single(), _data.Requeued.Count, _data.Rules.Groups[0].Look));
+        Assert.Equal((0.8, viewModel.SelectedSample.Job.Id, 1, (double?)null), (_data.TextureLooks[path].Gamma, _data.Requeued.Single(), _data.Requeued.Count, _data.Rules.Groups[0].Look?.Gamma));
     }
 
     [Fact]
@@ -426,7 +424,7 @@ public sealed class LookScopeTests : IDisposable
         await viewModel.ApplyAsync();
 
         // Assert
-        Assert.Equal((true, 0), (viewModel.HasError, _data.Values.Count));
+        Assert.Equal((true, 0), (viewModel.HasError, _data.TextureLooks.Count + _data.Saves));
     }
 
     [Fact]
@@ -471,15 +469,15 @@ public sealed class LookScopeTests : IDisposable
         Assert.Equal((false, 1.0), (viewModel.Look.IsScopeDirty, viewModel.Look[LookControl.Contrast].Value));
     }
 
-    // ── Interim store ──
+    // ── Core store ──
 
     [Fact]
-    public async Task Store_TextureOverride_RoundTripsByNormalisedPath()
+    public async Task Store_TextureOverride_RoundTrips()
     {
         // Arrange
-        var store = new ProjectLookScopeStore(_data);
+        var store = new CoreLookScopeStore(_data);
         var look = LookOverrides.Empty.With(LookControl.Temperature, -0.25);
-        await store.SaveAsync(LookScope.Texture, null, "Textures/Clutter/A.dds", look, TestContext.Current.CancellationToken);
+        await store.SaveAsync(LookScope.Texture, null, "textures\\clutter\\a.dds", look, TestContext.Current.CancellationToken);
 
         // Act
         var read = await store.GetAsync(LookScope.Texture, null, "textures\\clutter\\a.dds", TestContext.Current.CancellationToken);
@@ -489,17 +487,58 @@ public sealed class LookScopeTests : IDisposable
     }
 
     [Fact]
+    public async Task Store_GroupWithoutLook_ReadsTheNormalStrengthAlias()
+    {
+        // Arrange
+        var store = new CoreLookScopeStore(_data);
+
+        // Act
+        var read = await store.GetAsync(LookScope.Group, "Clutter", null, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal(1.4, read.NormalStrength);
+    }
+
+    [Fact]
+    public async Task Store_AllScope_WritesForgeRulesLook()
+    {
+        // Arrange
+        var store = new CoreLookScopeStore(_data);
+
+        // Act
+        await store.SaveAsync(LookScope.All, null, null, LookOverrides.Empty.With(LookControl.Gamma, 1.1), TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal(1.1, _data.Rules.Look!.Gamma);
+    }
+
+    [Fact]
+    public async Task FindAffectedFinishedAsync_ChangeThatDoesNotApplyToTheKind_ListsNothing()
+    {
+        // Arrange: a colour-only change does not change the look hash of a normal map.
+        _data.Jobs.Add(CompareFakeData.Job(1, "Clutter", kind: "Normal"));
+        var store = new CoreLookScopeStore(_data);
+        await store.SaveAsync(LookScope.Group, "Clutter", null, LookOverrides.Empty.With(LookControl.Saturation, 1.5), TestContext.Current.CancellationToken);
+
+        // Act
+        var affected = await store.FindAffectedFinishedAsync(LookScope.Group, "Clutter", null, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Empty(affected);
+    }
+
+    [Fact]
     public async Task Store_EmptyGroupLook_ClearsTheGroupsLook()
     {
         // Arrange
-        var store = new ProjectLookScopeStore(_data);
+        var store = new CoreLookScopeStore(_data);
         await store.SaveAsync(LookScope.Group, "Clutter", null, LookOverrides.Empty.With(LookControl.Gamma, 1.2), TestContext.Current.CancellationToken);
 
         // Act
         await store.SaveAsync(LookScope.Group, "Clutter", null, LookOverrides.Empty, TestContext.Current.CancellationToken);
 
         // Assert
-        Assert.Equal(((LookSettings?)null, 1.0), (_data.Rules.Groups[0].Look, _data.Rules.Groups[0].NormalStrength));
+        Assert.Equal(((LookOverrides?)null, 1.0), (_data.Rules.Groups[0].Look, _data.Rules.Groups[0].NormalStrength));
     }
 
     [Fact]

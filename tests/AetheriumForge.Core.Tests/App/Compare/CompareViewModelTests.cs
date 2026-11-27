@@ -131,7 +131,7 @@ public sealed class CompareViewModelTests : IDisposable
         await viewModel.ApplyAsync();
 
         // Assert
-        Assert.Equal((LookPresets.Crisp.Look, 1, 0), (_data.Rules.Groups[0].Look, _dialogs.Questions.Count, _data.Requeued.Count));
+        Assert.Equal((LookPresets.Crisp.Look, 1, 0), (LookResolver.Resolve(_data.Rules, "Clutter", null), _dialogs.Questions.Count, _data.Requeued.Count));
     }
 
     [Fact]
@@ -160,6 +160,7 @@ public sealed class CompareViewModelTests : IDisposable
         _data.Jobs.Add(CompareFakeData.Job(1, "Clutter"));
         var viewModel = ViewModel();
         await viewModel.RefreshAsync();
+        viewModel.Look.SetValue(LookControl.Contrast, 1.2);
 
         // Act
         await viewModel.ApplyAsync();

@@ -1,11 +1,11 @@
 using AetheriumForge.Core.Jobs;
+using AetheriumForge.Core.Rules;
 
 namespace AetheriumForge.App.Pages.Compare;
 
 /// <summary>
 /// Where a scope's look lives (§8 "Scopes"): the All and group looks in the rules, per-texture overrides in the project database.
-/// The Look panel codes against this adapter; the Core look work (partial looks, <c>ForgeRules.Look</c>, the <c>texture_look</c> table,
-/// the look resolver) plugs in behind it.
+/// The Look panel codes against this adapter; <see cref="CoreLookScopeStore"/> implements it with the Core look APIs.
 /// </summary>
 public interface ILookScopeStore
 {

@@ -132,7 +132,7 @@ public sealed partial class LookPanelViewModel : ObservableObject
     public void ApplyPreset(LookSettings look)
     {
         ArgumentNullException.ThrowIfNull(look);
-        SetWorking(LookOverrides.FromLook(look, onlyNonNeutral: false));
+        SetWorking(LookOverrides.From(look) with { Denoise = null });
     }
 
     /// <summary>Replaces the edited scope's working overrides (Undo).</summary>
@@ -198,8 +198,9 @@ public sealed partial class LookPanelViewModel : ObservableObject
         foreach (var row in Controls)
         {
             var (inherited, source) = LookLayers.Inherited(Scope, row.Control, _working[LookScope.All], _working[LookScope.Group]);
-            var isSet = current.TryGet(row.Control, out var own);
-            row.Update(isSet ? own : inherited, isSet, inherited, source);
+            var own = current.Get(row.Control);
+            var isSet = own is not null;
+            row.Update(own ?? inherited, isSet, inherited, source);
             row.IsApplicable = IsEnabled(row.Control);
             row.Tooltip = LookControls.DisabledReason(row.Control, Kind, UsesModel) ?? DescriptionOf(row.Control);
         }

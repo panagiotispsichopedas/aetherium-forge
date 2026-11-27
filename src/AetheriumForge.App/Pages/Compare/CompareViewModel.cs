@@ -61,7 +61,7 @@ public sealed partial class CompareViewModel : ObservableObject
     /// <param name="data">The project rules and jobs.</param>
     /// <param name="dialogs">Confirmation prompts.</param>
     /// <param name="random">Picks random samples; inject a seeded instance for deterministic picks.</param>
-    /// <param name="lookStore">Where scope looks are stored; defaults to <see cref="ProjectLookScopeStore"/> over <paramref name="data"/>.</param>
+    /// <param name="lookStore">Where scope looks are stored; defaults to <see cref="CoreLookScopeStore"/> over <paramref name="data"/>.</param>
     /// <param name="logger">Logger; <see langword="null"/> disables logging.</param>
     /// <param name="runner">The pipeline runner, or <see langword="null"/> when none is registered; its state locks GPU previews and rule changes.</param>
     public CompareViewModel(
@@ -81,7 +81,7 @@ public sealed partial class CompareViewModel : ObservableObject
         _data = data;
         _dialogs = dialogs;
         _random = random ?? Random.Shared;
-        _looks = lookStore ?? new ProjectLookScopeStore(data);
+        _looks = lookStore ?? new CoreLookScopeStore(data);
         _logger = logger ?? NullLogger<CompareViewModel>.Instance;
         _runner = runner;
         _uiContext = SynchronizationContext.Current;
@@ -851,7 +851,17 @@ public sealed partial class CompareViewModel : ObservableObject
             {
                 BeforeImage = null;
                 AfterImage = null;
-                Status = result.UnavailableReason ?? "Preview not available.";
+                var reason = result.UnavailableReason ?? "Preview not available.";
+                if (reason == PreviewEngine.NoProjectReason)
+                {
+                    Status = reason;
+                }
+                else
+                {
+                    // GPU busy (a run or another GPU job holds it): say who, in the banner, and render nothing.
+                    ShowError(reason);
+                }
+
                 return;
             }
 

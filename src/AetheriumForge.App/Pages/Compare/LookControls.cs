@@ -83,7 +83,7 @@ public static class LookControls
         [LookControl.Gamma] = new(LookControl.Gamma, "Gamma", 0.5, 2.0, 1.0, 0.01),
         [LookControl.Saturation] = new(LookControl.Saturation, "Saturation", 0.0, 2.0, 1.0, 0.01),
         [LookControl.Temperature] = new(LookControl.Temperature, "Temperature", -1.0, 1.0, 0.0, 0.01),
-        [LookControl.NormalStrength] = new(LookControl.NormalStrength, "Relief", 0.0, 3.0, 1.0, 0.05),
+        [LookControl.NormalStrength] = new(LookControl.NormalStrength, "Relief", 0.0, 4.0, 1.0, 0.05),
         [LookControl.SpecularScale] = new(LookControl.SpecularScale, "Shine", 0.0, 2.0, 1.0, 0.05),
     };
 

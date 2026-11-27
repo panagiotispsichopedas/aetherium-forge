@@ -31,7 +31,8 @@ public sealed record PreviewRender(PreviewSample Sample, LookSettings Look, Rgba
 /// </summary>
 /// <remarks>
 /// <para>GPU upscaling is disabled while a pipeline run is active (any state other than <see cref="PipelineState.Idle"/>): only cached
-/// samples are shown then. Upscales run one at a time.</para>
+/// samples are shown then. Upscales run one at a time, each holding the machine-wide GPU lock (<see cref="IPreviewGpuGate"/>); when
+/// another job holds it, the sample is unavailable with the holder named.</para>
 /// <para>Renders go through a <see cref="LatestRenderScheduler{TRequest, TResult}"/>: stale renders are cancelled and intermediate slider
 /// values are skipped.</para>
 /// </remarks>
@@ -42,6 +43,9 @@ public sealed partial class PreviewEngine : IDisposable
 
     /// <summary>The reason shown when a run holds the GPU.</summary>
     public const string GpuBusyReason = "A run is using the GPU. Only cached previews are shown until it ends.";
+
+    /// <summary>What a preview holds the GPU lock for (follows "The GPU is busy with").</summary>
+    public const string GpuPurpose = "a Compare preview";
 
     /// <summary>The reason shown when no project is open.</summary>
     public const string NoProjectReason = "Open a project to preview textures.";
@@ -57,6 +61,7 @@ public sealed partial class PreviewEngine : IDisposable
     private readonly SemaphoreSlim _gpuGate = new(1, 1);
     private readonly LatestRenderScheduler<PreviewRenderRequest, PreviewRender> _renders;
     private readonly ILogger<PreviewEngine> _logger;
+    private readonly IPreviewGpuGate? _gpuLock;
     private readonly Lock _sourceGate = new();
     private readonly LinkedList<(string Key, RgbaImage Image)> _sources = new();
 
@@ -67,8 +72,14 @@ public sealed partial class PreviewEngine : IDisposable
     /// <param name="runnerState">Returns the pipeline state; GPU upscaling runs only while it is <see cref="PipelineState.Idle"/>.</param>
     /// <param name="memoryCapBytes">The LRU memory cap.</param>
     /// <param name="logger">Logger; <see langword="null"/> disables logging.</param>
-    public PreviewEngine(IPreviewBackend backend, Func<PipelineState> runnerState, long memoryCapBytes = PreviewMemoryCache.DefaultCapacityBytes, ILogger<PreviewEngine>? logger = null)
-        : this(backend, runnerState, memoryCapBytes, LookRenderer.Render, logger)
+    /// <param name="gpuLock">The machine-wide GPU lock, taken for every GPU upscale; <see langword="null"/> takes none (tests).</param>
+    public PreviewEngine(
+        IPreviewBackend backend,
+        Func<PipelineState> runnerState,
+        long memoryCapBytes = PreviewMemoryCache.DefaultCapacityBytes,
+        ILogger<PreviewEngine>? logger = null,
+        IPreviewGpuGate? gpuLock = null)
+        : this(backend, runnerState, memoryCapBytes, LookRenderer.Render, logger, gpuLock)
     {
     }
 
@@ -80,7 +91,14 @@ public sealed partial class PreviewEngine : IDisposable
     /// <param name="memoryCapBytes">The LRU memory cap.</param>
     /// <param name="renderer">Renders a look (normally <see cref="LookRenderer.Render"/>).</param>
     /// <param name="logger">Logger; <see langword="null"/> disables logging.</param>
-    internal PreviewEngine(IPreviewBackend backend, Func<PipelineState> runnerState, long memoryCapBytes, Func<LookInput, LookSettings, RgbaImage> renderer, ILogger<PreviewEngine>? logger)
+    /// <param name="gpuLock">The machine-wide GPU lock; <see langword="null"/> takes none.</param>
+    internal PreviewEngine(
+        IPreviewBackend backend,
+        Func<PipelineState> runnerState,
+        long memoryCapBytes,
+        Func<LookInput, LookSettings, RgbaImage> renderer,
+        ILogger<PreviewEngine>? logger,
+        IPreviewGpuGate? gpuLock = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(runnerState);
@@ -92,6 +110,7 @@ public sealed partial class PreviewEngine : IDisposable
         _memory = new PreviewMemoryCache(memoryCapBytes);
         _renders = new LatestRenderScheduler<PreviewRenderRequest, PreviewRender>(RenderAsync);
         _logger = logger ?? NullLogger<PreviewEngine>.Instance;
+        _gpuLock = gpuLock;
     }
 
     /// <summary>Gets or sets the largest side of a draft render.</summary>
@@ -164,7 +183,19 @@ public sealed partial class PreviewEngine : IDisposable
                 return new PreviewLoadResult(null, GpuBusyReason);
             }
 
-            var sample = await BuildAsync(request, progress, cancellationToken).ConfigureAwait(false);
+            // One GPU job per machine: a forge run, a calibration or another app's preview may hold the GPU. Busy = render nothing.
+            IDisposable? gpuHandle = null;
+            if (request.UsesModel && _gpuLock is not null && !_gpuLock.TryAcquire(GpuPurpose, out gpuHandle, out var busy))
+            {
+                return new PreviewLoadResult(null, busy ?? GpuBusyReason);
+            }
+
+            PreviewSample sample;
+            using (gpuHandle)
+            {
+                sample = await BuildAsync(request, progress, cancellationToken).ConfigureAwait(false);
+            }
+
             BuiltSamples++;
             foreach (var evicted in _memory.Add(sample))
             {

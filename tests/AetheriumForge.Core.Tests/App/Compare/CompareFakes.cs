@@ -138,19 +138,33 @@ internal sealed class CompareFakeData : ICompareProjectData
     public Task<IReadOnlyList<JobRecord>> GetGroupJobsAsync(string group, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<JobRecord>>([.. Jobs.Where(job => job.Group == group && job.State != JobState.Skipped).OrderBy(job => job.Id)]);
 
-    public Dictionary<string, string> Values { get; } = new(StringComparer.Ordinal);
+    public Dictionary<string, LookOverrides> TextureLooks { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    public Task<IReadOnlyList<JobRecord>> GetFinishedJobsAsync(CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<JobRecord>>([.. Jobs.Where(job => job.State == JobState.Done).OrderBy(job => job.Id)]);
+    public Task<LookOverrides?> GetTextureLookAsync(string path, CancellationToken cancellationToken) =>
+        Task.FromResult(TextureLooks.TryGetValue(path, out var look) ? look : null);
 
-    public Task<string?> GetProjectValueAsync(string key, CancellationToken cancellationToken) =>
-        Task.FromResult(Values.TryGetValue(key, out var value) ? value : null);
-
-    public Task SetProjectValueAsync(string key, string value, CancellationToken cancellationToken)
+    public Task SetTextureLookAsync(string path, LookOverrides look, CancellationToken cancellationToken)
     {
-        Values[key] = value;
+        if (look.IsEmpty)
+        {
+            TextureLooks.Remove(path);
+        }
+        else
+        {
+            TextureLooks[path] = look;
+        }
+
         return Task.CompletedTask;
     }
+
+    // Same rule as JobStore.FindDoneAffectedByLookChangeAsync: a Done job is affected when the hash of its kind changes.
+    public Task<IReadOnlyList<JobRecord>> FindDoneAffectedByLookChangeAsync(Func<JobRecord, LookOverrides?, LookSettings> effectiveLookAfterChange, string? group, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<JobRecord>>([.. Jobs
+            .Where(job => job.State == JobState.Done && (group is null || string.Equals(job.Group, group, StringComparison.OrdinalIgnoreCase)))
+            .Where(job => job.LookHash is null
+                || !Enum.TryParse<AetheriumForge.Core.Textures.TextureKind>(job.Kind, out var kind)
+                || effectiveLookAfterChange(job, TextureLooks.GetValueOrDefault(job.Path)).GetStableHash(kind) != job.LookHash)
+            .OrderBy(job => job.Id)]);
 
     public Task<int> RequeueDoneAsync(IReadOnlyCollection<long> jobIds, CancellationToken cancellationToken)
     {
@@ -161,7 +175,8 @@ internal sealed class CompareFakeData : ICompareProjectData
     public void RaiseChanged() => Changed?.Invoke(this, EventArgs.Empty);
 
     public static JobRecord Job(long id, string group, JobState state = JobState.Done, string kind = "Diffuse", string? path = null) =>
-        new(id, path ?? $"textures\\{group.ToLowerInvariant()}\\tex{id:D3}.dds", "Skyrim - Textures0.bsa", 8, 8, "BC1_UNORM", kind, group, 16, "fake", state, 0, null, null, null);
+        new(id, path ?? $"textures\\{group.ToLowerInvariant()}\\tex{id:D3}.dds", "Skyrim - Textures0.bsa", 8, 8, "BC1_UNORM", kind, group, 16, "fake", state, 0, null, null, null,
+            Enum.TryParse<AetheriumForge.Core.Textures.TextureKind>(kind, out var parsed) ? LookSettings.Neutral.GetStableHash(parsed) : null);
 }
 
 internal sealed class CompareFakeDialogs : ICompareDialogs

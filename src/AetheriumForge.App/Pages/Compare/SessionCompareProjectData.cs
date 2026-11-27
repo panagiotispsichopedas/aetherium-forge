@@ -1,8 +1,8 @@
 using AetheriumForge.App.Services;
 using AetheriumForge.Core.Common;
 using AetheriumForge.Core.Jobs;
+using AetheriumForge.Core.Projects;
 using AetheriumForge.Core.Rules;
-using Microsoft.Data.Sqlite;
 
 namespace AetheriumForge.App.Pages.Compare;
 
@@ -12,8 +12,8 @@ namespace AetheriumForge.App.Pages.Compare;
 /// <remarks>The rules live in the project key/value table under <see cref="RulesJsonKey"/>, the key the scan writes.</remarks>
 public sealed class SessionCompareProjectData : ICompareProjectData
 {
-    /// <summary>The project key that holds the rules JSON (same as the CLI's <c>ProjectKeys.RulesJson</c>).</summary>
-    public const string RulesJsonKey = "rulesJson";
+    /// <summary>The project key that holds the rules JSON (<see cref="ProjectKeys.RulesJson"/>, the key the scan writes).</summary>
+    public const string RulesJsonKey = ProjectKeys.RulesJson;
 
     private readonly IProjectSession? _session;
 
@@ -89,79 +89,47 @@ public sealed class SessionCompareProjectData : ICompareProjectData
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<JobRecord>> GetFinishedJobsAsync(CancellationToken cancellationToken)
+    public Task<LookOverrides?> GetTextureLookAsync(string path, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(path);
+        return Require().Store.GetTextureLookAsync(path, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task SetTextureLookAsync(string path, LookOverrides look, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(look);
         var (_, store) = Require();
-        var jobs = new List<JobRecord>();
-        await foreach (var job in store.GetJobsAsync(JobState.Done, cancellationToken).ConfigureAwait(false))
+        if (look.IsEmpty)
         {
-            jobs.Add(job);
+            await store.RemoveTextureLookAsync(path, cancellationToken).ConfigureAwait(false);
         }
-
-        return [.. jobs.OrderBy(job => job.Id)];
+        else
+        {
+            await store.SetTextureLookAsync(path, look, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <inheritdoc />
-    public Task<string?> GetProjectValueAsync(string key, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<JobRecord>> FindDoneAffectedByLookChangeAsync(Func<JobRecord, LookOverrides?, LookSettings> effectiveLookAfterChange, string? group, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(key);
-        return Require().Store.GetProjectValueAsync(key, cancellationToken);
+        ArgumentNullException.ThrowIfNull(effectiveLookAfterChange);
+        return Require().Store.FindDoneAffectedByLookChangeAsync(effectiveLookAfterChange, group, cancellationToken);
     }
 
     /// <inheritdoc />
-    public Task SetProjectValueAsync(string key, string value, CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(key);
-        ArgumentNullException.ThrowIfNull(value);
-        return Require().Store.SetProjectValueAsync(key, value, cancellationToken);
-    }
-
-    /// <inheritdoc />
-    /// <remarks>
-    /// TODO(M5 look hashes): replace the direct update with the job store's re-queue API when it lands in Core; <see cref="JobStore"/>
-    /// has no public way to return Done jobs to Queued yet (its upsert deliberately keeps Done rows).
-    /// </remarks>
+    /// <remarks>Uses <see cref="JobStore.SetStateAsync(IReadOnlyCollection{long}, JobState, string?, IReadOnlyCollection{JobState}?, CancellationToken)"/> from Done only.</remarks>
     public async Task<int> RequeueDoneAsync(IReadOnlyCollection<long> jobIds, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(jobIds);
-        var (project, _) = Require();
+        var (_, store) = Require();
         if (jobIds.Count == 0)
         {
             return 0;
         }
 
-        var connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = Path.Combine(project.Root, "forge.db"),
-            Mode = SqliteOpenMode.ReadWrite,
-            DefaultTimeout = JobStore.BusyTimeoutMilliseconds / 1000,
-        }.ToString();
-
-        var requeued = 0;
-        var connection = new SqliteConnection(connectionString);
-        await using (connection.ConfigureAwait(false))
-        {
-            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-            var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-            await using (transaction.ConfigureAwait(false))
-            {
-                var command = connection.CreateCommand();
-                await using (command.ConfigureAwait(false))
-                {
-                    command.Transaction = transaction;
-                    command.CommandText = "UPDATE job SET state = 'Queued', error = NULL WHERE id = $id AND state = 'Done';";
-                    var id = command.Parameters.Add("$id", SqliteType.Integer);
-                    foreach (var jobId in jobIds)
-                    {
-                        id.Value = jobId;
-                        requeued += await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-                    }
-                }
-
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            }
-        }
-
+        var requeued = await store.SetStateAsync(jobIds, JobState.Queued, null, [JobState.Done], cancellationToken).ConfigureAwait(false);
         _session!.NotifyJobsChanged();
         return requeued;
     }

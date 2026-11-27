@@ -38,23 +38,28 @@ public interface ICompareProjectData
     /// <returns>The jobs, ordered by id.</returns>
     Task<IReadOnlyList<JobRecord>> GetGroupJobsAsync(string group, CancellationToken cancellationToken);
 
-    /// <summary>Gets every <see cref="JobState.Done"/> job.</summary>
+    /// <summary>Reads the "This texture" look override of a path (the <c>texture_look</c> table).</summary>
+    /// <param name="path">The canonical path.</param>
     /// <param name="cancellationToken">Cancels the read.</param>
-    /// <returns>The finished jobs, ordered by id.</returns>
-    Task<IReadOnlyList<JobRecord>> GetFinishedJobsAsync(CancellationToken cancellationToken);
+    /// <returns>The override, or <see langword="null"/> when the texture has none.</returns>
+    Task<LookOverrides?> GetTextureLookAsync(string path, CancellationToken cancellationToken);
 
-    /// <summary>Reads a project setting.</summary>
-    /// <param name="key">The key.</param>
-    /// <param name="cancellationToken">Cancels the read.</param>
-    /// <returns>The value, or <see langword="null"/>.</returns>
-    Task<string?> GetProjectValueAsync(string key, CancellationToken cancellationToken);
-
-    /// <summary>Writes a project setting.</summary>
-    /// <param name="key">The key.</param>
-    /// <param name="value">The value.</param>
+    /// <summary>Stores a "This texture" look override; an empty override removes it.</summary>
+    /// <param name="path">The canonical path.</param>
+    /// <param name="look">The override.</param>
     /// <param name="cancellationToken">Cancels the write.</param>
     /// <returns>A task that completes when stored.</returns>
-    Task SetProjectValueAsync(string key, string value, CancellationToken cancellationToken);
+    Task SetTextureLookAsync(string path, LookOverrides look, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Finds the Done jobs whose effective look hash changes under <paramref name="effectiveLookAfterChange"/>
+    /// (<see cref="JobStore.FindDoneAffectedByLookChangeAsync"/>).
+    /// </summary>
+    /// <param name="effectiveLookAfterChange">Resolves a job's effective look after the change, given the job and its stored texture override.</param>
+    /// <param name="group">Only consider this group, or <see langword="null"/> for every group.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The affected jobs in id order.</returns>
+    Task<IReadOnlyList<JobRecord>> FindDoneAffectedByLookChangeAsync(Func<JobRecord, LookOverrides?, LookSettings> effectiveLookAfterChange, string? group, CancellationToken cancellationToken);
 
     /// <summary>Returns <see cref="JobState.Done"/> jobs to <see cref="JobState.Queued"/>, then raises the session's jobs-changed event.</summary>
     /// <param name="jobIds">The job ids; jobs that are no longer Done are left alone.</param>

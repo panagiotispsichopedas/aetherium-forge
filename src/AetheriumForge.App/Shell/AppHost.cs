@@ -91,7 +91,8 @@ public static class AppHost
             return new Pages.Compare.PreviewEngine(
                 sp.GetRequiredService<Pages.Compare.ProjectPreviewBackend>(),
                 () => sp.GetService<IForgeRunner>()?.State ?? Core.Pipeline.PipelineState.Idle,
-                logger: sp.GetService<Microsoft.Extensions.Logging.ILogger<Pages.Compare.PreviewEngine>>());
+                logger: sp.GetService<Microsoft.Extensions.Logging.ILogger<Pages.Compare.PreviewEngine>>(),
+                gpuLock: sp.GetService<Core.Concurrency.GpuWorkLock>() is { } gpuLock ? new Pages.Compare.GpuWorkLockGate(gpuLock) : null);
         });
         services.AddSingleton<Pages.Compare.ICompareProjectData>(sp => new Pages.Compare.SessionCompareProjectData(sp.GetService<IProjectSession>()));
         services.AddSingleton<Pages.Compare.ICompareDialogs, Pages.Compare.AvaloniaCompareDialogs>();
