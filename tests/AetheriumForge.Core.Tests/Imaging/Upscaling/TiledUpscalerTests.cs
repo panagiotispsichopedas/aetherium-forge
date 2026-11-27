@@ -295,6 +295,70 @@ public sealed class TiledUpscalerTests
     }
 
     [Fact]
+    public async Task UpscaleAsync_CancelledWhileTileRuns_KeepsRunnerExclusiveUntilTileEnds()
+    {
+        // Arrange: the first call has two tiles and its first tile blocks inside the model until released; a second call queues behind it.
+        using var started = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var runner = new FakeModelRunner(2)
+        {
+            BeforeRun = (call, _) =>
+            {
+                if (call == 1)
+                {
+                    started.Set();
+                    release.Wait(TimeSpan.FromSeconds(10));
+                }
+            },
+        };
+        using var upscaler = new TiledUpscaler(runner, "nearest", Tiling(tileSize: 64));
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var first = Task.Run(() => upscaler.UpscaleAsync(FakeModelRunner.Pattern(100, 32), null, PauseToken.None, cancellation.Token), Ct);
+        Assert.True(started.Wait(TimeSpan.FromSeconds(10), Ct));
+
+        // Act: cancel the running call, start another, and give it time to (wrongly) reach the model.
+        await cancellation.CancelAsync();
+        var second = upscaler.UpscaleAsync(FakeModelRunner.Pattern(32, 32), null, PauseToken.None, Ct);
+        await Task.Delay(200, Ct);
+        release.Set();
+        var firstException = await Record.ExceptionAsync(() => first);
+        await second;
+
+        // Assert
+        Assert.Equal((true, 1, 2), (firstException is OperationCanceledException, runner.MaxConcurrency, runner.Calls.Count));
+    }
+
+    [Fact]
+    public async Task Dispose_WhileTileRuns_WaitsForTileBeforeDisposingRunner()
+    {
+        // Arrange
+        using var started = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var runner = new FakeModelRunner(2)
+        {
+            BeforeRun = (_, _) =>
+            {
+                started.Set();
+                release.Wait(TimeSpan.FromSeconds(10));
+            },
+        };
+        var upscaler = new TiledUpscaler(runner, "nearest", Tiling(tileSize: 64));
+        var upscale = Task.Run(() => upscaler.UpscaleAsync(FakeModelRunner.Pattern(32, 32), null, PauseToken.None, Ct), Ct);
+        Assert.True(started.Wait(TimeSpan.FromSeconds(10), Ct));
+
+        // Act
+        var dispose = Task.Run(upscaler.Dispose, Ct);
+        await Task.Delay(200, Ct);
+        var disposedDuringRun = runner.Disposed;
+        release.Set();
+        await dispose;
+        await Record.ExceptionAsync(() => upscale);
+
+        // Assert
+        Assert.Equal((false, true), (disposedDuringRun, runner.Disposed));
+    }
+
+    [Fact]
     public async Task UpscaleAsync_RunnerReturnsWrongSize_ThrowsInvalidOperation()
     {
         // Arrange
