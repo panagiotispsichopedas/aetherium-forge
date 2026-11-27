@@ -16,7 +16,7 @@ public sealed class RuleEvaluatorTests
         TextureDecision decision = _defaultEvaluator.Evaluate(@"textures\clutter\bucket01.dds", Header(512, 512));
 
         // Assert
-        Assert.Equal(new TextureDecision(SkipReason.None, TextureKind.Diffuse, "Clutter", 2048, 2048, "realesrgan-x4plus", 1.4), decision);
+        Assert.Equal(new TextureDecision(SkipReason.None, TextureKind.Diffuse, "Clutter", 2048, 2048, "realesrgan-x4plus", 1.4, LookSettings.Neutral with { NormalStrength = 1.4 }), decision);
     }
 
     [Fact]
@@ -26,7 +26,7 @@ public sealed class RuleEvaluatorTests
         TextureDecision decision = _defaultEvaluator.Evaluate(@"textures\armor\iron\cuirass_n.dds", Header(1024, 1024));
 
         // Assert
-        Assert.Equal(new TextureDecision(SkipReason.None, TextureKind.Normal, "Large", 4096, 4096, "realesrgan-x4plus", 1.0), decision);
+        Assert.Equal(new TextureDecision(SkipReason.None, TextureKind.Normal, "Large", 4096, 4096, "realesrgan-x4plus", 1.0, LookSettings.Neutral), decision);
     }
 
     [Fact]

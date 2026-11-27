@@ -11,8 +11,17 @@ namespace AetheriumForge.Core.Rules;
 /// <param name="TargetWidth">The output width in pixels; 0 when skipped.</param>
 /// <param name="TargetHeight">The output height in pixels; 0 when skipped.</param>
 /// <param name="Model">The upscaling model; <see langword="null"/> when skipped.</param>
-/// <param name="NormalStrength">The group's normal-map strength (used for normal maps); 0 when skipped.</param>
-public sealed record TextureDecision(SkipReason Skip, TextureKind Kind, string? Group, int TargetWidth, int TargetHeight, string? Model, double NormalStrength)
+/// <param name="NormalStrength">The effective normal-map strength of the group (used for normal maps); 0 when skipped.</param>
+/// <param name="Look">The group's effective look (<see cref="GroupRule.EffectiveLook"/>); <see langword="null"/> when skipped.</param>
+public sealed record TextureDecision(
+    SkipReason Skip,
+    TextureKind Kind,
+    string? Group,
+    int TargetWidth,
+    int TargetHeight,
+    string? Model,
+    double NormalStrength,
+    LookSettings? Look = null)
 {
     /// <summary>Gets a value indicating whether the texture is skipped.</summary>
     public bool IsSkipped => Skip != SkipReason.None;

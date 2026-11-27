@@ -7,6 +7,12 @@ namespace AetheriumForge.Core.Rules;
 /// The complete, user-editable rule set: groups, minimum source size and excluded folders (IMPLEMENTATION_GUIDE §8).
 /// Persisted as camelCase JSON.
 /// </summary>
+/// <remarks>
+/// Each group may carry a <c>look</c> block (§8, <see cref="LookSettings"/>); omitted look values keep their neutral defaults and
+/// out-of-range values are rejected. The group-level <c>normalStrength</c> stays as a compatibility alias: a <c>look</c> without
+/// <c>normalStrength</c> takes the group value, and when both are present <c>look.normalStrength</c> wins. Rules JSON written before
+/// the look existed (no <c>look</c> block) reads unchanged.
+/// </remarks>
 public sealed record ForgeRules
 {
     /// <summary>The default minimum source max dimension.</summary>
@@ -225,6 +231,8 @@ public sealed record ForgeRules
             {
                 throw new JsonException($"{label}: 'minSourceMax' must not exceed 'maxSourceMax'.");
             }
+
+            group.Look?.Validate(label);
         }
     }
 }

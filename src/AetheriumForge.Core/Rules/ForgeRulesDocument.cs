@@ -53,6 +53,12 @@ internal sealed class GroupRuleDocument
 
     public double NormalStrength { get; set; } = 1.0;
 
+    public LookSettingsDocument? Look { get; set; }
+
+    /// <summary>
+    /// Maps to <see cref="GroupRule"/>. A <c>look</c> block without <c>normalStrength</c> takes the group-level
+    /// <c>normalStrength</c> (compatibility alias); when both are present the look's value wins.
+    /// </summary>
     public GroupRule ToRule() => new()
     {
         Name = Name!,
@@ -64,5 +70,60 @@ internal sealed class GroupRuleDocument
         MaxFactor = MaxFactor,
         Model = Model!,
         NormalStrength = NormalStrength,
+        Look = Look?.ToLook(NormalStrength),
     };
+}
+
+/// <summary>
+/// Mutable JSON shape of <see cref="LookSettings"/>; see <see cref="ForgeRulesDocument"/>. Omitted values keep their neutral defaults.
+/// </summary>
+internal sealed class LookSettingsDocument
+{
+    public double AiStrength { get; set; } = 1.0;
+
+    public SharpenSettingsDocument? Sharpen { get; set; } = new();
+
+    public double? Denoise { get; set; }
+
+    public double Brightness { get; set; }
+
+    public double Contrast { get; set; } = 1.0;
+
+    public double Gamma { get; set; } = 1.0;
+
+    public double Saturation { get; set; } = 1.0;
+
+    public double Temperature { get; set; }
+
+    /// <summary>Gets or sets the look's normal strength; <see langword="null"/> when omitted, so the group-level alias applies.</summary>
+    public double? NormalStrength { get; set; }
+
+    public double SpecularScale { get; set; } = 1.0;
+
+    /// <summary>Maps to <see cref="LookSettings"/>, using <paramref name="groupNormalStrength"/> when the look has no normal strength.</summary>
+    public LookSettings ToLook(double groupNormalStrength) => new()
+    {
+        AiStrength = AiStrength,
+        Sharpen = Sharpen?.ToSettings()!,
+        Denoise = Denoise,
+        Brightness = Brightness,
+        Contrast = Contrast,
+        Gamma = Gamma,
+        Saturation = Saturation,
+        Temperature = Temperature,
+        NormalStrength = NormalStrength ?? groupNormalStrength,
+        SpecularScale = SpecularScale,
+    };
+}
+
+/// <summary>
+/// Mutable JSON shape of <see cref="SharpenSettings"/>; see <see cref="ForgeRulesDocument"/>.
+/// </summary>
+internal sealed class SharpenSettingsDocument
+{
+    public double Amount { get; set; }
+
+    public double Radius { get; set; } = 1.0;
+
+    public SharpenSettings ToSettings() => Amount == 0.0 && Radius == 1.0 ? SharpenSettings.None : new SharpenSettings(Amount, Radius);
 }

@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using AetheriumForge.Core.Textures;
 
 namespace AetheriumForge.Core.Rules;
@@ -38,14 +39,27 @@ public sealed record GroupRule
     /// <summary>Gets the upscaling model identifier, for example <c>realesrgan-x4plus</c>.</summary>
     public required string Model { get; init; }
 
-    /// <summary>Gets the normal-map strength multiplier applied when renormalising normal maps. Defaults to 1.0.</summary>
+    /// <summary>
+    /// Gets the group-level normal-map strength multiplier. Defaults to 1.0. Kept as a compatibility alias of
+    /// <see cref="LookSettings.NormalStrength"/>: it is used only when <see cref="Look"/> is <see langword="null"/>; see <see cref="EffectiveLook"/>.
+    /// </summary>
     public double NormalStrength { get; init; } = 1.0;
 
     /// <summary>
-    /// Gets the group's artistic look (§8), or <see langword="null"/> for neutral. JSON persistence and the <see cref="NormalStrength"/>
-    /// alias are wired by the M5 look work.
+    /// Gets the group's artistic look (§8), or <see langword="null"/> for neutral apart from <see cref="NormalStrength"/>.
     /// </summary>
+    /// <remarks>
+    /// When reading JSON, a <c>look</c> block without <c>normalStrength</c> takes the group-level <c>normalStrength</c>; when both are
+    /// present, <c>look.normalStrength</c> wins. In memory, a non-null <see cref="Look"/> always wins over <see cref="NormalStrength"/>.
+    /// </remarks>
     public LookSettings? Look { get; init; }
+
+    /// <summary>
+    /// Gets the look the pipeline applies: <see cref="Look"/> when set, otherwise the neutral look with the group-level
+    /// <see cref="NormalStrength"/> (equal to <see cref="LookSettings.Neutral"/> when that is 1.0).
+    /// </summary>
+    [JsonIgnore]
+    public LookSettings EffectiveLook => Look ?? new LookSettings { NormalStrength = NormalStrength };
 
     /// <summary>Determines whether two rules have equal values, comparing <see cref="Match"/> and <see cref="Kinds"/> element by element.</summary>
     /// <param name="other">The rule to compare with.</param>
