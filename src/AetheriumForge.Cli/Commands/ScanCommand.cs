@@ -98,11 +98,14 @@ internal sealed class ScanCommand
         var store = await JobStore.OpenAsync(layout.DatabasePath, ct).ConfigureAwait(false);
         await using (store.ConfigureAwait(false))
         {
-            var (upserted, nowProvided) = await ScanImporter.ImportAsync(store, result, ct).ConfigureAwait(false);
-            await store.SetProjectValueAsync(ProjectKeys.GamePath, game.GameFolder, ct).ConfigureAwait(false);
-            await store.SetProjectValueAsync(ProjectKeys.GameStore, game.Store.ToString(), ct).ConfigureAwait(false);
-            await store.SetProjectValueAsync(ProjectKeys.RulesJson, rules.ToJson(), ct).ConfigureAwait(false);
-            await store.SetProjectValueAsync(ProjectKeys.ScannedAt, DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture), ct).ConfigureAwait(false);
+            var values = new Dictionary<string, string>
+            {
+                [ProjectKeys.GamePath] = game.GameFolder,
+                [ProjectKeys.GameStore] = game.Store.ToString(),
+                [ProjectKeys.RulesJson] = rules.ToJson(),
+                [ProjectKeys.ScannedAt] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+            };
+            var (upserted, nowProvided) = await ScanImporter.ImportAsync(store, result, values, ct).ConfigureAwait(false);
             var counts = await store.CountByStateAsync(ct).ConfigureAwait(false);
 
             output.WriteLine();
@@ -112,6 +115,12 @@ internal sealed class ScanCommand
             }
 
             output.WriteLine();
+            if (result.MissingArchives.Count > 0)
+            {
+                output.WriteLine($"WARNING: {result.MissingArchives.Count} archive(s) are missing or unreadable ({string.Join(", ", result.MissingArchives)}). "
+                    + "Their textures are not in this scan; existing jobs from them were left unchanged.");
+            }
+
             output.WriteLine($"Imported {upserted:N0} rows into {layout.DatabasePath}; {nowProvided:N0} job(s) now provided by a mod.");
             output.WriteLine($"Project queue: {counts[JobState.Queued]:N0} queued, {counts[JobState.Done]:N0} done, {counts[JobState.Failed]:N0} failed, {counts[JobState.Skipped]:N0} skipped.");
             output.WriteLine($"Next: aetherium-forge forge --project \"{layout.Root}\" --limit 3");
