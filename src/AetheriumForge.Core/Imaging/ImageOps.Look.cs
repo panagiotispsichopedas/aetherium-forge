@@ -182,6 +182,10 @@ public static partial class ImageOps
     /// <remarks>
     /// Gamma acts last, on the perceptual value, so it bends mid-tones the way an image editor's gamma slider does; the other
     /// controls act in linear light. The transfer functions use interpolated lookup tables (error below 1e-4).
+    /// <para>The sRGB transfer function is used whatever the DXGI tag of the source says: Skyrim's colour textures are authored
+    /// gamma-encoded even when tagged <c>UNORM</c> (the engine does not linearise them), so their 8-bit values are perceptual and must be
+    /// decoded before grading in linear light.</para>
+    /// <para>Temperature keeps the luma of each pixel even in the highlights: see <see cref="ApplyTemperature"/>.</para>
     /// </remarks>
     /// <param name="rgb">The image, at least 3 channels with values 0–1; only the first three are graded.</param>
     /// <param name="brightness">The linear offset, −1–1.</param>
@@ -241,17 +245,7 @@ public static partial class ImageOps
 
                 if (applyTemperature)
                 {
-                    float before = (LumaR * r) + (LumaG * g) + (LumaB * b);
-                    r *= redGain;
-                    b *= blueGain;
-                    float after = (LumaR * r) + (LumaG * g) + (LumaB * b);
-                    if (after > 0f)
-                    {
-                        float keep = before / after;
-                        r *= keep;
-                        g *= keep;
-                        b *= keep;
-                    }
+                    (r, g, b) = ApplyTemperature(r, g, b, redGain, blueGain);
                 }
 
                 data[p] = Lookup(encode, r);
@@ -259,6 +253,37 @@ public static partial class ImageOps
                 data[(2 * plane) + p] = Lookup(encode, b);
             }
         });
+    }
+
+    /// <summary>
+    /// Applies the temperature gains to one linear pixel, keeping its Rec.709 luma. When the tinted pixel would push a channel above
+    /// 1 (or above its own value when that is already above 1), the tint is pulled back toward the original pixel just enough to fit:
+    /// both have the same luma, so their blend does too, and the later clamp to 1 cannot lose luma in the highlights (white stays white).
+    /// </summary>
+    /// <param name="r">Linear red.</param>
+    /// <param name="g">Linear green.</param>
+    /// <param name="b">Linear blue.</param>
+    /// <param name="redGain">The red gain.</param>
+    /// <param name="blueGain">The blue gain.</param>
+    /// <returns>The tinted pixel.</returns>
+    internal static (float R, float G, float B) ApplyTemperature(float r, float g, float b, float redGain, float blueGain)
+    {
+        float before = (LumaR * r) + (LumaG * g) + (LumaB * b);
+        float tr = r * redGain;
+        float tb = b * blueGain;
+        float after = (LumaR * tr) + (LumaG * g) + (LumaB * tb);
+        if (!(after > 0f))
+        {
+            return (r, g, b);
+        }
+
+        float keep = before / after;
+        tr *= keep;
+        float tg = g * keep;
+        tb *= keep;
+
+        float blend = MathF.Min(MathF.Min(Headroom(r, tr), Headroom(g, tg)), Headroom(b, tb));
+        return (r + ((tr - r) * blend), g + ((tg - g) * blend), b + ((tb - b) * blend));
     }
 
     /// <summary>
@@ -310,6 +335,13 @@ public static partial class ImageOps
     /// <returns>The encoded value.</returns>
     internal static double LinearToSrgb(double linear) =>
         linear <= 0.0031308 ? linear * 12.92 : (1.055 * Math.Pow(linear, 1.0 / 2.4)) - 0.055;
+
+    /// <summary>The largest blend 0–1 from <paramref name="original"/> toward <paramref name="tinted"/> that stays within max(1, original).</summary>
+    private static float Headroom(float original, float tinted)
+    {
+        float limit = MathF.Max(1f, original);
+        return tinted > limit ? Math.Clamp((limit - original) / (tinted - original), 0f, 1f) : 1f;
+    }
 
     private static float[] BuildLut(int size, Func<double, double> function)
     {

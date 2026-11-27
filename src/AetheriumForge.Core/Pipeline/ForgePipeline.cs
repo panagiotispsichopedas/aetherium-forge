@@ -86,7 +86,8 @@ public sealed partial class ForgePipeline : IForgePipeline
     /// <summary>
     /// Gets the effective look (§8) for a rule group, for example <c>name =&gt; rules.Groups.First(...).EffectiveLook</c>. When it is
     /// <see langword="null"/> or returns <see langword="null"/>, the job gets the neutral look with <see cref="NormalStrengthForGroup"/>'s
-    /// strength. The stable hash of the job's effective look is stored on the job when it is marked Done.
+    /// strength. The stable hash of the job's effective look for its kind (<see cref="LookSettings.GetStableHash(TextureKind)"/>) is
+    /// stored on the job when it is marked Done.
     /// </summary>
     public Func<string, LookSettings?>? LookForGroup { get; init; }
 
@@ -581,7 +582,7 @@ public sealed partial class ForgePipeline : IForgePipeline
                 // whatever happens to the bookkeeping: it is never retried or re-encoded as new work.
                 try
                 {
-                    var lookHash = item.Job.EffectiveLook.GetStableHash();
+                    var lookHash = item.Job.EffectiveLook.GetStableHash(item.Job.Kind);
                     if (!await TryMarkDoneAsync(item.Record.Id, item.Record.Path, result.Timings.Total.TotalSeconds, lookHash).ConfigureAwait(false))
                     {
                         run.AddUnrecordedDone(item.Record.Id, item.Record.Path, result.Timings.Total.TotalSeconds, lookHash);

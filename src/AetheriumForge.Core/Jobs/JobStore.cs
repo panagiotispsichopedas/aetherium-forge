@@ -323,21 +323,26 @@ public sealed class JobStore : IAsyncDisposable
         await ExecuteNonQueryAsync("UPDATE job SET state = 'Running' WHERE id = $id AND state = 'Queued';", [("$id", id)], ct).ConfigureAwait(false) == 1;
 
     /// <summary>
-    /// Marks a job as finished successfully and clears its error and its look hash (the look is unknown).
+    /// Marks a job as finished successfully and clears its error. Its look hash is left as it is.
     /// </summary>
     /// <param name="id">The job id.</param>
     /// <param name="seconds">Processing time in seconds.</param>
     /// <param name="ct">Cancels the operation.</param>
     /// <returns>A task that completes when the state is stored.</returns>
     /// <exception cref="KeyNotFoundException">No job has this id.</exception>
-    public Task MarkDoneAsync(long id, double seconds, CancellationToken ct = default) => MarkDoneAsync(id, seconds, null, ct);
+    public Task MarkDoneAsync(long id, double seconds, CancellationToken ct = default) =>
+        UpdateJobAsync(
+            id,
+            "UPDATE job SET state = 'Done', error = NULL, seconds = $seconds, finished_at = $finished_at WHERE id = $id;",
+            [("$seconds", seconds), ("$finished_at", FormatTimestamp(_timeProvider.GetUtcNow()))],
+            ct);
 
     /// <summary>
     /// Marks a job as finished successfully, clears its error and records the hash of the look it was finished with (§8).
     /// </summary>
     /// <param name="id">The job id.</param>
     /// <param name="seconds">Processing time in seconds.</param>
-    /// <param name="lookHash">The stable hash of the effective look (<see cref="Rules.LookSettings.GetStableHash"/>), or <see langword="null"/> when unknown.</param>
+    /// <param name="lookHash">The stable hash of the effective look for the job's kind (<see cref="Rules.LookSettings.GetStableHash(Textures.TextureKind)"/>), or <see langword="null"/> to record that it is unknown.</param>
     /// <param name="ct">Cancels the operation.</param>
     /// <returns>A task that completes when the state is stored.</returns>
     /// <exception cref="KeyNotFoundException">No job has this id.</exception>
@@ -349,11 +354,15 @@ public sealed class JobStore : IAsyncDisposable
             ct);
 
     /// <summary>
-    /// Finds the <see cref="JobState.Done"/> jobs of a group that were finished with a different look than <paramref name="lookHash"/>,
-    /// for the "Apply to finished textures?" flow (§8). Jobs with no recorded look (finished before looks were recorded) count as different.
+    /// Finds the <see cref="JobState.Done"/> jobs of a group whose recorded look hash differs from <paramref name="lookHash"/>. Jobs with no
+    /// recorded look (finished before looks were recorded) count as different.
     /// </summary>
+    /// <remarks>
+    /// Hashes are per kind, so one hash fits a group only when its jobs share the kind's applicable controls. For the
+    /// "Apply to finished textures?" flow use <see cref="FindDoneWithDifferentLookAsync(string, Rules.LookSettings, CancellationToken)"/>.
+    /// </remarks>
     /// <param name="group">The group name, compared case-insensitively.</param>
-    /// <param name="lookHash">The stable hash of the group's current effective look.</param>
+    /// <param name="lookHash">The hash to compare with.</param>
     /// <param name="ct">Cancels the operation.</param>
     /// <returns>The jobs in id order.</returns>
     public async Task<IReadOnlyList<JobRecord>> FindDoneWithDifferentLookAsync(string group, string lookHash, CancellationToken ct = default)
@@ -387,6 +396,63 @@ public sealed class JobStore : IAsyncDisposable
         }
 
         return jobs;
+    }
+
+    /// <summary>
+    /// Finds the <see cref="JobState.Done"/> jobs of a group that were finished with a different look than <paramref name="look"/>, for the
+    /// "Apply to finished textures?" flow (§8). Each job is compared with the hash of <paramref name="look"/> for its own kind
+    /// (<see cref="Rules.LookSettings.GetStableHash(Textures.TextureKind)"/>), so a change to, say, the normal strength returns only the
+    /// group's normal maps. Jobs with no recorded look, or with a kind that cannot be parsed, count as different.
+    /// </summary>
+    /// <param name="group">The group name, compared case-insensitively.</param>
+    /// <param name="look">The group's current effective look.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>The jobs in id order.</returns>
+    public async Task<IReadOnlyList<JobRecord>> FindDoneWithDifferentLookAsync(string group, Rules.LookSettings look, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        ArgumentNullException.ThrowIfNull(look);
+
+        var hashes = new Dictionary<Textures.TextureKind, string>();
+        var jobs = new List<JobRecord>();
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var command = connection.CreateCommand();
+            await using (command.ConfigureAwait(false))
+            {
+                command.CommandText = $"SELECT {JobColumns} FROM job WHERE state = 'Done' AND grp = $grp COLLATE NOCASE ORDER BY id;";
+                command.Parameters.AddWithValue("$grp", group);
+                var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                await using (reader.ConfigureAwait(false))
+                {
+                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        var job = ReadJob(reader);
+                        if (job.LookHash is null
+                            || !Enum.TryParse<Textures.TextureKind>(job.Kind, ignoreCase: true, out var kind)
+                            || !Enum.IsDefined(kind)
+                            || !string.Equals(job.LookHash, HashFor(kind), StringComparison.Ordinal))
+                        {
+                            jobs.Add(job);
+                        }
+                    }
+                }
+            }
+        }
+
+        return jobs;
+
+        string HashFor(Textures.TextureKind kind)
+        {
+            if (!hashes.TryGetValue(kind, out var hash))
+            {
+                hash = look.GetStableHash(kind);
+                hashes[kind] = hash;
+            }
+
+            return hash;
+        }
     }
 
     /// <summary>
@@ -598,7 +664,26 @@ public sealed class JobStore : IAsyncDisposable
 
         if (!hasLookHash)
         {
+            await AddLookHashColumnAsync(connection, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Adds the <c>look_hash</c> column. Two processes can open an old database at once and both see the column missing; the second
+    /// <c>ALTER TABLE</c> then fails with "duplicate column name", which means the column is there, so that error is handled as success.
+    /// </summary>
+    /// <param name="connection">An open connection.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <returns>A task that completes when the column exists.</returns>
+    internal static async Task AddLookHashColumnAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        try
+        {
             await ExecuteAsync(connection, "ALTER TABLE job ADD COLUMN look_hash TEXT;", ct).ConfigureAwait(false);
+        }
+        catch (SqliteException ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+        {
+            // Another process added the column between our check and our ALTER: the schema is already what we need.
         }
     }
 

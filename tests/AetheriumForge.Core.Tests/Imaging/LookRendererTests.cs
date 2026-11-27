@@ -397,4 +397,64 @@ public sealed class LookRendererTests
     private static byte Red(RgbaImage image, int x, int y) => image.Pixels[((y * image.Width) + x) * 4];
 
     private static double Linear(byte value) => ImageOps.SrgbToLinear(value / 255.0);
+
+    [Fact]
+    public void Render_SpecularScaleOnOpaqueNormal_ScalesImplicitAlpha()
+    {
+        // Arrange: a fully opaque normal map has no alpha plane, but its specular is 1 everywhere.
+        var input = Input(TextureKind.Normal, withAlpha: false);
+
+        // Act
+        RgbaImage rendered = LookRenderer.Render(input, LookSettings.Neutral with { SpecularScale = 0.5 });
+
+        // Assert: 0.5 × 255 = 127.5 → 128.
+        Assert.All(rendered.Pixels.Where((_, i) => i % 4 == 3), a => Assert.Equal(128, a));
+    }
+
+    [Fact]
+    public void Render_SpecularScaleAboveOneOnOpaqueNormal_KeepsAlphaOpaque()
+    {
+        // Arrange
+        var input = Input(TextureKind.Normal, withAlpha: false);
+
+        // Act
+        RgbaImage rendered = LookRenderer.Render(input, LookSettings.Neutral with { SpecularScale = 1.5 });
+
+        // Assert
+        Assert.All(rendered.Pixels.Where((_, i) => i % 4 == 3), a => Assert.Equal(255, a));
+    }
+
+    [Theory]
+    [InlineData(1.0)]
+    [InlineData(-1.0)]
+    public void Render_TemperatureOnWhite_StaysWhite(double temperature)
+    {
+        // Arrange
+        var white = Constant(1.0f);
+
+        // Act
+        RgbaImage rendered = LookRenderer.Render(new LookInput(white, white, null, TextureKind.Diffuse), LookSettings.Neutral with { Temperature = temperature });
+
+        // Assert
+        Assert.All(Rgb(rendered), v => Assert.Equal(255, v));
+    }
+
+    [Theory]
+    [InlineData(0.95f, 0.9f, 0.6f, 1.0f)]
+    [InlineData(0.6f, 0.9f, 0.98f, -1.0f)]
+    [InlineData(1.0f, 1.0f, 0.2f, 1.0f)]
+    public void ApplyTemperature_BrightPixel_KeepsLumaAndStaysInRange(float r, float g, float b, float temperature)
+    {
+        // Arrange
+        float redGain = 1f + (ImageOps.TemperatureGain * temperature);
+        float blueGain = 1f - (ImageOps.TemperatureGain * temperature);
+        double before = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+
+        // Act
+        var (tr, tg, tb) = ImageOps.ApplyTemperature(r, g, b, redGain, blueGain);
+
+        // Assert
+        double after = (0.2126 * tr) + (0.7152 * tg) + (0.0722 * tb);
+        Assert.True(Math.Abs(after - before) < 1e-5 && Math.Max(tr, Math.Max(tg, tb)) <= 1f + 1e-6, $"luma {before} → {after}, ({tr}, {tg}, {tb})");
+    }
 }

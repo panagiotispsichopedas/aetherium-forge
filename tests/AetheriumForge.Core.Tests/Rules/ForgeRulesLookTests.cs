@@ -108,6 +108,21 @@ public sealed class ForgeRulesLookTests
         Assert.Throws<JsonException>(act);
     }
 
+    [Theory]
+    [InlineData(-0.5)]
+    [InlineData(4.5)]
+    public void FromJson_GroupNormalStrengthOutOfRangeWithoutLook_ThrowsJsonException(double strength)
+    {
+        // Arrange
+        string json = $$"""{ "groups": [ { "name": "G", "model": "m", "normalStrength": {{strength.ToString(System.Globalization.CultureInfo.InvariantCulture)}} } ] }""";
+
+        // Act
+        var act = () => ForgeRules.FromJson(json);
+
+        // Assert
+        Assert.Throws<JsonException>(act);
+    }
+
     [Fact]
     public void FromJson_GroupNormalStrengthOutOfLookRange_ThrowsJsonExceptionWhenLookPresent()
     {

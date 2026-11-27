@@ -1,4 +1,6 @@
 using AetheriumForge.Core.Jobs;
+using AetheriumForge.Core.Rules;
+using AetheriumForge.Core.Textures;
 using Microsoft.Data.Sqlite;
 
 namespace AetheriumForge.Core.Tests.Jobs;
@@ -44,7 +46,7 @@ public sealed class JobStoreLookHashTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task MarkDoneAsync_WithoutLookHash_ClearsPreviousHash()
+    public async Task MarkDoneAsync_WithoutLookHash_KeepsPreviousHash()
     {
         // Arrange
         JobStore store = await OpenAsync();
@@ -55,7 +57,7 @@ public sealed class JobStoreLookHashTests : IAsyncLifetime
         await store.MarkDoneAsync(id, 2.0, Ct);
 
         // Assert
-        Assert.Null((await AllJobsAsync(store)).Single().LookHash);
+        Assert.Equal("0123456789abcdef", (await AllJobsAsync(store)).Single().LookHash);
     }
 
     [Fact]
@@ -142,12 +144,12 @@ public sealed class JobStoreLookHashTests : IAsyncLifetime
         Assert.Equal("cccccccccccccccc", (await AllJobsAsync(store)).Single().LookHash);
     }
 
-    private static JobRecord Job(string path, string group = "Clutter") =>
-        new(0, path, "a.bsa", 512, 512, "BC1_UNORM", "diffuse", group, 2048, "m", JobState.Queued, 0, null, null, null);
+    private static JobRecord Job(string path, string group = "Clutter", string kind = "diffuse") =>
+        new(0, path, "a.bsa", 512, 512, "BC1_UNORM", kind, group, 2048, "m", JobState.Queued, 0, null, null, null);
 
-    private static async Task<long> InsertAsync(JobStore store, string path, string group = "Clutter")
+    private static async Task<long> InsertAsync(JobStore store, string path, string group = "Clutter", string kind = "diffuse")
     {
-        await store.UpsertJobsAsync([Job(path, group)], Ct);
+        await store.UpsertJobsAsync([Job(path, group, kind)], Ct);
         return (await AllJobsAsync(store)).Single(j => j.Path == path).Id;
     }
 
@@ -166,5 +168,93 @@ public sealed class JobStoreLookHashTests : IAsyncLifetime
     {
         _store = await JobStore.OpenAsync(_databasePath, Ct);
         return _store;
+    }
+
+    [Fact]
+    public async Task FindDoneWithDifferentLookAsync_NormalStrengthChanged_ReturnsOnlyNormalMaps()
+    {
+        // Arrange: both jobs finished with the neutral look; then the group's normal strength changes.
+        JobStore store = await OpenAsync();
+        long diffuse = await InsertAsync(store, @"textures\d.dds");
+        long normal = await InsertAsync(store, @"textures\d_n.dds", kind: "normal");
+        await store.MarkDoneAsync(diffuse, 1, LookSettings.Neutral.GetStableHash(TextureKind.Diffuse), Ct);
+        await store.MarkDoneAsync(normal, 1, LookSettings.Neutral.GetStableHash(TextureKind.Normal), Ct);
+
+        // Act
+        IReadOnlyList<JobRecord> found = await store.FindDoneWithDifferentLookAsync("Clutter", LookSettings.Neutral with { NormalStrength = 2.0 }, Ct);
+
+        // Assert
+        Assert.Equal([@"textures\d_n.dds"], found.Select(j => j.Path));
+    }
+
+    [Fact]
+    public async Task FindDoneWithDifferentLookAsync_SameLook_ReturnsOnlyJobsWithoutHash()
+    {
+        // Arrange
+        JobStore store = await OpenAsync();
+        long recorded = await InsertAsync(store, @"textures\a.dds");
+        long legacy = await InsertAsync(store, @"textures\b.dds");
+        var look = LookSettings.Neutral with { Saturation = 1.3 };
+        await store.MarkDoneAsync(recorded, 1, look.GetStableHash(TextureKind.Diffuse), Ct);
+        await store.MarkDoneAsync(legacy, 1, Ct);
+
+        // Act
+        IReadOnlyList<JobRecord> found = await store.FindDoneWithDifferentLookAsync("clutter", look, Ct);
+
+        // Assert
+        Assert.Equal([@"textures\b.dds"], found.Select(j => j.Path));
+    }
+
+    [Fact]
+    public async Task AddLookHashColumnAsync_ColumnAlreadyAdded_DoesNotThrow()
+    {
+        // Arrange: a current database already has the column, as when another process won the migration race.
+        JobStore store = await OpenAsync();
+        await store.DisposeAsync();
+        _store = null;
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync(Ct);
+
+        // Act
+        var exception = await Record.ExceptionAsync(() => JobStore.AddLookHashColumnAsync(connection, Ct));
+
+        // Assert
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public async Task OpenAsync_OldDatabaseOpenedConcurrently_AllOpensSucceed()
+    {
+        // Arrange
+        await CreateOldSchemaAsync();
+
+        // Act
+        JobStore[] stores = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => JobStore.OpenAsync(_databasePath, Ct)));
+
+        // Assert
+        foreach (JobStore opened in stores)
+        {
+            await opened.DisposeAsync();
+        }
+
+        Assert.Equal(6, stores.Length);
+    }
+
+    private async Task CreateOldSchemaAsync()
+    {
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync(Ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE project (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE job (
+              id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, archive TEXT NOT NULL,
+              src_w INT, src_h INT, format TEXT, kind TEXT, grp TEXT, target INT, model TEXT,
+              state TEXT NOT NULL, attempts INT DEFAULT 0, error TEXT, seconds REAL, finished_at TEXT);
+            CREATE TABLE run (id INTEGER PRIMARY KEY, started TEXT, ended TEXT, done INT, failed INT);
+            """;
+        await command.ExecuteNonQueryAsync(Ct);
+        await connection.CloseAsync();
+        SqliteConnection.ClearAllPools();
     }
 }

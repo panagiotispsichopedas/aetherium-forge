@@ -10,7 +10,7 @@ namespace AetheriumForge.Core.Rules;
 /// <remarks>
 /// Each group may carry a <c>look</c> block (§8, <see cref="LookSettings"/>); omitted look values keep their neutral defaults and
 /// out-of-range values are rejected. The group-level <c>normalStrength</c> stays as a compatibility alias: a <c>look</c> without
-/// <c>normalStrength</c> takes the group value, and when both are present <c>look.normalStrength</c> wins. Rules JSON written before
+/// <c>normalStrength</c> takes the group value, and when both are present <c>look.normalStrength</c> wins. Both are range-checked (0–4). Rules JSON written before
 /// the look existed (no <c>look</c> block) reads unchanged.
 /// </remarks>
 public sealed record ForgeRules
@@ -230,6 +230,12 @@ public sealed record ForgeRules
             if (group.MinSourceMax is int min && group.MaxSourceMax is int max && min > max)
             {
                 throw new JsonException($"{label}: 'minSourceMax' must not exceed 'maxSourceMax'.");
+            }
+
+            if (!double.IsFinite(group.NormalStrength) || group.NormalStrength < LookSettings.MinNormalStrength || group.NormalStrength > LookSettings.MaxNormalStrength)
+            {
+                throw new JsonException(
+                    $"{label}: 'normalStrength' must be between {LookSettings.MinNormalStrength:0.###} and {LookSettings.MaxNormalStrength:0.###}, got {group.NormalStrength}.");
             }
 
             group.Look?.Validate(label);

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using AetheriumForge.Core.Textures;
 
 namespace AetheriumForge.Core.Rules;
 
@@ -80,7 +81,7 @@ public sealed record LookSettings
     /// <summary>
     /// Gets the denoise strength (0–1) for models that support it, or <see langword="null"/> for the model's default.
     /// </summary>
-    /// <remarks>Persisted and hashed, but not applied yet: no published model has a denoise variant (see <c>LookRenderer</c>).</remarks>
+    /// <remarks>Persisted, but neither applied nor hashed yet: no published model has a denoise variant (see <c>LookRenderer</c>).</remarks>
     public double? Denoise { get; init; }
 
     /// <summary>Gets the brightness offset in linear light, −1–1 (colour kinds only).</summary>
@@ -109,43 +110,32 @@ public sealed record LookSettings
     public bool IsNeutral => this == Neutral;
 
     /// <summary>
-    /// Gets a stable hash of these settings for the job store (§8): canonical JSON (fixed property order, compact, shortest
-    /// round-trip numbers, <c>-0</c> written as <c>0</c>) → SHA-256 → the first 16 lowercase hex digits.
+    /// Gets a stable hash of every rendered control: canonical JSON (fixed property order, compact, shortest round-trip numbers,
+    /// <c>-0</c> written as <c>0</c>) → SHA-256 → the first 16 lowercase hex digits.
     /// </summary>
+    /// <remarks>
+    /// <see cref="Denoise"/> is left out while it is not rendered. The job store uses the per-kind <see cref="GetStableHash(TextureKind)"/>.
+    /// </remarks>
     /// <returns>A 16-character hex string; equal settings always give the same hash, across runs and machines.</returns>
-    public string GetStableHash()
-    {
-        var buffer = new System.Buffers.ArrayBufferWriter<byte>(256);
-        using (var writer = new Utf8JsonWriter(buffer))
-        {
-            writer.WriteStartObject();
-            writer.WriteNumber("aiStrength", Canonical(AiStrength));
-            writer.WriteStartObject("sharpen");
-            writer.WriteNumber("amount", Canonical(Sharpen.Amount));
-            writer.WriteNumber("radius", Canonical(Sharpen.Radius));
-            writer.WriteEndObject();
-            if (Denoise is { } denoise)
-            {
-                writer.WriteNumber("denoise", Canonical(denoise));
-            }
-            else
-            {
-                writer.WriteNull("denoise");
-            }
+    public string GetStableHash() => Hash(includeAi: true, includeColor: true, includeNormal: true, includeSpecular: true);
 
-            writer.WriteNumber("brightness", Canonical(Brightness));
-            writer.WriteNumber("contrast", Canonical(Contrast));
-            writer.WriteNumber("gamma", Canonical(Gamma));
-            writer.WriteNumber("saturation", Canonical(Saturation));
-            writer.WriteNumber("temperature", Canonical(Temperature));
-            writer.WriteNumber("normalStrength", Canonical(NormalStrength));
-            writer.WriteNumber("specularScale", Canonical(SpecularScale));
-            writer.WriteEndObject();
-        }
-
-        byte[] digest = SHA256.HashData(buffer.WrittenSpan);
-        return Convert.ToHexStringLower(digest.AsSpan(0, 8));
-    }
+    /// <summary>
+    /// Gets a stable hash of only the controls that apply to <paramref name="kind"/> (§8), so that editing, say, the normal strength
+    /// does not mark a group's diffuse jobs as changed. Same canonical form as <see cref="GetStableHash()"/>.
+    /// </summary>
+    /// <remarks>
+    /// AI strength applies to every kind except <see cref="TextureKind.Parallax"/> (which never runs the model); sharpen and colour
+    /// grading to diffuse, glow and backlight; normal strength to <see cref="TextureKind.Normal"/>; specular scale to
+    /// <see cref="TextureKind.Specular"/> and <see cref="TextureKind.Normal"/> (its alpha). <see cref="Denoise"/> is not hashed while it
+    /// is not rendered.
+    /// </remarks>
+    /// <param name="kind">The texture kind of the job.</param>
+    /// <returns>A 16-character hex string.</returns>
+    public string GetStableHash(TextureKind kind) => Hash(
+        includeAi: kind != TextureKind.Parallax,
+        includeColor: kind is TextureKind.Diffuse or TextureKind.Glow or TextureKind.Backlight,
+        includeNormal: kind == TextureKind.Normal,
+        includeSpecular: kind is TextureKind.Specular or TextureKind.Normal);
 
     /// <summary>
     /// Throws <see cref="JsonException"/> when a value is outside its range or not finite.
@@ -174,6 +164,47 @@ public sealed record LookSettings
         CheckRange(label, "temperature", Temperature, MinTemperature, MaxTemperature);
         CheckRange(label, "normalStrength", NormalStrength, MinNormalStrength, MaxNormalStrength);
         CheckRange(label, "specularScale", SpecularScale, MinSpecularScale, MaxSpecularScale);
+    }
+
+    private string Hash(bool includeAi, bool includeColor, bool includeNormal, bool includeSpecular)
+    {
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>(256);
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            if (includeAi)
+            {
+                writer.WriteNumber("aiStrength", Canonical(AiStrength));
+            }
+
+            if (includeColor)
+            {
+                writer.WriteStartObject("sharpen");
+                writer.WriteNumber("amount", Canonical(Sharpen.Amount));
+                writer.WriteNumber("radius", Canonical(Sharpen.Radius));
+                writer.WriteEndObject();
+                writer.WriteNumber("brightness", Canonical(Brightness));
+                writer.WriteNumber("contrast", Canonical(Contrast));
+                writer.WriteNumber("gamma", Canonical(Gamma));
+                writer.WriteNumber("saturation", Canonical(Saturation));
+                writer.WriteNumber("temperature", Canonical(Temperature));
+            }
+
+            if (includeNormal)
+            {
+                writer.WriteNumber("normalStrength", Canonical(NormalStrength));
+            }
+
+            if (includeSpecular)
+            {
+                writer.WriteNumber("specularScale", Canonical(SpecularScale));
+            }
+
+            writer.WriteEndObject();
+        }
+
+        byte[] digest = SHA256.HashData(buffer.WrittenSpan);
+        return Convert.ToHexStringLower(digest.AsSpan(0, 8));
     }
 
     private static void CheckRange(string label, string name, double value, double min, double max)

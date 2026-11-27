@@ -1,11 +1,12 @@
 using AetheriumForge.Core.Rules;
+using AetheriumForge.Core.Textures;
 
 namespace AetheriumForge.Core.Tests.Rules;
 
 public sealed class LookSettingsTests
 {
-    /// <summary>SHA-256 of the canonical neutral JSON, checked independently with Python's hashlib.</summary>
-    private const string NeutralHash = "596d6f5ffb44681f";
+    /// <summary>SHA-256 of the canonical neutral JSON (denoise left out), checked independently with Python's hashlib.</summary>
+    private const string NeutralHash = "971652fd19d635bf";
 
     [Fact]
     public void GetStableHash_Neutral_IsPinned()
@@ -69,5 +70,55 @@ public sealed class LookSettingsTests
 
         // Assert
         Assert.True(neutral);
+    }
+
+    [Fact]
+    public void GetStableHash_DiffuseKindAndNormalStrengthChanged_IsUnchanged()
+    {
+        // Act
+        string changed = (LookSettings.Neutral with { NormalStrength = 2.0, SpecularScale = 0.5 }).GetStableHash(TextureKind.Diffuse);
+
+        // Assert
+        Assert.Equal(LookSettings.Neutral.GetStableHash(TextureKind.Diffuse), changed);
+    }
+
+    [Fact]
+    public void GetStableHash_NormalKindAndNormalStrengthChanged_Changes()
+    {
+        // Act
+        string changed = (LookSettings.Neutral with { NormalStrength = 2.0 }).GetStableHash(TextureKind.Normal);
+
+        // Assert
+        Assert.NotEqual(LookSettings.Neutral.GetStableHash(TextureKind.Normal), changed);
+    }
+
+    [Fact]
+    public void GetStableHash_NormalKindAndGradingChanged_IsUnchanged()
+    {
+        // Act
+        string changed = (LookSettings.Neutral with { Saturation = 0.2, Sharpen = new SharpenSettings(1, 1) }).GetStableHash(TextureKind.Normal);
+
+        // Assert
+        Assert.Equal(LookSettings.Neutral.GetStableHash(TextureKind.Normal), changed);
+    }
+
+    [Fact]
+    public void GetStableHash_ParallaxKindAndAiStrengthChanged_IsUnchanged()
+    {
+        // Act
+        string changed = (LookSettings.Neutral with { AiStrength = 0.3 }).GetStableHash(TextureKind.Parallax);
+
+        // Assert
+        Assert.Equal(LookSettings.Neutral.GetStableHash(TextureKind.Parallax), changed);
+    }
+
+    [Fact]
+    public void GetStableHash_DenoiseChanged_IsUnchanged()
+    {
+        // Act
+        var hashes = ((LookSettings.Neutral with { Denoise = 0.7 }).GetStableHash(), (LookSettings.Neutral with { Denoise = 0.7 }).GetStableHash(TextureKind.Diffuse));
+
+        // Assert
+        Assert.Equal((LookSettings.Neutral.GetStableHash(), LookSettings.Neutral.GetStableHash(TextureKind.Diffuse)), hashes);
     }
 }

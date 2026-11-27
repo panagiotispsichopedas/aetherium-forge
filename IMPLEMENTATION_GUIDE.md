@@ -299,15 +299,15 @@ Each group can carry an optional `look` block that steers how the output looks. 
 | Control | Applies to | Effect |
 |---|---|---|
 | `aiStrength` (0–1) | all kinds that use the model | Blends the AI output with a plain Lanczos upscale of the source. Below 1, it tames over-sharpened, "painted" AI detail. |
-| `sharpen.amount`, `sharpen.radius` | diffuse, glow, backlight | Unsharp mask after resizing. 0 = off. |
+| `sharpen.amount` (0–5), `sharpen.radius` (0.1–10, Gaussian sigma in pixels) | diffuse, glow, backlight | Unsharp mask after resizing. 0 = off. |
 | `denoise` (0–1 or null) | models that support it | Denoise strength for models published with a denoise variant (for example `realesr-general-wdn-x4v3`, blended by weight interpolation at load time). Null = the model's default. |
 | `brightness` (−1–1), `contrast` (0.5–2), `gamma` (0.5–2), `saturation` (0–2), `temperature` (−1–1, cool to warm) | diffuse, glow, backlight only | Colour grading in linear light after resizing. Never applied to normal, specular, mask or parallax maps, which encode data, not colour. |
-| `normalStrength` | normal maps | "How 3D": scales the XY of tangent-space normals before renormalising (§10 step 6). Replaces the group-level `normalStrength`, which stays as an alias for compatibility. |
+| `normalStrength` (0–4) | normal maps | "How 3D": scales the XY of tangent-space normals before renormalising (§10 step 6). Replaces the group-level `normalStrength`, which stays as an alias for compatibility: a `look` without `normalStrength` takes the group value, and when both are present `look.normalStrength` wins. Both are range-checked. |
 | `specularScale` (0–2) | specular maps and the specular alpha of normal maps | "How shiny": scales specular intensity, clamped to 0–1. |
 
 Order in §10: upscale → AI-strength blend → resize → sharpen → colour grading (colour kinds) → normal strength (normals) → specular scale → merge alpha → encode.
 
-The look block is part of the rules JSON, so it is saved with the project and exported with the rules. The job store records a hash of the effective look per job. Changing a group's look re-queues its finished jobs only when the user confirms ("Apply to finished textures?").
+The look block is part of the rules JSON, so it is saved with the project and exported with the rules. Values outside these ranges are rejected when the rules are loaded. The job store records a hash of the effective look per job, covering only the controls that apply to the job's kind (and not `denoise` while it is not rendered), so editing one control does not mark unrelated kinds as changed. Changing a group's look re-queues its finished jobs only when the user confirms ("Apply to finished textures?").
 
 ---
 

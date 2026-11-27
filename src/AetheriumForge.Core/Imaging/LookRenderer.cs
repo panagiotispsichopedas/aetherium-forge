@@ -25,7 +25,8 @@ public sealed record LookInput(PlanarImage AiRgb, PlanarImage LanczosRgb, Planar
 /// <item><b>Colour grading</b> (colour kinds only): brightness, contrast, saturation and temperature in linear light, then gamma on the
 /// perceptual value (<see cref="ImageOps.ColorGrade"/>).</item>
 /// <item><b>Normal strength</b> (<see cref="TextureKind.Normal"/> only): the existing renormalisation.</item>
-/// <item><b>Specular scale</b>: the RGB of <see cref="TextureKind.Specular"/> maps and the alpha (specular) of normal maps, clamped to 0–1.</item>
+/// <item><b>Specular scale</b>: the RGB of <see cref="TextureKind.Specular"/> maps and the alpha (specular) of normal maps, clamped to 0–1.
+/// A normal map without an alpha plane (fully opaque source) is treated as specular 1 everywhere, so scaling below 1 adds an alpha plane.</item>
 /// </list>
 /// <para>Colour kinds are <see cref="TextureKind.Diffuse"/>, <see cref="TextureKind.Glow"/> and <see cref="TextureKind.Backlight"/>. Every
 /// other kind (normal, model-space normal, specular, environment masks, parallax, ...) encodes data, so it is never sharpened or graded.</para>
@@ -108,9 +109,10 @@ public static class LookRenderer
                 rgb = Writable(rgb, ref owned);
                 ImageOps.ScaleChannels(rgb, 3, look.SpecularScale);
             }
-            else if (input.Kind == TextureKind.Normal && alpha is not null)
+            else if (input.Kind == TextureKind.Normal)
             {
-                alpha = Copy(alpha);
+                // A fully opaque source has no alpha plane (ExtractAlpha drops it), but its specular is still 1 everywhere: scale that.
+                alpha = alpha is null ? Opaque(rgb.Width, rgb.Height) : Copy(alpha);
                 ImageOps.ScaleChannels(alpha, 1, look.SpecularScale);
             }
         }
@@ -131,6 +133,13 @@ public static class LookRenderer
 
         owned = true;
         return Copy(image);
+    }
+
+    private static PlanarImage Opaque(int width, int height)
+    {
+        var plane = new PlanarImage(1, width, height);
+        Array.Fill(plane.Data, 1f);
+        return plane;
     }
 
     private static PlanarImage Copy(PlanarImage image) => new(image.Channels, image.Width, image.Height, (float[])image.Data.Clone());

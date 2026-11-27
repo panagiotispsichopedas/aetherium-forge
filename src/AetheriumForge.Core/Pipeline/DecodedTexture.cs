@@ -94,6 +94,7 @@ internal sealed class DecodedTexture : IDisposable
 
         Rgb = null;
         Alpha = null;
+        SourceRgb = null;
         Output = null;
         if (StagingPath is { } staged)
         {

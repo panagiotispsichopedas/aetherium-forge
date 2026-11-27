@@ -19,7 +19,7 @@ namespace AetheriumForge.Core.Jobs;
 /// <param name="Seconds">Processing time of the successful run, or <see langword="null"/>.</param>
 /// <param name="FinishedAt">When the job last finished (done or failed), or <see langword="null"/>.</param>
 /// <param name="LookHash">
-/// Stable hash of the effective look (§8, <see cref="Rules.LookSettings.GetStableHash"/>) the job was finished with, or
+/// Stable hash of the effective look (§8, <see cref="Rules.LookSettings.GetStableHash(Textures.TextureKind)"/>) the job was finished with, or
 /// <see langword="null"/> when unknown (not finished, or finished before looks were recorded).
 /// </param>
 public sealed record JobRecord(

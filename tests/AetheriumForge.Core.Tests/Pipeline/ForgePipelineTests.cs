@@ -545,7 +545,7 @@ public sealed class ForgePipelineTests : IAsyncLifetime
 
         // Assert
         var hashes = (await AllJobsAsync()).OrderBy(j => j.Path).Select(j => j.LookHash);
-        Assert.Equal([look.GetStableHash(), LookSettings.Neutral.GetStableHash()], hashes);
+        Assert.Equal([look.GetStableHash(TextureKind.Diffuse), LookSettings.Neutral.GetStableHash(TextureKind.Diffuse)], hashes);
     }
 
     [Fact]
