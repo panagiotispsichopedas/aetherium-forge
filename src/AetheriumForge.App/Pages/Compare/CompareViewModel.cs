@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
+using AetheriumForge.App.Services;
 using AetheriumForge.Core.Imaging;
 using AetheriumForge.Core.Jobs;
+using AetheriumForge.Core.Pipeline;
 using AetheriumForge.Core.Rules;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -27,6 +29,9 @@ public sealed partial class CompareViewModel : ObservableObject
     /// <summary>The question asked after a look is applied to a group with finished textures.</summary>
     public const string ApplyToFinishedQuestion = "Apply to finished textures in this group?";
 
+    /// <summary>The banner shown while a pipeline run is active.</summary>
+    public const string RunActiveReason = "A run is active. New GPU previews and rule changes (Apply look, Use model) are locked until it ends; cached previews still work.";
+
     private const int SearchLimit = 200;
     private const int ThumbnailSide = 128;
     private static readonly int[] ZoomSteps = [100, 150, 200, 300, 400];
@@ -37,6 +42,8 @@ public sealed partial class CompareViewModel : ObservableObject
     private readonly Random _random;
     private readonly TimeProvider _time;
     private readonly ILogger<CompareViewModel> _logger;
+    private readonly IForgeRunner? _runner;
+    private readonly SynchronizationContext? _uiContext;
     private CancellationTokenSource? _loadCancellation;
     private CancellationTokenSource? _fullRenderCancellation;
     private PreviewSample? _sample;
@@ -52,7 +59,15 @@ public sealed partial class CompareViewModel : ObservableObject
     /// <param name="random">Picks random samples; inject a seeded instance for deterministic picks.</param>
     /// <param name="timeProvider">Clock for the full-resolution render delay.</param>
     /// <param name="logger">Logger; <see langword="null"/> disables logging.</param>
-    public CompareViewModel(PreviewEngine engine, ICompareProjectData data, ICompareDialogs dialogs, Random? random = null, TimeProvider? timeProvider = null, ILogger<CompareViewModel>? logger = null)
+    /// <param name="runner">The pipeline runner, or <see langword="null"/> when none is registered; its state locks GPU previews and rule changes.</param>
+    public CompareViewModel(
+        PreviewEngine engine,
+        ICompareProjectData data,
+        ICompareDialogs dialogs,
+        Random? random = null,
+        TimeProvider? timeProvider = null,
+        ILogger<CompareViewModel>? logger = null,
+        IForgeRunner? runner = null)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(data);
@@ -64,9 +79,18 @@ public sealed partial class CompareViewModel : ObservableObject
         _random = random ?? Random.Shared;
         _time = timeProvider ?? TimeProvider.System;
         _logger = logger ?? NullLogger<CompareViewModel>.Instance;
+        _runner = runner;
+        _uiContext = SynchronizationContext.Current;
 
         Look.LookChanged += (_, _) => OnLookChanged();
         _data.Changed += (_, _) => _ = RefreshAsync();
+        if (runner is not null)
+        {
+            // Raised on any thread: hop to the UI thread when there is one.
+            runner.RunStateChanged += (_, _) => PostToUi(UpdateRunState);
+        }
+
+        UpdateRunState();
     }
 
     /// <summary>Gets the Look panel.</summary>
@@ -182,6 +206,23 @@ public sealed partial class CompareViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(DisplayScale), nameof(DisplayWidth), nameof(DisplayHeight), nameof(SplitOffset), nameof(ZoomText))]
     public partial int TargetHeight { get; set; }
 
+    /// <summary>Gets or sets the error shown in the banner, or <see langword="null"/> when there is none.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasError))]
+    public partial string? ErrorMessage { get; set; }
+
+    /// <summary>Gets or sets whether a pipeline run is active (any state but Idle).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsGpuAvailable))]
+    [NotifyCanExecuteChangedFor(nameof(ApplyToGroupCommand), nameof(UseModelForGroupCommand))]
+    public partial bool IsRunActive { get; set; }
+
+    /// <summary>Gets whether an error is shown.</summary>
+    public bool HasError => ErrorMessage is not null;
+
+    /// <summary>Gets the run-lock banner text.</summary>
+    public string RunLockReason { get; } = RunActiveReason;
+
     /// <summary>Gets or sets the status line.</summary>
     [ObservableProperty]
     public partial string Status { get; set; } = "Pick a group and preview samples, or search for a finished texture.";
@@ -202,7 +243,7 @@ public sealed partial class CompareViewModel : ObservableObject
     public bool IsModelDifferentFromGroup => SelectedModel is not null && !string.Equals(SelectedModel, GroupModel, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Gets whether GPU upscaling is available now (no run active).</summary>
-    public bool IsGpuAvailable => _engine.IsUpscalingAvailable;
+    public bool IsGpuAvailable => !IsRunActive && _engine.IsUpscalingAvailable;
 
     /// <summary>Gets the screen pixels per texture pixel.</summary>
     public double DisplayScale
@@ -306,7 +347,7 @@ public sealed partial class CompareViewModel : ObservableObject
             LoadGroupSettings();
         }
 
-        OnPropertyChanged(nameof(IsGpuAvailable));
+        UpdateRunState();
     }
 
     /// <summary>Fills the strip with <see cref="SampleCount"/> random jobs of the selected group.</summary>
@@ -392,9 +433,16 @@ public sealed partial class CompareViewModel : ObservableObject
     /// Writes the Look panel into the selected group's rules, then offers to re-queue the group's finished textures (default No).
     /// </summary>
     /// <returns>A task that completes when done.</returns>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanChangeRules))]
     public async Task ApplyToGroupAsync()
     {
+        UpdateRunState();
+        if (IsRunActive)
+        {
+            ShowError(RunActiveReason);
+            return;
+        }
+
         if (SelectedGroup is not { } groupName || !_data.HasProject)
         {
             Status = _data.HasProject ? "Pick a group first." : PreviewEngine.NoProjectReason;
@@ -439,9 +487,16 @@ public sealed partial class CompareViewModel : ObservableObject
 
     /// <summary>Makes the previewed model the selected group's model.</summary>
     /// <returns>A task that completes when the rules are stored.</returns>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanChangeRules))]
     public async Task UseModelForGroupAsync()
     {
+        UpdateRunState();
+        if (IsRunActive)
+        {
+            ShowError(RunActiveReason);
+            return;
+        }
+
         if (SelectedGroup is not { } groupName || SelectedModel is not { } model || !_data.HasProject)
         {
             return;
@@ -466,6 +521,13 @@ public sealed partial class CompareViewModel : ObservableObject
             ReportError($"Could not change the model of {groupName}", ex);
         }
     }
+
+    /// <summary>Hides the error banner.</summary>
+    [RelayCommand]
+    public void DismissError() => ErrorMessage = null;
+
+    /// <summary>Re-reads the runner state (also called on every run start and end).</summary>
+    public void UpdateRunState() => IsRunActive = (_runner?.State ?? PipelineState.Idle) != PipelineState.Idle || !_engine.IsUpscalingAvailable;
 
     /// <summary>Zooms in one step (leaves fit mode).</summary>
     [RelayCommand]
@@ -679,7 +741,7 @@ public sealed partial class CompareViewModel : ObservableObject
                 return;
             }
 
-            OnPropertyChanged(nameof(IsGpuAvailable));
+            UpdateRunState();
             if (result.Sample is not { } sample)
             {
                 BeforeImage = null;
@@ -773,10 +835,30 @@ public sealed partial class CompareViewModel : ObservableObject
         IsDraft = _render?.IsDraft ?? false;
     }
 
+    private bool CanChangeRules() => !IsRunActive;
+
+    private void PostToUi(Action action)
+    {
+        if (_uiContext is null || ReferenceEquals(SynchronizationContext.Current, _uiContext))
+        {
+            action();
+        }
+        else
+        {
+            _uiContext.Post(_ => action(), null);
+        }
+    }
+
+    private void ShowError(string message)
+    {
+        ErrorMessage = message;
+        Status = message;
+    }
+
     private void ReportError(string what, Exception exception)
     {
         LogError(exception, what);
-        Status = $"{what}: {exception.Message}";
+        ShowError($"{what}: {exception.Message}");
     }
 
     [LoggerMessage(Level = LogLevel.Error, Message = "{What}")]

@@ -28,7 +28,8 @@
     <!-- Title -->
     <StackPanel Grid.ColumnSpan="3" Orientation="Horizontal" Spacing="12" Margin="0,0,0,8">
       <TextBlock Text="Compare" FontSize="24" FontWeight="SemiBold" />
-      <TextBlock Text="{Binding Status}" VerticalAlignment="Bottom" Margin="0,0,0,4" Opacity="0.7" TextTrimming="CharacterEllipsis" />
+      <TextBlock Text="{Binding Status}" VerticalAlignment="Bottom" Margin="0,0,0,4" Opacity="0.7" TextTrimming="CharacterEllipsis"
+                 ToolTip.Tip="{Binding Status}" />
     </StackPanel>
 
     <!-- Left: what to preview -->
@@ -70,11 +71,22 @@
 
     <!-- Centre: before/after -->
     <DockPanel Grid.Row="1" Grid.Column="1">
+      <Border DockPanel.Dock="Top" IsVisible="{Binding HasError}" Background="#33E5484D" BorderBrush="#FFE5484D" BorderThickness="1" CornerRadius="4"
+              Padding="10,6" Margin="0,0,0,6" AutomationProperties.Name="Error">
+        <Grid ColumnDefinitions="*,Auto">
+          <SelectableTextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" VerticalAlignment="Center" />
+          <Button Grid.Column="1" Content="Dismiss" Command="{Binding DismissErrorCommand}" Margin="8,0,0,0" VerticalAlignment="Top" />
+        </Grid>
+      </Border>
+      <Border DockPanel.Dock="Top" IsVisible="{Binding IsRunActive}" Background="#33F5A524" BorderBrush="#FFF5A524" BorderThickness="1" CornerRadius="4"
+              Padding="10,6" Margin="0,0,0,6" AutomationProperties.Name="Run active">
+        <TextBlock Text="{Binding RunLockReason}" TextWrapping="Wrap" />
+      </Border>
       <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,*,Auto" Margin="0,0,0,6">
         <ComboBox ItemsSource="{Binding ChannelModes}" SelectedItem="{Binding Channel}" MinWidth="96" ToolTip.Tip="Channel view" />
-        <Button Grid.Column="1" Content="−" Command="{Binding ZoomOutCommand}" Margin="8,0,0,0" ToolTip.Tip="Zoom out (mouse wheel)" />
-        <Button Grid.Column="2" Content="+" Command="{Binding ZoomInCommand}" Margin="4,0,0,0" ToolTip.Tip="Zoom in (mouse wheel)" />
-        <Button Grid.Column="3" Content="Fit" Command="{Binding FitToViewCommand}" Margin="4,0,0,0" />
+        <Button Grid.Column="1" Content="−" Command="{Binding ZoomOutCommand}" AutomationProperties.Name="Zoom out" Margin="8,0,0,0" ToolTip.Tip="Zoom out (mouse wheel)" />
+        <Button Grid.Column="2" Content="+" Command="{Binding ZoomInCommand}" AutomationProperties.Name="Zoom in" Margin="4,0,0,0" ToolTip.Tip="Zoom in (mouse wheel)" />
+        <Button Grid.Column="3" Content="Fit" Command="{Binding FitToViewCommand}" AutomationProperties.Name="Fit to view" Margin="4,0,0,0" />
         <TextBlock Grid.Column="4" Text="{Binding ZoomText}" VerticalAlignment="Center" Margin="8,0" MinWidth="72" Opacity="0.7" />
         <Slider Grid.Column="5" Minimum="0" Maximum="1" Value="{Binding Split}" Margin="8,0" VerticalAlignment="Center"
                 ToolTip.Tip="Split between before (left) and after (right); you can also drag the line" />
@@ -134,6 +146,7 @@
       <ScrollViewer>
         <StackPanel Spacing="2" DataContext="{Binding Look}" x:DataType="compare:LookPanelViewModel">
           <TextBlock Classes="section" Text="Presets" Margin="0,0,0,4" />
+          <TextBlock Text="Double-click a slider to reset it." FontSize="11" Opacity="0.6" Margin="0,0,0,4" />
           <ItemsControl ItemsSource="{Binding $parent[UserControl].((compare:CompareViewModel)DataContext).Presets}">
             <ItemsControl.ItemsPanel>
               <ItemsPanelTemplate>
@@ -151,41 +164,42 @@
           <TextBlock Classes="section" Text="Detail" />
           <StackPanel ToolTip.Tip="{Binding AiStrengthTooltip}" ToolTip.ShowOnDisabled="True">
             <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="AI strength" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding AiStrength, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0" Maximum="1" SmallChange="0.05" Value="{Binding AiStrength}" IsEnabled="{Binding IsAiStrengthEnabled}" />
+            <Slider Minimum="0" Maximum="1" SmallChange="0.05" Value="{Binding AiStrength}" Tag="AiStrength" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="AI strength" IsEnabled="{Binding IsAiStrengthEnabled}" />
           </StackPanel>
           <StackPanel ToolTip.Tip="{Binding SharpenTooltip}" ToolTip.ShowOnDisabled="True">
             <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Sharpen" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding SharpenAmount, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0" Maximum="2" SmallChange="0.05" Value="{Binding SharpenAmount}" IsEnabled="{Binding IsSharpenEnabled}" />
+            <Slider Minimum="0" Maximum="2" SmallChange="0.05" Value="{Binding SharpenAmount}" Tag="SharpenAmount" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Sharpen" IsEnabled="{Binding IsSharpenEnabled}" />
             <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Sharpen radius" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding SharpenRadius, StringFormat='{}{0:F1} px'}" /></Grid>
-            <Slider Minimum="0.3" Maximum="3" SmallChange="0.1" Value="{Binding SharpenRadius}" IsEnabled="{Binding IsSharpenEnabled}" />
+            <Slider Minimum="0.3" Maximum="3" SmallChange="0.1" Value="{Binding SharpenRadius}" Tag="SharpenRadius" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Sharpen radius" IsEnabled="{Binding IsSharpenEnabled}" />
           </StackPanel>
-          <StackPanel ToolTip.Tip="{Binding DenoiseTooltip}" ToolTip.ShowOnDisabled="True">
+          <!-- Denoise stays hidden until a denoise model exists: it has no look value to bind yet. -->
+          <StackPanel IsVisible="{Binding IsDenoiseEnabled}" ToolTip.Tip="{Binding DenoiseTooltip}">
             <TextBlock Classes="label" Text="Denoise" />
-            <Slider Minimum="0" Maximum="1" Value="0" IsEnabled="{Binding IsDenoiseEnabled}" />
+            <Slider Minimum="0" Maximum="1" Value="0" IsEnabled="False" />
           </StackPanel>
 
           <TextBlock Classes="section" Text="Colour" />
           <StackPanel ToolTip.Tip="{Binding ColourTooltip}" ToolTip.ShowOnDisabled="True">
             <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Brightness" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Brightness, StringFormat='{}{0:+0.00;-0.00;0.00}'}" /></Grid>
-            <Slider Minimum="-1" Maximum="1" SmallChange="0.01" Value="{Binding Brightness}" IsEnabled="{Binding IsColourEnabled}" />
+            <Slider Minimum="-1" Maximum="1" SmallChange="0.01" Value="{Binding Brightness}" Tag="Brightness" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Brightness" IsEnabled="{Binding IsColourEnabled}" />
             <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Contrast" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Contrast, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0.5" Maximum="2" SmallChange="0.01" Value="{Binding Contrast}" IsEnabled="{Binding IsColourEnabled}" />
+            <Slider Minimum="0.5" Maximum="2" SmallChange="0.01" Value="{Binding Contrast}" Tag="Contrast" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Contrast" IsEnabled="{Binding IsColourEnabled}" />
             <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Gamma" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Gamma, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0.5" Maximum="2" SmallChange="0.01" Value="{Binding Gamma}" IsEnabled="{Binding IsColourEnabled}" />
+            <Slider Minimum="0.5" Maximum="2" SmallChange="0.01" Value="{Binding Gamma}" Tag="Gamma" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Gamma" IsEnabled="{Binding IsColourEnabled}" />
             <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Saturation" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Saturation, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0" Maximum="2" SmallChange="0.01" Value="{Binding Saturation}" IsEnabled="{Binding IsColourEnabled}" />
+            <Slider Minimum="0" Maximum="2" SmallChange="0.01" Value="{Binding Saturation}" Tag="Saturation" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Saturation" IsEnabled="{Binding IsColourEnabled}" />
             <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Temperature" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Temperature, StringFormat='{}{0:+0.00;-0.00;0.00}'}" /></Grid>
-            <Slider Minimum="-1" Maximum="1" SmallChange="0.01" Value="{Binding Temperature}" IsEnabled="{Binding IsColourEnabled}" />
+            <Slider Minimum="-1" Maximum="1" SmallChange="0.01" Value="{Binding Temperature}" Tag="Temperature" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Temperature" IsEnabled="{Binding IsColourEnabled}" />
           </StackPanel>
 
           <TextBlock Classes="section" Text="Surface" />
           <StackPanel ToolTip.Tip="{Binding NormalStrengthTooltip}" ToolTip.ShowOnDisabled="True">
             <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Relief (how 3D)" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding NormalStrength, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0" Maximum="3" SmallChange="0.05" Value="{Binding NormalStrength}" IsEnabled="{Binding IsNormalStrengthEnabled}" />
+            <Slider Minimum="0" Maximum="3" SmallChange="0.05" Value="{Binding NormalStrength}" Tag="NormalStrength" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Relief" IsEnabled="{Binding IsNormalStrengthEnabled}" />
           </StackPanel>
           <StackPanel ToolTip.Tip="{Binding SpecularTooltip}" ToolTip.ShowOnDisabled="True">
             <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Shininess (specular)" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding SpecularScale, StringFormat='{}{0:F2}'}" /></Grid>
-            <Slider Minimum="0" Maximum="2" SmallChange="0.05" Value="{Binding SpecularScale}" IsEnabled="{Binding IsSpecularEnabled}" />
+            <Slider Minimum="0" Maximum="2" SmallChange="0.05" Value="{Binding SpecularScale}" Tag="SpecularScale" DoubleTapped="OnSliderDoubleTapped" AutomationProperties.Name="Shininess" IsEnabled="{Binding IsSpecularEnabled}" />
           </StackPanel>
         </StackPanel>
       </ScrollViewer>

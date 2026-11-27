@@ -118,9 +118,12 @@ internal sealed class CompareFakeData : ICompareProjectData
 
     public int Saves { get; private set; }
 
+    public Exception? LoadFailure { get; set; }
+
     public List<long> Requeued { get; } = [];
 
-    public Task<ForgeRules> LoadRulesAsync(CancellationToken cancellationToken) => Task.FromResult(Rules);
+    public Task<ForgeRules> LoadRulesAsync(CancellationToken cancellationToken) =>
+        LoadFailure is { } failure ? Task.FromException<ForgeRules>(failure) : Task.FromResult(Rules);
 
     public Task SaveRulesAsync(ForgeRules rules, CancellationToken cancellationToken)
     {
@@ -160,5 +163,35 @@ internal sealed class CompareFakeDialogs : ICompareDialogs
     {
         Questions.Add(message);
         return Task.FromResult(Answer);
+    }
+}
+
+internal sealed class CompareFakeRunner : AetheriumForge.App.Services.IForgeRunner
+{
+    public event EventHandler<PipelineProgress>? ProgressChanged;
+
+    public event EventHandler<PipelineRunSummary?>? RunStateChanged;
+
+    public PipelineState State { get; private set; } = PipelineState.Idle;
+
+    public PipelineProgress? LastProgress => null;
+
+    public void SetState(PipelineState state)
+    {
+        State = state;
+        RunStateChanged?.Invoke(this, null);
+    }
+
+    public Task<PipelineRunSummary> StartAsync(AetheriumForge.App.Services.ForgeRunRequest request) =>
+        Task.FromException<PipelineRunSummary>(new NotSupportedException("Fake runner."));
+
+    public void Pause() => ProgressChanged?.Invoke(this, null!);
+
+    public void Unpause()
+    {
+    }
+
+    public void RequestStop()
+    {
     }
 }

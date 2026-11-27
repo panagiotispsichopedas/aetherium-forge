@@ -113,6 +113,49 @@ public sealed partial class LookPanelViewModel : ObservableObject
     /// <returns><see langword="true"/> when it applies.</returns>
     public bool IsEnabled(LookControl control) => LookControls.AppliesTo(control, Kind, UsesModel);
 
+    /// <summary>Resets one control to its neutral value (a slider double-click); raises <see cref="LookChanged"/> when it changed.</summary>
+    /// <param name="control">The control.</param>
+    public void ResetControl(LookControl control)
+    {
+        var neutral = LookControls.RangeOf(control).Neutral;
+        switch (control)
+        {
+            case LookControl.AiStrength:
+                AiStrength = neutral;
+                break;
+            case LookControl.SharpenAmount:
+                SharpenAmount = neutral;
+                break;
+            case LookControl.SharpenRadius:
+                SharpenRadius = neutral;
+                break;
+            case LookControl.Brightness:
+                Brightness = neutral;
+                break;
+            case LookControl.Contrast:
+                Contrast = neutral;
+                break;
+            case LookControl.Gamma:
+                Gamma = neutral;
+                break;
+            case LookControl.Saturation:
+                Saturation = neutral;
+                break;
+            case LookControl.Temperature:
+                Temperature = neutral;
+                break;
+            case LookControl.NormalStrength:
+                NormalStrength = neutral;
+                break;
+            case LookControl.SpecularScale:
+                SpecularScale = neutral;
+                break;
+            default:
+                // Denoise has no look value yet (it needs a denoise model).
+                break;
+        }
+    }
+
     /// <summary>Builds the look from the sliders.</summary>
     /// <returns>The look.</returns>
     public LookSettings ToSettings() => new()

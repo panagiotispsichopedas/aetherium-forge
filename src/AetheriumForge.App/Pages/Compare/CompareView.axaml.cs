@@ -59,6 +59,15 @@ public sealed partial class CompareView : UserControl
         }
     }
 
+    private void OnSliderDoubleTapped(object? sender, TappedEventArgs e)
+    {
+        if (sender is Slider { Tag: string name } && Enum.TryParse<LookControl>(name, out var control) && ViewModel is { } viewModel)
+        {
+            viewModel.Look.ResetControl(control);
+            e.Handled = true;
+        }
+    }
+
     private void OnViewportPointerPressed(object? sender, PointerPressedEventArgs e)
     {
         if (ViewModel is not { } viewModel || !e.GetCurrentPoint(Viewport).Properties.IsLeftButtonPressed)
