@@ -34,7 +34,17 @@ public static class AppHost
         services.AddSingleton<ScanPagePlaceholder>(_ => new ScanPagePlaceholder(new PagePlaceholderViewModel("Scan")));
 
         // ── PAGE: Queue ──
-        services.AddSingleton<QueuePagePlaceholder>(_ => new QueuePagePlaceholder(new PagePlaceholderViewModel("Queue")));
+        // IProjectSession and IForgeRunner are resolved optionally: without a session the page shows "no project", without a runner
+        // its actions are never blocked by a run.
+        services.AddSingleton<Pages.Queue.QueueViewModel>(sp => new Pages.Queue.QueueViewModel(
+            sp.GetService<IProjectSession>(),
+            sp.GetService<IForgeRunner>(),
+            sp.GetRequiredService<INavigationService>(),
+            sp.GetRequiredService<TimeProvider>(),
+            new Pages.Queue.AvaloniaUiDispatcher(),
+            () => Core.Imaging.ModelCatalog.Discover(Core.Imaging.ModelCatalog.DefaultModelsFolder),
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Pages.Queue.QueueViewModel>>()));
+        services.AddSingleton<QueuePagePlaceholder>(sp => new QueuePagePlaceholder(sp.GetRequiredService<Pages.Queue.QueueViewModel>()));
 
         // ── PAGE: Run (also owns IForgeRunner) ──
         services.AddSingleton<RunPagePlaceholder>(_ => new RunPagePlaceholder(new PagePlaceholderViewModel("Run")));
