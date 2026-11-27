@@ -435,6 +435,75 @@ public sealed class JobStore : IAsyncDisposable
     }
 
     /// <summary>
+    /// Applies rule changes (from <see cref="Rules.RulesApplier.Preview"/>) in a single transaction: each row takes its new group, target,
+    /// model, state and error. A row is updated only while it is still in the change's <see cref="Rules.JobRuleChange.OldState"/>, and
+    /// <see cref="JobState.Running"/> rows are never touched, so a row the pipeline took meanwhile is left alone.
+    /// </summary>
+    /// <param name="changes">The changes.</param>
+    /// <param name="ct">Cancels the operation; nothing is written when cancelled.</param>
+    /// <returns>The number of rows updated.</returns>
+    /// <remarks>A row leaving <see cref="JobState.Done"/> loses its processing time and finish time; its attempt count is kept.</remarks>
+    /// <exception cref="ArgumentException">A change targets a state other than <see cref="JobState.Queued"/> or <see cref="JobState.Skipped"/>.</exception>
+    public async Task<int> ApplyRuleChangesAsync(IEnumerable<Rules.JobRuleChange> changes, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(changes);
+
+        const string sql = """
+            UPDATE job SET
+              grp = $grp, target = $target, model = $model, state = $state, error = $error,
+              seconds = CASE WHEN state = 'Done' THEN NULL ELSE seconds END,
+              finished_at = CASE WHEN state = 'Done' THEN NULL ELSE finished_at END
+            WHERE id = $id AND state = $old AND state <> 'Running';
+            """;
+
+        var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (connection.ConfigureAwait(false))
+        {
+            var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+            await using (transaction.ConfigureAwait(false))
+            {
+                var command = connection.CreateCommand();
+                await using (command.ConfigureAwait(false))
+                {
+                    command.Transaction = transaction;
+                    command.CommandText = sql;
+                    var id = command.Parameters.Add("$id", SqliteType.Integer);
+                    var old = command.Parameters.Add("$old", SqliteType.Text);
+                    var group = command.Parameters.Add("$grp", SqliteType.Text);
+                    var target = command.Parameters.Add("$target", SqliteType.Integer);
+                    var model = command.Parameters.Add("$model", SqliteType.Text);
+                    var state = command.Parameters.Add("$state", SqliteType.Text);
+                    var error = command.Parameters.Add("$error", SqliteType.Text);
+
+                    var affected = 0;
+                    foreach (var change in changes)
+                    {
+                        ArgumentNullException.ThrowIfNull(change, nameof(changes));
+                        if (change.NewState is not (JobState.Queued or JobState.Skipped))
+                        {
+                            throw new ArgumentException($"Job {change.Id}: a rule change can only queue or skip a job, not set it to {change.NewState}.", nameof(changes));
+                        }
+
+                        id.Value = change.Id;
+                        old.Value = change.OldState.ToString();
+                        group.Value = (object?)change.Group ?? DBNull.Value;
+                        target.Value = change.Target;
+                        model.Value = (object?)change.Model ?? DBNull.Value;
+                        state.Value = change.NewState.ToString();
+                        error.Value = (object?)change.Error ?? DBNull.Value;
+
+                        affected += await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    }
+
+                    await transaction.CommitAsync(ct).ConfigureAwait(false);
+
+                    return affected;
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// Records the start of a processing run.
     /// </summary>
     /// <param name="ct">Cancels the operation.</param>
