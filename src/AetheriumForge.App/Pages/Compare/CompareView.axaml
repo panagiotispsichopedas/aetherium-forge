@@ -1,0 +1,194 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:compare="using:AetheriumForge.App.Pages.Compare"
+             x:Class="AetheriumForge.App.Pages.Compare.CompareView"
+             x:DataType="compare:CompareViewModel">
+  <UserControl.Resources>
+    <compare:RgbaImageBitmapConverter x:Key="Bitmap" />
+  </UserControl.Resources>
+  <UserControl.Styles>
+    <Style Selector="TextBlock.section">
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Margin" Value="0,12,0,4" />
+    </Style>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Opacity" Value="0.85" />
+    </Style>
+    <Style Selector="TextBlock.value">
+      <Setter Property="Opacity" Value="0.6" />
+      <Setter Property="HorizontalAlignment" Value="Right" />
+      <Setter Property="FontFeatures" Value="tnum" />
+    </Style>
+    <Style Selector="Slider">
+      <Setter Property="Margin" Value="0,-6,0,0" />
+    </Style>
+  </UserControl.Styles>
+
+  <Grid ColumnDefinitions="250,*,290" RowDefinitions="Auto,*,Auto">
+    <!-- Title -->
+    <StackPanel Grid.ColumnSpan="3" Orientation="Horizontal" Spacing="12" Margin="0,0,0,8">
+      <TextBlock Text="Compare" FontSize="24" FontWeight="SemiBold" />
+      <TextBlock Text="{Binding Status}" VerticalAlignment="Bottom" Margin="0,0,0,4" Opacity="0.7" TextTrimming="CharacterEllipsis" />
+    </StackPanel>
+
+    <!-- Left: what to preview -->
+    <ScrollViewer Grid.Row="1" Grid.RowSpan="2" Grid.Column="0" Margin="0,0,12,0">
+      <StackPanel Spacing="6">
+        <TextBlock Classes="section" Text="Group" Margin="0,0,0,4" />
+        <ComboBox ItemsSource="{Binding Groups}" SelectedItem="{Binding SelectedGroup}" HorizontalAlignment="Stretch" PlaceholderText="No project open" />
+        <Grid ColumnDefinitions="*,Auto" Margin="0,4,0,0">
+          <Button Content="Preview random from group" Command="{Binding PreviewRandomCommand}" HorizontalAlignment="Stretch"
+                  ToolTip.Tip="Picks random textures of the group for the thumbnail strip." />
+          <ComboBox Grid.Column="1" ItemsSource="{Binding SampleCountOptions}" SelectedItem="{Binding SampleCount}" Margin="6,0,0,0" MinWidth="64"
+                    ToolTip.Tip="How many samples" />
+        </Grid>
+
+        <TextBlock Classes="section" Text="Model" />
+        <ComboBox ItemsSource="{Binding Models}" SelectedItem="{Binding SelectedModel}" HorizontalAlignment="Stretch" PlaceholderText="No model installed"
+                  ToolTip.Tip="Preview another installed model on the same samples." />
+        <Button Content="Use this model for the group" Command="{Binding UseModelForGroupCommand}" IsEnabled="{Binding IsModelDifferentFromGroup}"
+                HorizontalAlignment="Stretch" />
+        <TextBlock Text="{Binding GroupModel, StringFormat='Group model: {0}'}" Opacity="0.6" FontSize="12" TextWrapping="Wrap" />
+
+        <TextBlock Classes="section" Text="Finished textures" />
+        <Grid ColumnDefinitions="*,Auto">
+          <TextBox Text="{Binding SearchText}" PlaceholderText="Search by path" />
+          <Button Grid.Column="1" Content="Find" Command="{Binding SearchCommand}" Margin="6,0,0,0" IsDefault="True" />
+        </Grid>
+        <ListBox ItemsSource="{Binding SearchResults}" SelectedItem="{Binding SelectedSearchResult}" MaxHeight="360">
+          <ListBox.ItemTemplate>
+            <DataTemplate x:DataType="compare:CompareSampleViewModel">
+              <StackPanel ToolTip.Tip="{Binding FullPath}">
+                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                <TextBlock Text="{Binding SizeText}" FontSize="11" Opacity="0.6" />
+              </StackPanel>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </StackPanel>
+    </ScrollViewer>
+
+    <!-- Centre: before/after -->
+    <DockPanel Grid.Row="1" Grid.Column="1">
+      <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,*,Auto" Margin="0,0,0,6">
+        <ComboBox ItemsSource="{Binding ChannelModes}" SelectedItem="{Binding Channel}" MinWidth="96" ToolTip.Tip="Channel view" />
+        <Button Grid.Column="1" Content="−" Command="{Binding ZoomOutCommand}" Margin="8,0,0,0" ToolTip.Tip="Zoom out (mouse wheel)" />
+        <Button Grid.Column="2" Content="+" Command="{Binding ZoomInCommand}" Margin="4,0,0,0" ToolTip.Tip="Zoom in (mouse wheel)" />
+        <Button Grid.Column="3" Content="Fit" Command="{Binding FitToViewCommand}" Margin="4,0,0,0" />
+        <TextBlock Grid.Column="4" Text="{Binding ZoomText}" VerticalAlignment="Center" Margin="8,0" MinWidth="72" Opacity="0.7" />
+        <Slider Grid.Column="5" Minimum="0" Maximum="1" Value="{Binding Split}" Margin="8,0" VerticalAlignment="Center"
+                ToolTip.Tip="Split between before (left) and after (right); you can also drag the line" />
+        <TextBlock Grid.Column="6" Text="draft" IsVisible="{Binding IsDraft}" VerticalAlignment="Center" Opacity="0.6" FontStyle="Italic" />
+      </Grid>
+      <ProgressBar DockPanel.Dock="Bottom" Minimum="0" Maximum="1" Value="{Binding LoadProgress}" IsVisible="{Binding IsLoading}" Height="4" Margin="0,4,0,0" />
+
+      <Border x:Name="Viewport" ClipToBounds="True" CornerRadius="4" Background="#FF1B1B1F" Cursor="SizeAll">
+        <Panel>
+          <Panel x:Name="Stage" Width="{Binding DisplayWidth}" Height="{Binding DisplayHeight}" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <Panel.RenderTransform>
+              <TranslateTransform X="{Binding PanX}" Y="{Binding PanY}" />
+            </Panel.RenderTransform>
+            <Image Source="{Binding AfterImage, Converter={StaticResource Bitmap}}" Stretch="Fill" RenderOptions.BitmapInterpolationMode="None" />
+            <Border Width="{Binding SplitOffset}" HorizontalAlignment="Left" ClipToBounds="True">
+              <Image Source="{Binding BeforeImage, Converter={StaticResource Bitmap}}" Stretch="Fill" HorizontalAlignment="Left"
+                     Width="{Binding DisplayWidth}" Height="{Binding DisplayHeight}" RenderOptions.BitmapInterpolationMode="None" />
+            </Border>
+            <Canvas>
+              <Rectangle Canvas.Left="{Binding SplitOffset}" Width="2" Height="{Binding DisplayHeight}" Fill="#E0FFFFFF" Cursor="SizeWestEast" Margin="-1,0,0,0" />
+            </Canvas>
+          </Panel>
+          <TextBlock Text="Before" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,8" Foreground="White" Opacity="0.75" />
+          <TextBlock Text="After" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="10,8" Foreground="White" Opacity="0.75" />
+        </Panel>
+      </Border>
+    </DockPanel>
+
+    <!-- Bottom: thumbnail strip -->
+    <ListBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding Samples}" SelectedItem="{Binding SelectedStripSample}" Margin="0,8,0,0"
+             ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Disabled">
+      <ListBox.ItemsPanel>
+        <ItemsPanelTemplate>
+          <StackPanel Orientation="Horizontal" Spacing="4" />
+        </ItemsPanelTemplate>
+      </ListBox.ItemsPanel>
+      <ListBox.ItemTemplate>
+        <DataTemplate x:DataType="compare:CompareSampleViewModel">
+          <StackPanel Width="104" Spacing="2" ToolTip.Tip="{Binding FullPath}">
+            <Border Width="96" Height="96" Background="#FF1B1B1F" CornerRadius="3">
+              <Panel>
+                <Image Source="{Binding Thumbnail, Converter={StaticResource Bitmap}}" Stretch="Uniform" />
+                <Ellipse Width="8" Height="8" Fill="#FF4CC38A" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="4"
+                         IsVisible="{Binding IsCached}" ToolTip.Tip="Upscale cached: instant preview" />
+              </Panel>
+            </Border>
+            <TextBlock Text="{Binding Name}" FontSize="11" TextTrimming="CharacterEllipsis" />
+          </StackPanel>
+        </DataTemplate>
+      </ListBox.ItemTemplate>
+    </ListBox>
+
+    <!-- Right: Look panel -->
+    <DockPanel Grid.Row="1" Grid.RowSpan="2" Grid.Column="2" Margin="12,0,0,0">
+      <Button DockPanel.Dock="Bottom" Content="Apply look to group" Command="{Binding ApplyToGroupCommand}" HorizontalAlignment="Stretch"
+              Classes="accent" Margin="0,8,0,0" ToolTip.Tip="Writes the look into the group's rules. You are asked before finished textures are re-queued." />
+      <ScrollViewer>
+        <StackPanel Spacing="2" DataContext="{Binding Look}" x:DataType="compare:LookPanelViewModel">
+          <TextBlock Classes="section" Text="Presets" Margin="0,0,0,4" />
+          <ItemsControl ItemsSource="{Binding $parent[UserControl].((compare:CompareViewModel)DataContext).Presets}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <WrapPanel />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="compare:LookPreset">
+                <Button Content="{Binding Name}" ToolTip.Tip="{Binding Description}" Margin="0,0,4,4"
+                        Command="{Binding $parent[UserControl].((compare:CompareViewModel)DataContext).ApplyPresetCommand}" CommandParameter="{Binding}" />
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+
+          <TextBlock Classes="section" Text="Detail" />
+          <StackPanel ToolTip.Tip="{Binding AiStrengthTooltip}" ToolTip.ShowOnDisabled="True">
+            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="AI strength" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding AiStrength, StringFormat='{}{0:F2}'}" /></Grid>
+            <Slider Minimum="0" Maximum="1" SmallChange="0.05" Value="{Binding AiStrength}" IsEnabled="{Binding IsAiStrengthEnabled}" />
+          </StackPanel>
+          <StackPanel ToolTip.Tip="{Binding SharpenTooltip}" ToolTip.ShowOnDisabled="True">
+            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Sharpen" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding SharpenAmount, StringFormat='{}{0:F2}'}" /></Grid>
+            <Slider Minimum="0" Maximum="2" SmallChange="0.05" Value="{Binding SharpenAmount}" IsEnabled="{Binding IsSharpenEnabled}" />
+            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Sharpen radius" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding SharpenRadius, StringFormat='{}{0:F1} px'}" /></Grid>
+            <Slider Minimum="0.3" Maximum="3" SmallChange="0.1" Value="{Binding SharpenRadius}" IsEnabled="{Binding IsSharpenEnabled}" />
+          </StackPanel>
+          <StackPanel ToolTip.Tip="{Binding DenoiseTooltip}" ToolTip.ShowOnDisabled="True">
+            <TextBlock Classes="label" Text="Denoise" />
+            <Slider Minimum="0" Maximum="1" Value="0" IsEnabled="{Binding IsDenoiseEnabled}" />
+          </StackPanel>
+
+          <TextBlock Classes="section" Text="Colour" />
+          <StackPanel ToolTip.Tip="{Binding ColourTooltip}" ToolTip.ShowOnDisabled="True">
+            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Brightness" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Brightness, StringFormat='{}{0:+0.00;-0.00;0.00}'}" /></Grid>
+            <Slider Minimum="-1" Maximum="1" SmallChange="0.01" Value="{Binding Brightness}" IsEnabled="{Binding IsColourEnabled}" />
+            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Contrast" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Contrast, StringFormat='{}{0:F2}'}" /></Grid>
+            <Slider Minimum="0.5" Maximum="2" SmallChange="0.01" Value="{Binding Contrast}" IsEnabled="{Binding IsColourEnabled}" />
+            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Gamma" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Gamma, StringFormat='{}{0:F2}'}" /></Grid>
+            <Slider Minimum="0.5" Maximum="2" SmallChange="0.01" Value="{Binding Gamma}" IsEnabled="{Binding IsColourEnabled}" />
+            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Saturation" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Saturation, StringFormat='{}{0:F2}'}" /></Grid>
+            <Slider Minimum="0" Maximum="2" SmallChange="0.01" Value="{Binding Saturation}" IsEnabled="{Binding IsColourEnabled}" />
+            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Temperature" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding Temperature, StringFormat='{}{0:+0.00;-0.00;0.00}'}" /></Grid>
+            <Slider Minimum="-1" Maximum="1" SmallChange="0.01" Value="{Binding Temperature}" IsEnabled="{Binding IsColourEnabled}" />
+          </StackPanel>
+
+          <TextBlock Classes="section" Text="Surface" />
+          <StackPanel ToolTip.Tip="{Binding NormalStrengthTooltip}" ToolTip.ShowOnDisabled="True">
+            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Relief (how 3D)" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding NormalStrength, StringFormat='{}{0:F2}'}" /></Grid>
+            <Slider Minimum="0" Maximum="3" SmallChange="0.05" Value="{Binding NormalStrength}" IsEnabled="{Binding IsNormalStrengthEnabled}" />
+          </StackPanel>
+          <StackPanel ToolTip.Tip="{Binding SpecularTooltip}" ToolTip.ShowOnDisabled="True">
+            <Grid ColumnDefinitions="*,Auto"><TextBlock Classes="label" Text="Shininess (specular)" /><TextBlock Grid.Column="1" Classes="value" Text="{Binding SpecularScale, StringFormat='{}{0:F2}'}" /></Grid>
+            <Slider Minimum="0" Maximum="2" SmallChange="0.05" Value="{Binding SpecularScale}" IsEnabled="{Binding IsSpecularEnabled}" />
+          </StackPanel>
+        </StackPanel>
+      </ScrollViewer>
+    </DockPanel>
+  </Grid>
+</UserControl>

@@ -46,7 +46,24 @@ public static class AppHost
         services.AddSingleton<RulesPagePlaceholder>(_ => new RulesPagePlaceholder(new PagePlaceholderViewModel("Rules")));
 
         // ── PAGE: Compare (M5) ──
-        services.AddSingleton<ComparePagePlaceholder>(_ => new ComparePagePlaceholder(new PagePlaceholderViewModel("Compare")));
+        services.AddSingleton(sp => new Pages.Compare.ProjectPreviewBackend(sp.GetService<IProjectSession>(), sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>()));
+        services.AddSingleton(sp =>
+        {
+            // The runner is optional (the Run page registers it); without one there is no run to yield the GPU to.
+            return new Pages.Compare.PreviewEngine(
+                sp.GetRequiredService<Pages.Compare.ProjectPreviewBackend>(),
+                () => sp.GetService<IForgeRunner>()?.State ?? Core.Pipeline.PipelineState.Idle,
+                logger: sp.GetService<Microsoft.Extensions.Logging.ILogger<Pages.Compare.PreviewEngine>>());
+        });
+        services.AddSingleton<Pages.Compare.ICompareProjectData>(sp => new Pages.Compare.SessionCompareProjectData(sp.GetService<IProjectSession>()));
+        services.AddSingleton<Pages.Compare.ICompareDialogs, Pages.Compare.AvaloniaCompareDialogs>();
+        services.AddSingleton(sp => new Pages.Compare.CompareViewModel(
+            sp.GetRequiredService<Pages.Compare.PreviewEngine>(),
+            sp.GetRequiredService<Pages.Compare.ICompareProjectData>(),
+            sp.GetRequiredService<Pages.Compare.ICompareDialogs>(),
+            timeProvider: sp.GetRequiredService<TimeProvider>(),
+            logger: sp.GetService<Microsoft.Extensions.Logging.ILogger<Pages.Compare.CompareViewModel>>()));
+        services.AddSingleton<ComparePagePlaceholder>(sp => new ComparePagePlaceholder(sp.GetRequiredService<Pages.Compare.CompareViewModel>()));
 
         services.AddSingleton<IReadOnlyDictionary<AppPage, object>>(sp => new Dictionary<AppPage, object>
         {
