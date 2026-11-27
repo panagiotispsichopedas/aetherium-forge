@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Native interop (DXGI) through LibraryImport / GeneratedComInterface. The only project that allows unsafe code
+       (IMPLEMENTATION_GUIDE §4.2), so Core stays free of it. -->
+  <PropertyGroup>
+    <RootNamespace>AetheriumForge.Native</RootNamespace>
+    <AssemblyName>AetheriumForge.Native</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AetheriumForge.Core\AetheriumForge.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AetheriumForge.Core.Tests" />
+  </ItemGroup>
+
+</Project>

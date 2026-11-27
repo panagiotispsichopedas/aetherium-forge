@@ -17,6 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\AetheriumForge.Core\AetheriumForge.Core.csproj" />
     <ProjectReference Include="..\..\src\AetheriumForge.Cli\AetheriumForge.Cli.csproj" />
+    <ProjectReference Include="..\..\src\AetheriumForge.Native\AetheriumForge.Native.csproj" />
   </ItemGroup>
 
   <ItemGroup>
